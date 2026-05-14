@@ -212,6 +212,97 @@ def emit_partial(slot, status, error_text='', metrics=None, is_status=None,
     }
     print('[partial] ' + json.dumps(payload, ensure_ascii=False), flush=True)
 
+def toggle_tutorial_checkbox(page):
+    # WQB 시뮬 페이지의 'Tutorial / Results' 체크박스 처리.
+    # Tutorial 켜져 있으면 OFF, Results 꺼져 있으면 ON. 이 상태가 풀려야 Simulate 버튼이
+    # --disabled-example 잠금에서 풀린다. _click_show_test_results 안의 동일 로직이지만
+    # 세션 시작 직후 (login 후 / 시뮬 시도 전) 한번 실행되도록 분리.
+    try:
+        ti = page.evaluate(r'''() => {
+            const out = {tutorial_unchecked: false, results_checked: false,
+                         tutorial_already_off: false, results_already_on: false,
+                         debug_labels: []};
+            const cbs = new Set([
+                ...document.querySelectorAll('input[type="checkbox"]'),
+                ...document.querySelectorAll('[role="checkbox"], [role="switch"]'),
+                ...document.querySelectorAll('[class*="checkbox" i]:not(label):not(div[class*="container"])'),
+                ...document.querySelectorAll('[aria-checked]'),
+            ]);
+            function getLabel(cb) {
+                if (cb.id) {
+                    const lbl = document.querySelector(`label[for="${cb.id}"]`);
+                    if (lbl) return (lbl.innerText || lbl.textContent || '').trim();
+                }
+                let p = cb.parentElement;
+                for (let i = 0; i < 3 && p; i++) {
+                    if (p.tagName === 'LABEL') return (p.innerText || p.textContent || '').trim();
+                    p = p.parentElement;
+                }
+                const sibs = [cb.nextElementSibling, cb.previousElementSibling];
+                for (const s of sibs) {
+                    if (s) {
+                        const t = (s.innerText || s.textContent || '').trim();
+                        if (t && t.length < 50) return t;
+                    }
+                }
+                if (cb.parentElement) {
+                    const t = (cb.parentElement.innerText || cb.parentElement.textContent || '').trim();
+                    if (t && t.length < 50) return t;
+                }
+                return (cb.getAttribute('aria-label') || cb.getAttribute('title') || '').trim();
+            }
+            function isChecked(cb) {
+                if (cb.tagName === 'INPUT' && cb.type === 'checkbox') return cb.checked;
+                const ac = cb.getAttribute('aria-checked');
+                if (ac === 'true') return true;
+                if (ac === 'false') return false;
+                if (/(^|\s)(checked|active|selected|on)(\s|$)/i.test(cb.className || '')) return true;
+                return false;
+            }
+            function clickIt(cb) {
+                try { cb.click(); } catch(e) {}
+                try { cb.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})); } catch(e) {}
+                try { cb.dispatchEvent(new Event('change', {bubbles: true})); } catch(e) {}
+                let p = cb.parentElement;
+                for (let i = 0; i < 2 && p; i++) {
+                    if (p.tagName === 'LABEL' || /(^|\s)label(\s|$)/i.test(p.className||'')) {
+                        try { p.click(); } catch(e) {}
+                        break;
+                    }
+                    p = p.parentElement;
+                }
+            }
+            for (const cb of cbs) {
+                if (cb.offsetParent === null && cb.type !== 'checkbox') continue;
+                const label = getLabel(cb);
+                if (!label) continue;
+                out.debug_labels.push(label.slice(0, 30));
+                const checked = isChecked(cb);
+                if (/\btutorial\b/i.test(label)) {
+                    if (checked) { clickIt(cb); out.tutorial_unchecked = true; }
+                    else { out.tutorial_already_off = true; }
+                }
+                if (/^results?\b/i.test(label) || /\btest\s*results?\b/i.test(label)) {
+                    if (!checked) { clickIt(cb); out.results_checked = true; }
+                    else { out.results_already_on = true; }
+                }
+            }
+            return out;
+        }''')
+        if (ti.get('tutorial_unchecked') or ti.get('results_checked')
+                or ti.get('tutorial_already_off') or ti.get('results_already_on')):
+            log(f'toggle_tutorial_checkbox: tut_off={ti.get("tutorial_unchecked")} '
+                f'(was_off={ti.get("tutorial_already_off")}) results_on={ti.get("results_checked")} '
+                f'(was_on={ti.get("results_already_on")})')
+        else:
+            log(f'toggle_tutorial_checkbox: NO Tutorial/Results checkbox found. '
+                f'labels_seen={ti.get("debug_labels",[])[:20]}')
+        return ti
+    except Exception as e:
+        log(f'toggle_tutorial_checkbox exception: {e}')
+        return {}
+
+
 def js_dismiss_introjs(page):
     # WQB 신규/잠긴 계정에서 'intro-step-N' 으로 Simulate 버튼이 disabled-example 상태로
     # 잠기는 경우 — 이 상태에서는 클릭/Ctrl+Enter/nudge 모두 React state 를 못 풀어 sim 시작 불가.
@@ -2196,6 +2287,14 @@ try:
         page.wait_for_timeout(500)
         js_dismiss_introjs(page)
         page.wait_for_timeout(500)
+        # WQB 'Tutorial / Results' 체크박스 토글 — Tutorial OFF / Results ON.
+        # 이 체크박스 상태가 풀려야 Simulate 버튼이 --disabled-example 잠금에서 풀린다.
+        # (사용자가 명시한 매뉴얼 동작: 'Tutorial 체크박스 해제 후 Result 체크박스 체크')
+        # 한번에 안 풀릴 수 있어 setting + UI 안정 후 1회 더.
+        toggle_tutorial_checkbox(page)
+        page.wait_for_timeout(800)
+        toggle_tutorial_checkbox(page)
+        page.wait_for_timeout(500)
 
         # 시뮬 인터페이스가 로드될 때까지 짧게 polling — 빈 페이지 (탭 0 개) 일 때 안전.
         # 시뮬 탭이 적어도 1개 보이거나, '+' 버튼이 보일 때까지 최대 10초 대기.
@@ -2846,7 +2945,9 @@ def simulate_batch(
                       'alt_panel_trigger', 'early_quit', 'trivial_quit',
                       'metrics_under',
                       'menu_candidates', 'trigger_outer',
-                      'apply_settings', 'step:')
+                      'apply_settings', 'step:',
+                      'toggle_tutorial_checkbox', 'init_script:',
+                      'js_dismiss_introjs', 'js_dismiss_overlays')
 
     def _reader(stream, buf, is_err: bool):
         # 라인 buffer 로만 모음 — UI 로그가 [pw]/[pw err] 트레이스로 도배되는 걸 막기 위해
