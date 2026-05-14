@@ -2125,6 +2125,38 @@ try:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(20000)
 
+        # 모든 navigation 직전에 intro.js 를 중성화 — WQB 가 onboarding 띄울 때
+        # introJs() 객체의 메서드들이 다 no-op 이라 tutorial DOM 자체가 안 그려진다.
+        # 이미 그려진 페이지에는 효과 없으므로 js_dismiss_introjs 도 병행.
+        try:
+            ctx.add_init_script(r'''
+                (function() {
+                    function makeNoopJs() {
+                        const inst = {};
+                        const noop = function() { return inst; };
+                        const methods = ['start','exit','refresh','setOption','setOptions',
+                            'goToStep','goToStepNumber','nextStep','previousStep',
+                            'onbeforechange','onchange','onafterchange','oncomplete',
+                            'onexit','onbeforeexit','onhintclick','onhintsadded',
+                            'onhintclose','addHints','hideHint','hideHints','showHint',
+                            'showHints','removeHints','clone','introJs'];
+                        methods.forEach(function(m) { inst[m] = noop; });
+                        return inst;
+                    }
+                    try {
+                        Object.defineProperty(window, 'introJs', {
+                            configurable: true, writable: false,
+                            value: function() { return makeNoopJs(); }
+                        });
+                    } catch(e) {
+                        try { window.introJs = function() { return makeNoopJs(); }; } catch(e2) {}
+                    }
+                })();
+            ''')
+            log('init_script: introJs neutralized')
+        except Exception as e:
+            log(f'init_script intro neutralize fail: {e}')
+
         log(f'navigate to {SIMULATE_URL}')
         try:
             page.goto(SIMULATE_URL, wait_until='domcontentloaded', timeout=30000)
@@ -2767,14 +2799,34 @@ def simulate_batch(
     env['TMPDIR'] = tmp
     env['XDG_RUNTIME_DIR'] = env.get('XDG_RUNTIME_DIR') or tmp
 
+    # 스크립트가 Linux MAX_ARG_STRLEN (4096*32 = 131072 bytes) 를 넘기 시작해서
+    # `python -c <script>` 호출이 E2BIG 으로 실패함. 임시 파일에 쓰고 path 로 호출.
+    # mode 0o600 으로 권한 좁힘 (다른 user 가 read 못 하게 — credentials 는 env 로만 들어가지만
+    # 스크립트 자체에 prompt cache 같은 민감 정보가 없어도 보수적으로 락).
+    import tempfile as _tempfile
+    try:
+        with _tempfile.NamedTemporaryFile(
+                mode='w', dir=tmp, prefix='wqb_pw_', suffix='.py',
+                delete=False, encoding='utf-8') as _sf:
+            _sf.write(script)
+            script_path = _sf.name
+        try:
+            os.chmod(script_path, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        return _failed_batch(strategies, f'subprocess_spawn: write script tempfile: {e}')
+
     started = time.time()
     try:
         proc = subprocess.Popen(
-            [IQC_PYTHON, '-c', script],
+            [IQC_PYTHON, script_path],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, start_new_session=True,
         )
     except Exception as e:
+        try: os.unlink(script_path)
+        except Exception: pass
         return _failed_batch(strategies, f'subprocess_spawn: {e}')
 
     if proc_holder is not None:
@@ -2855,6 +2907,8 @@ def simulate_batch(
         t_err.join(timeout=2)
         if proc_holder is not None:
             proc_holder['proc'] = None
+        try: os.unlink(script_path)
+        except Exception: pass
         return _failed_batch(strategies, f'playwright_setup timeout after {batch_timeout_sec}s')
 
     t_out.join(timeout=3)
@@ -2863,6 +2917,8 @@ def simulate_batch(
     stderr = ''.join(stderr_buf)
     if proc_holder is not None:
         proc_holder['proc'] = None
+    try: os.unlink(script_path)
+    except Exception: pass
 
     elapsed = int(time.time() - started)
 
