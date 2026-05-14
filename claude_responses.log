@@ -1,0 +1,56 @@
+
+2026-05-11 00:19 — ✅ 3-part 기능 구현 완료 (서버 PID 3124714)
+  
+  1️⃣ PASS=7 Submit거절 → correlation 회피 sub-round
+     - worker.py: PASS=7+rejected (재스크랩 후 FAIL=1 또는 fallback FAIL=0) 도 focus 큐 추가
+     - focus_kind='correlation' 마커 + self_corr_value 필드 추가
+     - 큐 entry 에 부모 코드/제출된 알파 코드 포함 → Gemini 에게 직교화 가이드
+  
+  2️⃣ 캐시히트 감소 — 다양성 부스트 강화
+     - base_temp 0.85 → 0.90
+     - temp 부스트 임계값 하향: 0.05+ → 0.98, 0.15+ → 1.05, 0.3+ → 1.15, 0.5+ → 1.25 (기존 0.3+ 부터 시작)
+     - 새 _build_challenging_section() — 도전적 archetype 강제 (anl4/fnd6/news/soc, 다중 신호 결합, 비전통 archetype)
+  
+  3️⃣ Submit 거절 시 PASS=7 FAIL=1 재스크랩 + correlation 값 로그
+     - wqb_browser.py: _try_submit_alpha 반환 'rejected:*' 시 1.5s wait → _scrape_is_testing_status 재호출
+     - 재스크랩 결과 (Self-Correlation 0.9415 > 0.7) 가 is_status['fail'] 에 들어감
+     - _format_alpha_result 가 '🚫 SUBMIT 거절 (7 PASS / 1 FAIL) ... ✗ Self-correlation(0.9415>0.7) 📝 ...' 한 줄에 표시
+     - SEQ + 병렬 모드 모두 처리
+
+  검증:
+  - 모듈 import OK
+  - _build_focused_prompt(focus_kind='correlation') 정상 생성 (1618자)
+  - _extract_self_corr_value() — 'Self-correlation of 0.9415...' 패턴에서 0.9415 추출 OK
+  - _format_alpha_result(submit_status='rejected:...') — 🚫 표기 + correlation 값 + 사유 노출
+  - E2E 분류 테스트 6 케이스 (PASS=6/7 + cached/submitted/rejected) 모두 의도대로 분류
+  - 서버 정상 동작 (포트 8088, API 응답 200)
+
+──────────────────────────────────────────────────────────────────────
+2026-05-11 08:19 — Submit 거절 흐름 디버그 (no_response_modal_less / Self-Correlation 값 노출) — 서버 PID 3498815
+
+문제: ① PASS=7 알파 Submit → no_response_modal_less 로 끝남 (실제로는 Pending 항목이
+       Fail 로 바뀌며 correlation 값 노출됨). ② 그 correlation 값이 로그에 안 나옴.
+
+원인 분석:
+  - WQB 의 self-correlation 검사는 Submit 클릭 후 서버에서 수초~3분 소요 → 기존 60s
+    폴링 윈도우 안에 PENDING→FAIL 전환을 못 잡고 보수적 fail 처리.
+  - _scrape_is_testing_status 가 "X of Y is above cutoff of Z" 정형만 value 추출 →
+    "...is 0.94, above the maximum of 0.7" 류 / 250자 초과 라인은 value 누락.
+  - WQB 의 Submit confirm dialog 가 detector 미매칭 class 일 가능성 (modal-less 오판).
+
+수정 (server/wqb_browser.py):
+  - _try_submit_alpha: ① modal-less 시 페이지 전역 confirm 버튼 sweep (작은 dialog/popup
+    컨테이너 한정) ② 폴링 60s→150s (2초×75) + 30s 마다 진단 로그 (버튼/토스트/PENDING 상태)
+    ③ IS 패널 FAIL 등장 시 self-corr 실측값/cutoff 추출해 reject 사유에 포함
+    ④ toast/body 정규식에 self-corr 값 추출(grabCorr) 추가, modal selector 에 [aria-modal] 등 보강.
+  - _scrape_is_testing_status: self-correlation 라인은 줄 어디든 매치 + 소수 숫자 2개를
+    value/cutoff 로 추출, 250자 초과여도 self-corr 면 잘라서 처리. Sub-universe Sharpe fallback 도 값 추출.
+  - 신규 _rescrape_submit_outcome(): Submit 후 IS 패널 재시도 폴링(8회×5s) — PASS=8 이면
+    'submitted' 로 정정 / FAIL·ERROR 면 'reject'(+self-corr 값, is_selfcorr 플래그). SEQ·병렬 양쪽 적용.
+
+수정 (server/worker.py):
+  - 라운드 끝 요약: self-corr 거절은 is_status 에 FAIL 1개 들어가도 "PASS≥7 best" 로 계속
+    인정 (only_selfcorr_fail). 🏆 라인에 ⛔ 제출 거절(사유 48자) 노출.
+
+검증: outer py_compile OK / 서브프로세스 inner ast.parse OK / self-corr 라인 파싱 5변형 모두 통과.
+모니터: task b275n8rvb (persistent) — logs/server.log 의 ROUND/submit/focus/self-corr/error 신호 추적.

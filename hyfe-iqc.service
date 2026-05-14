@@ -1,0 +1,32 @@
+# systemd 유닛 — sudo 로 /etc/systemd/system/hyfe-iqc.service 에 복사 후 enable.
+# 또는 user 모드: ~/.config/systemd/user/hyfe-iqc.service 에 두고 systemctl --user enable hyfe-iqc.
+
+[Unit]
+Description=HYFE IQC — WQB Alpha Auto-Discovery Web App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/projects/HYFE_IQC
+ExecStart=/usr/bin/python3 -m server.app
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+# 외부 접근 정책 — Cloudflare Tunnel 만 사용하면 127.0.0.1 (가장 안전).
+# 직접 LAN/공인 IP 로 다중 사용자에게 공개하려면 0.0.0.0 (방화벽/SG 로 제한 권장).
+Environment=HYFE_IQC_HOST=127.0.0.1
+Environment=HYFE_IQC_PORT=8088
+Environment=IQC_PY=/usr/bin/python3.11
+# Cloudflare Tunnel / nginx 등 HTTPS reverse proxy 뒤에 띄울 때 권장.
+# Environment=HYFE_IQC_COOKIE_SECURE=1
+# Environment=HYFE_IQC_COOKIE_SAMESITE=Lax
+# 자격증명 암호화 키. 미설정 시 data/.fernet.key 자동 생성.
+# Environment=HYFE_IQC_FERNET_KEY=...
+StandardOutput=append:/home/opc/projects/HYFE_IQC/logs/server.log
+StandardError=append:/home/opc/projects/HYFE_IQC/logs/server.log
+
+[Install]
+WantedBy=multi-user.target

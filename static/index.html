@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HYFE IQC — WQB Alpha Auto-Discovery</title>
+  <link rel="stylesheet" href="/style.css?v=5-status" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">HYFE <span class="accent">IQC</span></div>
+    <div class="user-info" id="user-info" hidden>
+      <span id="user-name"></span>
+      <button id="btn-logout" class="btn-link">로그아웃</button>
+    </div>
+  </header>
+
+  <!-- ── 로그인 화면 ── -->
+  <main id="screen-login" class="screen">
+    <div class="card">
+      <h1>로그인</h1>
+      <p class="subtitle">WQB 자격증명과 Gemini API 키를 입력하면 두 가지 모두 검증한 뒤 다음 화면으로 이동합니다.</p>
+      <form id="form-login" autocomplete="off">
+        <label>WQB 이메일
+          <input type="email" id="wqb_username" required placeholder="example@domain.com" />
+        </label>
+        <label>WQB 비밀번호
+          <input type="password" id="wqb_password" required placeholder="••••••••" />
+        </label>
+        <label>Gemini API 키
+          <input type="text" id="gemini_api_key" required placeholder="AIzaSy..." />
+          <small>Google AI Studio (<a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a>) 에서 발급한 키.</small>
+        </label>
+        <label class="toggle inline-toggle">
+          <span>기기에서 자동 로그인 (7일)</span>
+          <input type="checkbox" id="remember_device" checked />
+        </label>
+        <button type="submit" id="btn-login">로그인 검증 시작</button>
+      </form>
+      <div id="login-status" class="status" aria-live="polite"></div>
+      <button type="button" id="btn-go-dashboard" class="btn-go-dashboard" hidden>검증 성공! 대시보드로 이동하기 »</button>
+    </div>
+  </main>
+
+  <!-- ── 대시보드 화면 ── -->
+  <main id="screen-dashboard" class="screen" hidden>
+    <section class="control-row">
+      <div class="status-block">
+        <div class="kv"><span class="k">상태:</span> <span class="v" id="state-text">idle</span></div>
+        <div class="kv"><span class="k">현재 라운드:</span> <span class="v" id="state-round">—</span></div>
+        <div class="kv"><span class="k">완료 라운드:</span> <span class="v" id="state-completed">0</span></div>
+        <div class="kv"><span class="k">누적 오류 패턴:</span> <span class="v" id="state-errors">0</span></div>
+      </div>
+      <div class="buttons">
+        <button id="btn-start" class="btn-primary">실행</button>
+        <button id="btn-pause" class="btn-secondary" disabled>일시정지</button>
+      </div>
+    </section>
+
+    <section class="log-section">
+      <div class="log-header">
+        <h2>실시간 로그</h2>
+        <div class="log-tools">
+          <label class="toggle"><input type="checkbox" id="autoscroll" checked /> 자동 스크롤</label>
+          <button id="btn-clear-log" class="btn-link">화면 비우기</button>
+        </div>
+      </div>
+      <pre id="log-pane" class="log-pane" tabindex="0"></pre>
+    </section>
+
+    <section class="best-section">
+      <h2>🚀 알파 제출 시도</h2>
+      <table id="best-table">
+        <thead><tr><th>R</th><th>#</th><th>PASS</th><th>코드</th><th>설명</th><th>상태</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-msg" id="best-empty">아직 제출 시도된 알파가 없습니다.</div>
+    </section>
+  </main>
+
+  <script src="/app.js?v=9-status" defer></script>
+</body>
+</html>

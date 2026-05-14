@@ -1,0 +1,17 @@
+# 데이터 + 자격증명 키 — 절대 커밋 금지.
+/data/
+/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>HYFE IQC</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e9ee;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+    }
+    header.topbar {
+      padding: 14px 18px;
+      display: flex; align-items: center; justify-content: space-between;
+      background: linear-gradient(180deg, #161922 0%, #11141b 100%);
+      border-bottom: 1px solid #1f2330;
+    }
+    header .brand { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
+    header .brand .accent { color: #5fa8ff; }
+    header .who { font-size: 12px; color: #93a0b5; }
+    header .btn-logout {
+      background: none; border: 1px solid #2a3142; color: #9aa6bb;
+      border-radius: 6px; padding: 4px 10px; font-size: 12px;
+    }
+    main { flex: 1; padding: 16px; }
+
+    /* 로그인 카드 */
+    .login-card {
+      max-width: 420px; margin: 24px auto;
+      background: #161922;
+      border: 1px solid #232838;
+      border-radius: 14px;
+      padding: 22px 18px 18px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+    }
+    .login-card h1 { font-size: 22px; margin: 0 0 6px; }
+    .login-card .sub { color: #9aa6bb; font-size: 13px; margin-bottom: 18px; }
+    .login-card label {
+      display: block; font-size: 13px; color: #b6c0d3;
+      margin-top: 12px;
+    }
+    .login-card input {
+      width: 100%; margin-top: 4px;
+      background: #0f1218; color: #e6e9ee;
+      border: 1px solid #2a3142; border-radius: 8px;
+      padding: 12px 12px;
+      font-size: 16px;     /* iOS zoom 방지 */
+    }
+    .login-card input:focus { outline: 2px solid #2f78d6; border-color: transparent; }
+    .login-card button[type=submit] {
+      margin-top: 18px; width: 100%;
+      background: #2f78d6; color: white; border: none;
+      border-radius: 10px; padding: 14px;
+      font-size: 16px; font-weight: 600;
+    }
+    .login-card button:disabled { opacity: 0.5; }
+    .login-card .err {
+      margin-top: 12px; padding: 10px 12px;
+      border-radius: 8px; font-size: 13px;
+      background: #2a1a1f; color: #ff8d97; border: 1px solid #4d2730;
+    }
+    .login-card .err:empty { display: none; }
+    .login-card .full-link {
+      display: block; margin-top: 16px; padding: 12px 14px;
+      text-align: center; font-size: 14px; font-weight: 600;
+      color: #e6e9ee; background: #2a3142; border: 1px solid #3a4259;
+      border-radius: 10px; text-decoration: none;
+    }
+    .login-card .full-link:active { background: #20263a; }
+    .desktop-btn-row {
+      margin: 18px 0 6px; padding: 14px 12px;
+      background: #1a2030; border: 1px solid #2c3550; border-radius: 10px;
+      text-align: center;
+    }
+    .desktop-btn-row a {
+      display: inline-block; padding: 10px 18px;
+      background: #2f78d6; color: #fff; font-weight: 700; font-size: 14px;
+      border-radius: 8px; text-decoration: none;
+    }
+    .desktop-btn-row a:active { background: #2563b3; }
+    .desktop-btn-row .desktop-hint {
+      display: block; margin-top: 8px; color: #93a0b5; font-size: 11px;
+    }
+
+    /* 상태 카드 */
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      max-width: 540px; margin: 0 auto;
+    }
+    .stat {
+      background: #161922;
+      border: 1px solid #232838;
+      border-radius: 12px;
+      padding: 18px 16px;
+      min-height: 92px;
+      display: flex; flex-direction: column; justify-content: space-between;
+    }
+    .stat .label {
+      font-size: 12px; color: #93a0b5; text-transform: uppercase; letter-spacing: 0.6px;
+    }
+    .stat .value {
+      font-size: 28px; font-weight: 700; margin-top: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat .sub { font-size: 11px; color: #6f7c91; margin-top: 4px; }
+
+    .stat.submitted { border-color: #2c5331; background: linear-gradient(180deg, #142a18 0%, #161922 80%); }
+    .stat.submitted .value { color: #6dde85; }
+    .stat.unsubmitted { border-color: #5a3722; background: linear-gradient(180deg, #2a1a12 0%, #161922 80%); }
+    .stat.unsubmitted .value { color: #f0a06f; }
+    .stat.errors .value { color: #f0a06f; }
+    .stat.current .value { color: #5fa8ff; }
+
+    .running-tag {
+      display: inline-block; margin-left: 6px;
+      padding: 1px 8px; font-size: 10px;
+      border-radius: 999px;
+      background: #1d3a26; color: #6dde85;
+      vertical-align: middle;
+    }
+    .running-tag.idle { background: #2a2f3d; color: #93a0b5; }
+    .running-tag.paused { background: #3d2c1d; color: #f0a06f; }
+
+    .updated-row {
+      max-width: 540px; margin: 12px auto 0;
+      text-align: right; font-size: 11px; color: #6f7c91;
+    }
+
+    .footnote {
+      max-width: 540px; margin: 18px auto 0;
+      font-size: 11px; color: #6f7c91; line-height: 1.5;
+      text-align: center;
+    }
+    .footnote a { color: #7892b8; }
+
+    @media (min-width: 600px) {
+      .status-grid { grid-template-columns: repeat(4, 1fr); }
+    }
+
+    /* 제어 버튼 (시작 / 일시정지) */
+    .control-row {
+      max-width: 540px; margin: 0 auto 14px;
+      display: flex; gap: 10px;
+    }
+    .btn-ctrl {
+      flex: 1; padding: 14px;
+      border-radius: 10px; border: none;
+      font-size: 15px; font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .btn-ctrl:disabled { opacity: 0.45; }
+    .btn-start { background: #2f78d6; color: white; }
+    .btn-start:active:not(:disabled) { background: #2563b3; }
+    .btn-pause { background: #2a3142; color: #c8d2e3; border: 1px solid #394157; }
+    .btn-pause:active:not(:disabled) { background: #20263a; }
+
+    /* 최근 알파 테이블 */
+    .recent-section {
+      max-width: 540px; margin: 24px auto 0;
+    }
+    .recent-section h3 {
+      margin: 0 0 8px; font-size: 13px; color: #93a0b5;
+      text-transform: uppercase; letter-spacing: 0.6px;
+    }
+    #recent-table {
+      width: 100%; border-collapse: collapse;
+      background: #161922; border: 1px solid #232838; border-radius: 10px;
+      overflow: hidden; font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    #recent-table thead { background: #1d2230; }
+    #recent-table th, #recent-table td {
+      padding: 8px 6px; text-align: center;
+      border-bottom: 1px solid #1f2330;
+    }
+    #recent-table th { color: #93a0b5; font-weight: 600; font-size: 11px; }
+    #recent-table tbody tr:last-child td { border-bottom: none; }
+    .c-pass { color: #6dde85; }
+    .c-fail { color: #ff8d97; }
+    .c-err  { color: #f0a06f; }
+    .c-pend { color: #93a0b5; }
+    .badge-mini {
+      display: inline-block; padding: 1px 7px;
+      border-radius: 999px; font-size: 10px; font-weight: 600;
+    }
+    .badge-mini.sub  { background: #163b1c; color: #6dde85; border: 1px solid #2c5331; }
+    .badge-mini.rej  { background: #3a2519; color: #f0a06f; border: 1px solid #5a3722; }
+    .badge-mini.errt { background: #2a1a1f; color: #ff8d97; border: 1px solid #4d2730; }
+    .badge-mini.dot     { background: #2a3142; color: #93a0b5; border: 1px solid #394157; }
+    .badge-mini.partial { background: #3a2f19; color: #f5d97f; border: 1px solid #5a4a22; }
+    #recent-table tr.row-partial { background: rgba(245, 217, 127, 0.04); }
+    .recent-empty {
+      padding: 14px; text-align: center; color: #6f7c91; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">HYFE <span class="accent">IQC</span></div>
+    <div id="user-row" hidden>
+      <span class="who" id="user-name"></span>
+      <button class="btn-logout" id="btn-logout" type="button">로그아웃</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ── 로그인 ── -->
+    <section id="screen-login" class="login-card">
+      <h1>로그인</h1>
+      <div class="sub">WQB 아이디 + 비밀번호로 진행 상황만 확인합니다.</div>
+      <form id="form-login" autocomplete="on">
+        <label>WQB 이메일
+          <input type="email" id="username" autocomplete="username" required />
+        </label>
+        <label>WQB 비밀번호
+          <input type="password" id="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" id="btn-submit">접속</button>
+        <div id="err" class="err"></div>
+        <a href="/?desktop=1" class="full-link">🖥 데스크톱 버전으로 보기</a>
+      </form>
+    </section>
+
+    <!-- ── 진행 상황 ── -->
+    <section id="screen-status" hidden>
+      <div class="control-row">
+        <button id="btn-start" class="btn-ctrl btn-start">▶ 실행</button>
+        <button id="btn-pause" class="btn-ctrl btn-pause" disabled>⏸ 일시정지</button>
+      </div>
+      <div class="status-grid">
+        <div class="stat current">
+          <div class="label">현재 라운드 <span id="run-tag" class="running-tag idle">idle</span></div>
+          <div class="value" id="cur-round">—</div>
+          <div class="sub" id="cur-status"></div>
+        </div>
+        <div class="stat">
+          <div class="label">완료 라운드</div>
+          <div class="value" id="completed-round">0</div>
+        </div>
+        <div class="stat submitted">
+          <div class="label">Submitted</div>
+          <div class="value" id="submitted-count">0</div>
+          <div class="sub">제출 성공</div>
+        </div>
+        <div class="stat unsubmitted">
+          <div class="label">Unsubmitted</div>
+          <div class="value" id="unsubmitted-count">0</div>
+          <div class="sub">제출 거절됨</div>
+        </div>
+      </div>
+      <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
+
+      <section class="recent-section">
+        <h3>최근 알파</h3>
+        <table id="recent-table">
+          <thead>
+            <tr>
+              <th>R/#</th>
+              <th class="c-pass">PASS</th>
+              <th class="c-fail">FAIL</th>
+              <th class="c-err">ERR</th>
+              <th class="c-pend">PEND</th>
+              <th>상태</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="recent-empty" class="recent-empty" hidden>아직 결과가 없습니다.</div>
+      </section>
+
+      <div class="desktop-btn-row">
+        <a href="/?desktop=1">🖥 데스크톱 버전으로 보기</a>
+        <span class="desktop-hint">상세 로그 / 워커 제어 / 모든 알파 보기</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  (() => {
+    const $ = (s) => document.querySelector(s);
+    const screenLogin = $('#screen-login');
+    const screenStatus = $('#screen-status');
+    const userRow = $('#user-row');
+    const userName = $('#user-name');
+    let pollTimer = null;
+
+    function show(loggedIn, who) {
+      screenLogin.hidden = loggedIn;
+      screenStatus.hidden = !loggedIn;
+      userRow.hidden = !loggedIn;
+      if (loggedIn) userName.textContent = who || '';
+    }
+
+    async function api(path, opts = {}) {
+      const init = { credentials: 'same-origin', ...opts };
+      if (init.body && typeof init.body !== 'string') {
+        init.body = JSON.stringify(init.body);
+        init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
+      }
+      try {
+        const r = await fetch(path, init);
+        const data = await r.json().catch(() => ({}));
+        return { ok: r.ok, status: r.status, data };
+      } catch (e) {
+        return { ok: false, status: 0, data: { error: String(e) } };
+      }
+    }
+
+    function fmtRunTag(s) {
+      const tag = $('#run-tag');
+      const running = !!s.running;
+      const alive = !!s.thread_alive;
+      const paused = !!s.paused || !!s.paused_in_memory;
+      tag.classList.remove('idle', 'paused');
+      if (running && alive && !paused) {
+        tag.textContent = '실행 중';
+      } else if (running && paused) {
+        tag.textContent = '일시정지';
+        tag.classList.add('paused');
+      } else if (alive) {
+        tag.textContent = '워커 살아있음';
+      } else {
+        tag.textContent = 'idle';
+        tag.classList.add('idle');
+      }
+    }
+
+    function applyStatus(s) {
+      // focused sub-round 일 때 'N-M' 으로 표기 (예: 137-1).
+      const lbl = s.current_round_label || (s.current_round != null ? String(s.current_round) : null);
+      $('#cur-round').textContent = lbl ? `#${lbl}` : '—';
+      $('#cur-status').textContent = s.current_status || '';
+      $('#completed-round').textContent = String(s.last_round_num || 0);
+      $('#submitted-count').textContent = String(s.submitted_count || 0);
+      $('#unsubmitted-count').textContent = String(s.unsubmitted_count || 0);
+      fmtRunTag(s);
+
+      // 제어 버튼 활성화 — 데스크톱 로직과 동일.
+      const running = !!s.running;
+      const alive = !!s.thread_alive;
+      const paused = !!s.paused || !!s.paused_in_memory;
+      $('#btn-start').disabled = running && alive && !paused;
+      $('#btn-pause').disabled = !alive || paused;
+      const now = new Date();
+      $('#updated-at').textContent = now.toLocaleTimeString('ko-KR', { hour12: false });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    function renderRecent(rows) {
+      const tbody = document.querySelector('#recent-table tbody');
+      const empty = document.querySelector('#recent-empty');
+      tbody.innerHTML = '';
+      if (!rows || rows.length === 0) {
+        empty.hidden = false;
+        document.querySelector('#recent-table').style.display = 'none';
+        return;
+      }
+      empty.hidden = true;
+      document.querySelector('#recent-table').style.display = '';
+      for (const a of rows) {
+        const tr = document.createElement('tr');
+        const p = a.pass_count || 0, f = a.fail_count || 0;
+        const e = a.error_count || 0, pn = a.pending_count || 0;
+        const sum = p + f + e + pn;
+        const isTimeout = (a.error_text || '').length > 0;
+        let badge;
+        if (isTimeout) {
+          badge = `<span class="badge-mini errt" title="${escapeHtml(a.error_text)}">⚠ ERR</span>`;
+        } else if (a.submitted) {
+          badge = '<span class="badge-mini sub">✓ Sub</span>';
+        } else if ((a.submit_status || '').startsWith('rejected:')) {
+          const reason = a.submit_status.slice('rejected:'.length).slice(0, 30);
+          badge = `<span class="badge-mini rej" title="${escapeHtml(reason)}">✗ Rej</span>`;
+        } else if (sum === 0) {
+          // PASS/FAIL/ERROR/PENDING 모두 0 — IS panel 못 받음 (trivial / panel-empty / timeout)
+          badge = '<span class="badge-mini errt" title="IS Tests 결과 미수신">⚠ ERR</span>';
+        } else if (sum > 0 && sum !== 8) {
+          // scrape 누락 — 일부 항목 못 잡은 케이스. 사용자에게 시각적으로 표시.
+          badge = `<span class="badge-mini partial" title="합=${sum} (정상=8)">⚠ 합${sum}</span>`;
+        } else {
+          badge = '<span class="badge-mini dot">—</span>';
+        }
+        const rlabel = a.round_label || String(a.round_num);
+        tr.innerHTML = `
+          <td>R${rlabel}/#${a.idx}</td>
+          <td class="c-pass">${p}</td>
+          <td class="c-fail">${f}</td>
+          <td class="c-err">${e}</td>
+          <td class="c-pend">${pn}</td>
+          <td>${badge}</td>`;
+        if (sum !== 8 && !isTimeout) tr.classList.add('row-partial');
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function refresh() {
+      const r = await api('/api/m_status');
+      if (r.status === 401) {
+        stopPolling();
+        show(false);
+        return;
+      }
+      if (r.ok && r.data && r.data.ok) {
+        applyStatus(r.data);
+      }
+      try {
+        const r2 = await api('/api/m_recent?limit=5');
+        if (r2.ok && r2.data && r2.data.ok) {
+          renderRecent(r2.data.alphas || []);
+        }
+      } catch (_) {}
+    }
+
+    function startPolling() {
+      stopPolling();
+      refresh();
+      pollTimer = setInterval(refresh, 5000);
+    }
+    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    $('#form-login').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#btn-submit');
+      const err = $('#err');
+      err.textContent = '';
+      btn.disabled = true; btn.textContent = '접속 중…';
+      const u = $('#username').value.trim();
+      const p = $('#password').value;
+      const r = await api('/api/m_login', { method: 'POST', body: { wqb_username: u, wqb_password: p } });
+      btn.disabled = false; btn.textContent = '접속';
+      if (!(r.ok && r.data && r.data.ok)) {
+        const reason = (r.data && (r.data.detail || r.data.reason)) || '로그인 실패';
+        err.textContent = reason;
+        return;
+      }
+      show(true, r.data.wqb_username || u);
+      startPolling();
+    });
+
+    $('#btn-logout').addEventListener('click', async () => {
+      stopPolling();
+      await api('/api/logout', { method: 'POST' });
+      show(false);
+    });
+
+    $('#btn-start').addEventListener('click', async () => {
+      const b = $('#btn-start'); b.disabled = true;
+      const r = await api('/api/start', { method: 'POST' });
+      if (!(r.ok && r.data && r.data.ok)) {
+        alert('시작 실패: ' + (r.data && r.data.detail || JSON.stringify(r.data)));
+      }
+      refresh();
+    });
+
+    $('#btn-pause').addEventListener('click', async () => {
+      const b = $('#btn-pause'); b.disabled = true;
+      const r = await api('/api/pause', { method: 'POST' });
+      if (!(r.ok && r.data && r.data.ok)) {
+        alert('일시정지 실패: ' + (r.data && r.data.detail || JSON.stringify(r.data)));
+      }
+      refresh();
+    });
+
+    // 자동 로그인 시도 — 쿠키가 있으면 바로 status 화면.
+    (async () => {
+      const r = await api('/api/me');
+      if (r.ok && r.data && r.data.ok) {
+        show(true, r.data.wqb_username || '');
+        startPolling();
+      } else {
+        show(false);
+      }
+    })();
+  })();
+  </script>
+</body>
+</html>

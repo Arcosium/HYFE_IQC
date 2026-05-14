@@ -1,0 +1,789 @@
+"""사용자별 백그라운드 워커 — IQC 라운드를 무한 루프 실행, pause 즉시 중단.
+
+설계:
+  - 한 user 당 최대 1 thread. WorkerRegistry 가 (user_id → Worker) 보관.
+  - Worker 는 paused 플래그가 set 이면 즉시 종료 (현재 batch 의 subprocess 도 kill).
+  - pause/resume 은 DB 의 users.paused 와 메모리 _paused_event 동기화로 구현.
+  - 라운드 간 1초 딜레이 (브라우저 cooldown).
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import threading
+import time
+import traceback
+import logging
+from typing import Any
+
+from . import db as _db
+from . import result_cache
+from . import gemini_strategist
+from . import wqb_browser
+
+LOG = logging.getLogger('hyfe.worker')
+
+# PASS_THRESHOLD — 한 알파의 통과 항목 수 임계값. WQB 의 IS Testing 항목 수는
+# 사용자 tier 에 따라 다름 (보통 6-11). 우리가 추출 가능한 metric 은 6개 (Sharpe/
+# Fitness/Returns/Turnover/Drawdown/Margin) 라 실 max 는 6. 환경변수로 override.
+PASS_THRESHOLD = int(os.environ.get('HYFE_IQC_PASS_THRESHOLD', '7'))
+
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY: dict[int, 'Worker'] = {}
+
+
+def get_or_create(user_id: int) -> 'Worker':
+    with _REGISTRY_LOCK:
+        w = _REGISTRY.get(user_id)
+        if w is not None and w.is_alive():
+            return w
+        w = Worker(user_id)
+        _REGISTRY[user_id] = w
+        return w
+
+
+def get(user_id: int) -> 'Worker | None':
+    with _REGISTRY_LOCK:
+        return _REGISTRY.get(user_id)
+
+
+def cleanup_dead() -> None:
+    with _REGISTRY_LOCK:
+        dead = [uid for uid, w in _REGISTRY.items() if not w.is_alive()]
+        for uid in dead:
+            _REGISTRY.pop(uid, None)
+
+
+class Worker(threading.Thread):
+    """user_id 별 IQC 라운드 무한 실행."""
+
+    def __init__(self, user_id: int):
+        super().__init__(daemon=True, name=f'hyfe-worker-{user_id}')
+        self.user_id = user_id
+        self._stop_event = threading.Event()         # pause/stop 신호
+        self._batch_proc_holder: dict[str, Any] = {} # 현재 배치 subprocess 보관
+        self._lock = threading.Lock()
+        # PASS 알파 (IS Testing Status PASS≥7 AND FAIL=0) 는 그 자리에서 'Submit Alpha'
+        # 버튼 활성화를 확인하고, 활성화되어 있으면 클릭해서 알파를 제출한다.
+
+    # ── 외부 제어 ─────────────────────────────────────────────
+    def request_pause(self) -> None:
+        """pause 요청. 현재 진행 중인 batch 가 있으면 subprocess 도 즉시 kill."""
+        self._stop_event.set()
+        with self._lock:
+            proc = self._batch_proc_holder.get('proc')
+        if proc is not None:
+            try:
+                # 새 프로세스 그룹으로 띄웠으므로 그룹 전체 SIGKILL.
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        _db.set_user_running(self.user_id, running=True, paused=True)
+
+    def request_resume(self) -> None:
+        """일시정지 해제 — Worker 가 종료된 상태일 수 있으므로 새 인스턴스로 시작 필요.
+        호출자(routes 의 /start)가 get_or_create 후 .start() 다시 호출."""
+        self._stop_event.clear()
+        with self._lock:
+            self._batch_proc_holder['proc'] = None
+        _db.set_user_running(self.user_id, running=True, paused=False)
+
+    def is_paused(self) -> bool:
+        return self._stop_event.is_set()
+
+    # ── 메인 루프 ─────────────────────────────────────────────
+    def run(self) -> None:
+        try:
+            self._main_loop()
+        finally:
+            _db.set_user_running(self.user_id, running=False, paused=False)
+            with _REGISTRY_LOCK:
+                if _REGISTRY.get(self.user_id) is self:
+                    _REGISTRY.pop(self.user_id, None)
+
+    def _main_loop(self) -> None:
+        _db.set_user_running(self.user_id, running=True, paused=False)
+        while not self._stop_event.is_set():
+            try:
+                self._run_one_round()
+            except Exception as e:
+                LOG.exception('worker round exception')
+                self._log(0, f'⚠ 워커 라운드 예외: {e}')
+                # 잠시 쉬고 다음 라운드.
+                if self._stop_event.wait(timeout=10):
+                    break
+                continue
+            # 라운드 간 짧은 cooldown.
+            if self._stop_event.wait(timeout=1.5):
+                break
+
+    # ── 단일 라운드 ───────────────────────────────────────────
+    def _run_one_round(self) -> None:
+        if self._stop_event.is_set():
+            return
+        creds = _db.get_user_credentials(self.user_id)
+        if not creds:
+            self._log(0, '⚠ 자격증명 조회 실패 (user 가 삭제됐을 수 있음) — 워커 종료')
+            self._stop_event.set()
+            return
+        username, password, api_key = creds
+
+        u = _db.get_user(self.user_id)
+        # focus 큐 우선 — PASS=6 알파에 대한 sub-round 가 대기중이면 그것을 먼저 실행.
+        focus_queue = _db.get_focus_queue(self.user_id)
+        focus_entry = focus_queue[0] if focus_queue else None
+        is_focus = bool(focus_entry)
+
+        if is_focus:
+            round_num = int(focus_entry.get('parent_round_num') or 0)
+            phase = int(focus_entry.get('phase') or 1)
+            parent_idx = int(focus_entry.get('parent_idx') or 0)
+            fail_desc = str(focus_entry.get('fail_desc') or '')
+            parent_code = str(focus_entry.get('parent_code') or '')
+            parent_desc = str(focus_entry.get('parent_desc') or '')
+            parent_pass_items = list(focus_entry.get('parent_pass_items') or [])
+            parent_fail_items = list(focus_entry.get('parent_fail_items') or [])
+            focus_kind = str(focus_entry.get('focus_kind') or 'fail')
+            self_corr_value = str(focus_entry.get('self_corr_value') or '')
+            round_id = _db.start_round(
+                self.user_id, round_num,
+                phase=phase, parent_idx=parent_idx, focus_fail=fail_desc,
+            )
+            kind_tag = '🚫 corr 회피' if focus_kind == 'correlation' else '🔧 fail 개선'
+            self._log(round_num,
+                      f'═══ ROUND {round_num}-{phase} 시작 ({kind_tag}, on #{parent_idx}, fix: {fail_desc[:60]}) ═══',
+                      level='round_start')
+        else:
+            round_num = int((u or {}).get('last_round_num') or 0) + 1
+            phase = 0
+            round_id = _db.start_round(self.user_id, round_num)
+            self._log(round_num, f'═══ ROUND {round_num} 시작 ═══', level='round_start')
+            parent_idx = 0
+            fail_desc = ''
+            parent_code = ''
+            parent_desc = ''
+            parent_pass_items = []
+            parent_fail_items = []
+            focus_kind = 'fail'
+            self_corr_value = ''
+
+        feedback = _db.list_feedback(self.user_id)
+        errors = _db.list_error_patterns(self.user_id, limit=100)
+        # 캐시 히트 다수 발생 시 Gemini 가 같은 코드를 또 만들고 있다는 뜻 — 회피 가이드 시드.
+        avoid_codes = _db.list_recent_distinct_codes(limit=80)
+        # 이미 제출된 알파 + Submit 거절/무응답으로 끝난 알파 코드 — Gemini 가
+        # self-correlation 충돌 회피하도록 가이드 & 사전 유사도 필터의 비교 기준.
+        # 거절된 영역(예: 0.94 self-corr)을 다시 만들어봐야 또 거절되므로 미리 피한다.
+        submitted_codes = [a.get('code', '') for a in _db.list_submitted_alphas(self.user_id, limit=30)]
+        submitted_codes += _db.list_rejected_alpha_codes(self.user_id, limit=40)
+        submitted_codes = list(dict.fromkeys(c for c in submitted_codes if c))
+        # 직전 라운드 cache hit ratio — Gemini temperature 부스팅에 활용.
+        prev_cache_ratio = self._prev_cache_hit_ratio()
+        # smilee 정신: 이전 best 알파 → building block, operator/datafield 통계 → preference.
+        try:
+            seeds = _db.best_alphas_for_seeding(self.user_id, top_n=5, min_pass_count=5)
+            pref_stats = _db.operator_preference_stats(self.user_id, lookback_alphas=200)
+        except Exception as e:
+            self._log_quiet(round_num, f'⚠ seeds/pref_stats 조회 실패: {e}')
+            seeds, pref_stats = [], {}
+
+        new_feedback: list[dict] = []
+        pass_total = 0
+        err_total = 0
+        cache_hit_total = 0
+
+        try:
+            if is_focus:
+                kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
+                self._log(round_num, f'1) Gemini focused 12 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
+                # correlation 모드는 직교화 가이드 위해 제출/거절 알파 코드를 함께 전달
+                # (submitted_codes 는 위에서 이미 제출+거절 합본으로 만들어 둠).
+                _submitted_for_corr = list(submitted_codes) if focus_kind == 'correlation' else []
+                strategies = gemini_strategist.generate_focused_strategies(
+                    api_key=api_key,
+                    round_num=round_num,
+                    phase=phase,
+                    parent_idx=parent_idx,
+                    parent_code=parent_code,
+                    parent_desc=parent_desc,
+                    fail_desc=fail_desc,
+                    parent_pass_items=parent_pass_items,
+                    parent_fail_items=parent_fail_items,
+                    focus_kind=focus_kind,
+                    self_corr_value=self_corr_value,
+                    submitted_codes=_submitted_for_corr,
+                    log_fn=lambda line: self._log_quiet(round_num, line),
+                )
+            else:
+                self._log(round_num, '1) Gemini 12 알파 생성 호출...')
+                strategies = gemini_strategist.generate_strategies(
+                    api_key=api_key,
+                    round_num=round_num,
+                    feedback=feedback,
+                    errors=errors,
+                    avoid_codes=avoid_codes,
+                    submitted_codes=submitted_codes,
+                    seeds=seeds,
+                    pref_stats=pref_stats,
+                    cache_hit_ratio_hint=prev_cache_ratio,
+                    log_fn=lambda line: self._log_quiet(round_num, line),
+                )
+
+            if self._stop_event.is_set():
+                _db.finish_round(round_id, self.user_id, round_num,
+                                  status='paused', pass_count=0, err_count=0,
+                                  cache_hits=0, summary='Gemini 후 pause 요청')
+                return
+
+            # 사전 유사도 검사 — 이미 제출된 알파와 string/operator/field 가중평균 0.7 이상이면
+            # WQB 가 self-correlation 으로 reject 할 가능성 높음. 시뮬 보내기 전 차단.
+            # (출처: zhutoutoutousan/worldquant-miner template_similarity.py 포팅)
+            if submitted_codes:
+                from . import alpha_similarity as _sim
+                kept: list[dict] = []
+                rejected_pre = 0
+                for s in strategies:
+                    too_sim, score, matched = _sim.too_similar_to_any(
+                        s['code'], submitted_codes, threshold=0.7)
+                    if too_sim:
+                        rejected_pre += 1
+                    else:
+                        kept.append(s)
+                if rejected_pre > 0:
+                    self._log(round_num,
+                              f'  ⚠ 사전 유사도 검사: {rejected_pre}/{len(strategies)} 알파가 '
+                              f'기제출 알파와 너무 유사 (>=0.7) → 시뮬 안 함 (self-corr reject 회피)')
+                strategies = kept
+                if not strategies:
+                    _db.finish_round(round_id, self.user_id, round_num,
+                                      status='done', pass_count=0, err_count=0,
+                                      cache_hits=0,
+                                      summary='Gemini 알파 모두 기제출과 유사도 0.7+ → 다음 라운드')
+                    # focus 모드면 큐 pop 안 하면 동일 부모 무한 반복 위험 — 강제 pop.
+                    if is_focus:
+                        try:
+                            new_q = _db.get_focus_queue(self.user_id)
+                            if new_q and new_q[0].get('parent_round_num') == round_num \
+                                    and int(new_q[0].get('phase') or 0) == phase:
+                                _db.set_focus_queue(self.user_id, new_q[1:])
+                                self._log(round_num, '  focus 큐 강제 pop (전부 유사도 거부)')
+                        except Exception:
+                            pass
+                    return
+
+            _db.update_round_status(round_id, 'simulating')
+
+            # 캐시 hit 분리.
+            cached_results: list[dict] = []
+            to_simulate: list[dict] = []
+            seen: set[str] = set()
+            for s in strategies:
+                h = _db.code_hash(s['code'])
+                if h in seen:
+                    continue
+                seen.add(h)
+                cached = result_cache.lookup(self.user_id, s['code'])
+                if cached:
+                    cached_results.append(result_cache.materialize(s, cached, round_num))
+                else:
+                    to_simulate.append(s)
+            cache_hit_total = len(cached_results)
+
+            # 라운드의 모든 시뮬 대상 알파를 한 subprocess 에 넘긴다 — 그 안에서 wqb_browser
+            # 가 1개 탭에서 알파를 순차 실행한다 (배치/슬롯 개념 없음, 라운드 한 사이클이 한 흐름).
+            all_results: list[dict] = list(cached_results)
+            do_simulate = bool(to_simulate)
+
+            if do_simulate and not self._stop_event.is_set():
+                batch = to_simulate
+                self._log(round_num,
+                          f'  ── 라운드 시뮬 시작 (1탭 순차) — 알파 {len(batch)}개 '
+                          f'#{[s_["idx"] for s_ in batch]}')
+                # 어떤 전략을 테스트하는지 (idx + desc) 로그에 한 줄씩 노출.
+                for s_ in batch:
+                    desc_short = (s_.get('desc') or '').strip()
+                    if len(desc_short) > 90:
+                        desc_short = desc_short[:90] + '…'
+                    self._log(round_num, f'      #{s_["idx"]} → {desc_short or "(설명 없음)"}')
+                with self._lock:
+                    self._batch_proc_holder['proc'] = None
+                # 알파 한 개가 끝날 때마다 partial_fn 으로 즉시 결과를 흘려보낸다.
+                _seen_idx: set[int] = set()
+                def _on_partial(obj: dict, _round_num=round_num):
+                    s_idx = int(obj.get('idx') or 0)
+                    if s_idx in _seen_idx:
+                        return
+                    _seen_idx.add(s_idx)
+                    status = obj.get('status') or ''
+                    err_t = (obj.get('error_text') or '').strip()
+                    if status == 'error':
+                        snippet = err_t[:80] + ('…' if len(err_t) > 80 else '')
+                        self._log(_round_num, f'      #{s_idx} ⚠ 오류 — {snippet}',
+                                  level='warn')
+                        return
+                    is_status = obj.get('is_status') or {}
+                    metrics = obj.get('metrics') or {}
+                    submit_status = (obj.get('submit_status') or '').strip()
+                    line = _format_alpha_result(s_idx, status, metrics, is_status,
+                                                submit_status=submit_status)
+                    self._log(_round_num, line,
+                              level='pass' if status == 'pass' else 'info')
+
+                try:
+                    results = wqb_browser.simulate_batch(
+                        batch,
+                        wqb_username=username, wqb_password=password,
+                        log_fn=None,  # [pw]/[playwright] 로그가 UI 로 흘러들어오지 않도록 끔
+                        proc_holder=self._batch_proc_holder,
+                        partial_fn=_on_partial,
+                    )
+                except Exception as e:
+                    results = [{
+                        'idx': s_['idx'], 'code': s_['code'], 'desc': s_.get('desc', ''),
+                        'pass_count': 0, 'pass_items': [],
+                        'fail_count': 0, 'fail_items': [],
+                        'submitted': False, 'submit_status': '',
+                        'error_text': f'시뮬 예외: {e}',
+                        'mode': 'error',
+                    } for s_ in batch]
+
+                aborted = False
+                if self._stop_event.is_set():
+                    self._log(round_num, '  ⏸ pause 처리됨 — 시뮬 결과 폐기')
+                    aborted = True
+
+                # WQB 새 디바이스 인증 등 사용자 액션이 필요한 영구 에러 — 즉시 라운드 abort + 워커 종료.
+                if not aborted and results and any(
+                        _is_auth_required(r.get('error_text') or '') for r in results):
+                    self._log(round_num, '  🛑 WQB 가 새 디바이스/2FA 인증 요구 — 자동화 불가, 워커 종료')
+                    all_results.extend(results)
+                    self._stop_event.set()
+                    aborted = True
+
+                # setup 에러 전부면 (= 브라우저/로그인 자체가 깨짐) 1회 재시도 — subprocess 가
+                # 새 브라우저를 다시 띄운다.
+                if not aborted and results and all(
+                        _is_setup_error(r.get('error_text') or '') for r in results):
+                    self._log(round_num, '  ⚠ 시뮬 전체 setup 에러 — 브라우저 재시작 후 재시도')
+                    try:
+                        retry = wqb_browser.simulate_batch(
+                            batch,
+                            wqb_username=username, wqb_password=password,
+                            log_fn=None,
+                            proc_holder=self._batch_proc_holder,
+                        )
+                        if not all(_is_setup_error(r.get('error_text') or '') for r in retry):
+                            results = retry
+                            self._log(round_num, '  ✓ 재시도 성공')
+                        else:
+                            self._log(round_num, '  ⚠ 재시도도 setup 에러 — 라운드 결과 그대로 진행')
+                    except Exception:
+                        pass
+
+                if not aborted:
+                    # 라운드 시뮬 결과 — 한 줄 요약. 알파별 줄은 partial_fn 스트림이 이미 송출함.
+                    # partial 미수신된 알파 (예: subprocess KILL) 만 여기서 보충.
+                    r_pass = sum(1 for r in results
+                                 if int(r.get('pass_count') or 0) >= PASS_THRESHOLD)
+                    r_err = sum(1 for r in results if r.get('error_text'))
+                    self._log(round_num,
+                              f'  ── 시뮬 결과 — '
+                              f'알파 {len(results)} / PASS≥{PASS_THRESHOLD} {r_pass} / 오류 {r_err}')
+                    for r in results:
+                        if int(r.get('idx') or 0) in _seen_idx:
+                            continue
+                        err_t = (r.get('error_text') or '').strip()
+                        metrics = r.get('metrics') or {}
+                        is_status = r.get('is_status') or {}
+                        if err_t:
+                            snippet = err_t[:80] + ('…' if len(err_t) > 80 else '')
+                            self._log(round_num, f'      #{r["idx"]} ⚠ 오류 — {snippet}',
+                                      level='warn')
+                        else:
+                            p_n = len(is_status.get('pass', []) or [])
+                            f_n = len(is_status.get('fail', []) or [])
+                            e_n = len(is_status.get('error', []) or [])
+                            is_pass = (p_n >= PASS_THRESHOLD and f_n == 0 and e_n == 0) \
+                                      if (p_n + f_n + e_n) > 0 \
+                                      else (int(r.get('pass_count') or 0) >= PASS_THRESHOLD)
+                            status = 'pass' if is_pass else 'fail'
+                            sub_st = (r.get('submit_status') or '').strip()
+                            line = _format_alpha_result(int(r['idx']), status, metrics, is_status,
+                                                        submit_status=sub_st)
+                            self._log(round_num, line,
+                                      level='pass' if is_pass else 'info')
+
+                    all_results.extend(results)
+
+            # 결과 저장 + feedback / errors 누적 (UI 로그는 PASS 만 노출).
+            for r in all_results:
+                alpha_entry = {
+                    'idx': r['idx'],
+                    'code': r['code'],
+                    'desc': r.get('desc', ''),
+                    'pass_count': int(r.get('pass_count') or 0),
+                    'pass_items': r.get('pass_items') or [],
+                    'fail_count': int(r.get('fail_count') or 0),
+                    'fail_items': r.get('fail_items') or [],
+                    'error_count': int(r.get('error_count') or 0),
+                    'pending_count': int(r.get('pending_count') or 0),
+                    'submitted': r.get('submitted', False),
+                    'submit_status': r.get('submit_status', ''),
+                    'error_text': r.get('error_text', ''),
+                    'metrics': r.get('metrics') or {},
+                    'is_status': r.get('is_status') or {},
+                    'mode': r.get('mode', ''),
+                    'cached': bool(r.get('cached')),
+                    'phase': phase,
+                }
+                _db.insert_alpha(self.user_id, round_id, round_num, alpha_entry)
+
+                if r.get('error_text'):
+                    err_total += 1
+                    _db.upsert_error(self.user_id, round_num, r['code'], r['error_text'][:600])
+
+                fb_payload = {
+                    'round': round_num, 'idx': r['idx'],
+                    'code': r['code'], 'desc': r.get('desc', ''),
+                    'pass_count': int(r.get('pass_count') or 0),
+                    'fail_count': int(r.get('fail_count') or 0),
+                    'pass_items': (r.get('pass_items') or [])[:8],
+                    'fail_items': (r.get('fail_items') or [])[:8],
+                    'metrics': r.get('metrics') or {},
+                }
+                _db.append_feedback(self.user_id, round_num, fb_payload)
+
+                pc = int(r.get('pass_count') or 0)
+                fc = int(r.get('fail_count') or 0)
+                total = pc + fc
+                # IS Testing Status 가 있으면 그쪽 권위 — fail=0 AND error=0 AND pass>=threshold.
+                ist_r = r.get('is_status') or {}
+                p_n = len(ist_r.get('pass', []) or [])
+                f_n = len(ist_r.get('fail', []) or [])
+                e_n = len(ist_r.get('error', []) or [])
+                sub_status = (r.get('submit_status') or '').strip()
+                # Submit 시점 self-correlation 거절 → 8개 IS 테스트 중 7개(실질 테스트) 전부
+                # 통과한 케이스. is_status 에 self-corr FAIL 1개가 들어가 있어도 "PASS≥7 best"
+                # 로 계속 인정 (제출만 못 했을 뿐).
+                _fail0_name = ((ist_r.get('fail') or [{}])[0].get('name') or '').lower()
+                only_selfcorr_fail = (f_n == 1 and e_n == 0 and 'correlation' in _fail0_name)
+                _rej = sub_status.startswith('rejected') or sub_status.startswith('fail:no_response')
+                if (p_n + f_n + e_n) > 0:
+                    is_best = (p_n >= PASS_THRESHOLD
+                               and ((f_n == 0 and e_n == 0) or (only_selfcorr_fail and _rej)))
+                else:
+                    is_best = (pc >= PASS_THRESHOLD)
+                if is_best:
+                    pass_total += 1
+                    if r.get('submitted'):
+                        submit_tag = ' · 🚀 알파 제출 완료'
+                    elif sub_status.startswith('rejected:'):
+                        submit_tag = f' · ⛔ 제출 거절 ({sub_status[len("rejected:"):][:48]})'
+                    elif sub_status == 'disabled':
+                        submit_tag = ' · ⛔ Submit 버튼 비활성 (제출 조건 미충족)'
+                    elif sub_status == 'not_found':
+                        submit_tag = ' · ⚠ Submit 버튼 못 찾음'
+                    elif sub_status.startswith('fail:'):
+                        submit_tag = f' · ⚠ 제출 실패 ({sub_status[5:][:30]})'
+                    else:
+                        submit_tag = ''
+                    _denom = (p_n + f_n) if (p_n + f_n) else (total or '?')
+                    self._log(round_num,
+                              f'    #{r["idx"]} 🏆 PASS {p_n or pc}/{_denom} — best 발견!{submit_tag}',
+                              level='pass')
+
+            status = 'paused' if self._stop_event.is_set() else 'done'
+            label = f'{round_num}-{phase}' if phase > 0 else str(round_num)
+            summary = (f'═══ ROUND {label} {status} — 시도 {len(all_results)} / '
+                       f'PASS≥{PASS_THRESHOLD} {pass_total} / 오류 {err_total} / '
+                       f'캐시히트 {cache_hit_total} ═══')
+            # 라운드 끝 — 색깔 다르게 입히기 위해 level=round_end 로 보냄. 클라이언트가
+            # round_num 을 6 컬러팔레트에 매핑.
+            self._log(round_num, summary, level='round_end')
+            _db.finish_round(round_id, self.user_id, round_num,
+                              status=status, pass_count=pass_total, err_count=err_total,
+                              cache_hits=cache_hit_total, summary=summary)
+
+            # focus 큐 관리.
+            if status == 'done':
+                if is_focus:
+                    # 처리 완료한 entry pop.
+                    try:
+                        new_q = _db.get_focus_queue(self.user_id)
+                        if new_q and new_q[0].get('parent_round_num') == round_num \
+                                and int(new_q[0].get('phase') or 0) == phase:
+                            new_q = new_q[1:]
+                            _db.set_focus_queue(self.user_id, new_q)
+                            self._log(round_num,
+                                      f'  focus 큐 #{parent_idx} 처리 완료 (남은 항목 {len(new_q)})')
+                    except Exception as e:
+                        self._log_quiet(round_num, f'⚠ focus 큐 pop 실패: {e}')
+                else:
+                    # 메인 라운드 종료 — focus 큐 추가 트리거:
+                    #   (a) PASS=6 FAIL=1 (sum=8)            → kind='fail'        (실패 1개 개선)
+                    #   (b) PASS=7 + Submit 거절 → IS 재스크랩 후 PASS=7 FAIL=1   → kind='correlation'
+                    #   (c) PASS=7 FAIL=0 + Submit 거절 (재스크랩 실패 fallback)  → kind='correlation'
+                    focus_candidates: list[tuple[dict, str, str]] = []  # (alpha, kind, self_corr_value)
+                    for r in all_results:
+                        if r.get('cached'):
+                            continue
+                        ist_r = r.get('is_status') or {}
+                        p_n = len(ist_r.get('pass', []) or [])
+                        f_n = len(ist_r.get('fail', []) or [])
+                        e_n = len(ist_r.get('error', []) or [])
+                        pn_n = len(ist_r.get('pending', []) or [])
+                        if (p_n + f_n + e_n + pn_n) > 0:
+                            pc, fc, ec, pnc = p_n, f_n, e_n, pn_n
+                        else:
+                            pc = int(r.get('pass_count') or 0)
+                            fc = int(r.get('fail_count') or 0)
+                            ec = int(r.get('error_count') or 0)
+                            pnc = int(r.get('pending_count') or 0)
+                        sub_st = (r.get('submit_status') or '').strip()
+                        is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
+                        # (a) PASS=6 FAIL=1 ERROR=0 (PENDING 무관, 단 sum=8 정상 케이스).
+                        if pc == 6 and fc == 1 and ec == 0 and (pc + fc + ec + pnc) == 8:
+                            focus_candidates.append((r, 'fail', ''))
+                            continue
+                        # (b) PASS=7 FAIL=1 + 거절 — 재스크랩으로 잡힌 self-corr fail.
+                        if is_rejected and pc == 7 and fc == 1 and ec == 0:
+                            scv = _extract_self_corr_value(ist_r.get('fail') or [])
+                            focus_candidates.append((r, 'correlation', scv))
+                            continue
+                        # (c) PASS=7 FAIL=0 + 거절 — 재스크랩 실패 fallback.
+                        if is_rejected and pc >= 7 and fc == 0 and ec == 0:
+                            focus_candidates.append((r, 'correlation', ''))
+                            continue
+
+                    if focus_candidates:
+                        new_q = _db.get_focus_queue(self.user_id)
+                        n_fail = sum(1 for _, k, _ in focus_candidates if k == 'fail')
+                        n_corr = sum(1 for _, k, _ in focus_candidates if k == 'correlation')
+                        for ph_i, (a, kind, scv) in enumerate(focus_candidates, start=1):
+                            ist_r = a.get('is_status') or {}
+                            f_list = list(ist_r.get('fail') or [])
+                            p_list = list(ist_r.get('pass') or [])
+                            fail_descs = [
+                                str(it.get('desc') or it.get('name') or '').strip()
+                                for it in f_list
+                            ]
+                            pass_descs = [
+                                str(it.get('desc') or it.get('name') or '').strip()
+                                for it in p_list
+                            ]
+                            if kind == 'correlation':
+                                fd = (f'Self-Correlation {scv} > 0.7 (Submit reject)'
+                                      if scv else 'Self-Correlation > 0.7 (Submit reject)')
+                            else:
+                                fd = ' / '.join([d for d in fail_descs if d])[:200]
+                            new_q.append({
+                                'parent_round_num': round_num,
+                                'phase': ph_i,
+                                'parent_idx': int(a.get('idx') or 0),
+                                'parent_code': str(a.get('code') or ''),
+                                'parent_desc': str(a.get('desc') or ''),
+                                'fail_desc': fd,
+                                'parent_pass_items': pass_descs[:8],
+                                'parent_fail_items': fail_descs[:4],
+                                'focus_kind': kind,
+                                'self_corr_value': scv,
+                            })
+                        _db.set_focus_queue(self.user_id, new_q)
+                        bits = []
+                        if n_fail:
+                            bits.append(f'PASS=6 FAIL=1 {n_fail}개')
+                        if n_corr:
+                            bits.append(f'PASS=7 Submit거절 {n_corr}개')
+                        self._log(round_num,
+                                  f'  🎯 focus 후보 {len(focus_candidates)}개 발견 ({", ".join(bits)}) — '
+                                  f'다음 라운드부터 sub-round 진행 ({round_num}-1, {round_num}-2, ...)',
+                                  level='pass')
+        except Exception as e:
+            self._log(round_num, f'⚠ 라운드 예외: {e}')
+            _db.finish_round(round_id, self.user_id, round_num,
+                              status='error', pass_count=pass_total,
+                              err_count=err_total, cache_hits=cache_hit_total,
+                              summary=f'예외: {str(e)[:300]}')
+
+    def _prev_cache_hit_ratio(self) -> float:
+        """직전 라운드의 cache_hits / (시도 알파 수). 1.0 에 가까우면 거의 모든 알파가 캐시에서
+        해결됨 → Gemini 가 같은 코드를 또 생성한 것. temperature 부스트로 다양성 강제."""
+        rounds = _db.list_rounds(self.user_id, limit=1)
+        if not rounds:
+            return 0.0
+        r = rounds[0]
+        ch = int(r.get('cache_hits') or 0)
+        # 한 라운드당 시도 알파 수 ≈ pass_count + err_count + cache_hits 추정.
+        # 정확히는 alphas insert 카운트가 맞지만, summary 로 충분.
+        attempts = ch + int(r.get('pass_count') or 0) + int(r.get('err_count') or 0)
+        if attempts <= 0:
+            return 0.0
+        return ch / attempts
+
+    # ── 로깅 ──────────────────────────────────────────────────
+    def _log(self, round_num: int, line: str, level: str = 'info') -> None:
+        try:
+            _db.append_log(self.user_id, round_num, line, level=level)
+        except Exception:
+            pass
+
+    def _log_quiet(self, round_num: int, line: str) -> None:
+        """gemini_strategist 등 외부 모듈에서 들어오는 로그를 필터링.
+
+        UI 에는 핵심 워닝 (⚠ / 🛑) 만 노출. 디버그성 진행 상황 (prompt cache, 모델 폴백,
+        lint 거부 상세 등) 은 server.log Python logger 로만 보냄.
+        """
+        s = (line or '').strip()
+        if not s:
+            return
+        # 워닝/오류 표식이 있는 줄만 UI 노출.
+        if s[:2] in ('⚠ ', '⚠'):
+            self._log(round_num, line)
+            return
+        if any(s.startswith(c) for c in ('🛑', '✓ ', '✓')):
+            self._log(round_num, line)
+            return
+        # 그 외는 Python logger 로만.
+        LOG.info('[round %d] %s', round_num, s[:300])
+
+
+def _extract_self_corr_value(fail_items: list[dict]) -> str:
+    """is_status['fail'] 안의 self-correlation 항목에서 실측값 (예: '0.9415') 을 뽑는다.
+
+    `_scrape_is_testing_status` 가 'Self-correlation of 0.9415 is above cutoff of 0.7' 형식을
+    {name:'Self-correlation', value:'0.9415', cutoff:'0.7'} 로 파싱해 두므로 그대로 활용.
+    매치 없으면 빈 문자열 반환.
+    """
+    import re as _re
+    for it in fail_items or []:
+        nm = (it.get('name') or '').lower()
+        if 'correlation' in nm or 'self-corr' in nm or 'self corr' in nm:
+            v = (it.get('value') or '').strip()
+            if v:
+                return v
+            desc = (it.get('desc') or '')
+            m = _re.search(r'(\d+\.\d+)', desc)
+            if m:
+                return m.group(1)
+    return ''
+
+
+def _short_metric_label(entry: dict) -> str:
+    """IS Testing Status 한 항목 → '이름(값 op cutoff)' 짧은 표기.
+    예: {'name':'Sharpe','value':'-0.06','direction':'below','cutoff':'1.25'} → 'Sharpe(-0.06<1.25)'
+    """
+    name = (entry.get('name') or '').strip() or '?'
+    v = (entry.get('value') or '').strip()
+    cutoff = (entry.get('cutoff') or '').strip()
+    direction = (entry.get('direction') or '').strip()
+    if v and cutoff and direction:
+        op = '>' if direction == 'above' else '<'
+        return f'{name}({v}{op}{cutoff})'
+    if v:
+        return f'{name}({v})'
+    return name
+
+
+def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict | None = None,
+                          submit_status: str = '') -> str:
+    """슬롯 결과 한 줄 — IS Testing Status 패널 의 항목별 PASS/FAIL/PENDING 그대로 노출.
+
+    is_status 가 있으면 그쪽 권위 데이터 사용 (실제 WQB cutoff 값 표시).
+    없으면 (legacy) summary metrics 만으로 6항목 추정.
+    submit_status 가 'rejected:*' 이면 거절 사유와 (가능 시) self-correlation 값 표기.
+    """
+    is_status = is_status or {}
+    p_list = is_status.get('pass') or []
+    f_list = is_status.get('fail') or []
+    e_list = is_status.get('error') or []
+    pn_list = is_status.get('pending') or []
+    total = len(p_list) + len(f_list) + len(e_list) + len(pn_list)
+    sub_st = (submit_status or '').strip()
+    is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
+
+    if total > 0:
+        pass_str = ' '.join(_short_metric_label(e) for e in p_list) or '(없음)'
+        fail_str = ' '.join(_short_metric_label(e) for e in f_list) or '(없음)'
+        err_str = ' '.join((e.get('name') or '?').strip() for e in e_list)
+        pend_str = ' '.join((e.get('name') or '?').strip() for e in pn_list)
+        if is_rejected:
+            head_status = '🚫 SUBMIT 거절'
+            check = ''
+        else:
+            head_status = 'PASS' if status == 'pass' else 'fail'
+            check = ' ✓' if status == 'pass' else ''
+        head = f'      #{idx} → {head_status} ({len(p_list)} PASS / {len(f_list)} FAIL'
+        if e_list:
+            head += f' / {len(e_list)} ERR'
+        if pn_list:
+            head += f' / {len(pn_list)} PEND'
+        head += f'){check}'
+        body = f'  ✓ {pass_str}  ✗ {fail_str}'
+        if err_str:
+            body += f'  ⚠ {err_str}'
+        if pend_str:
+            body += f'  ⏳ {pend_str}'
+        if is_rejected and ':' in sub_st:
+            reason = sub_st.split(':', 1)[1].strip()
+            if reason:
+                body += f'  📝 {reason[:80]}'
+        return head + body
+
+    # Fallback — IS Testing Status 미수신 시 summary metrics 기반 표기 (값 포함).
+    from . import wqb_browser as _wqb
+    passes, fails = _wqb._derive_pass_fail(metrics or {})
+    pc = len(passes)
+
+    def _fmt_legacy(name: str) -> str:
+        # 'IS Sharpe' → 'Sharpe(1.32)'; 'Sub-Sharpe' 등은 후보 키들에서 검색.
+        short = name.replace('IS ', '').strip()
+        candidates = (
+            short.lower(),
+            short.lower().replace(' ', '_'),
+            short.lower().replace('-', '_'),
+        )
+        v = None
+        for k in candidates:
+            v = (metrics or {}).get(k)
+            if v not in (None, ''):
+                break
+        return f'{short}({v})' if v not in (None, '') else short
+
+    pass_str = ' '.join(_fmt_legacy(p) for p in passes) or '(없음)'
+    fail_str = ' '.join(_fmt_legacy(f) for f in fails) or '(없음)'
+    head = f'      #{idx} → {"PASS" if status == "pass" else "fail"} ({pc}/{len(passes)+len(fails) or 8})'
+    if status == 'pass':
+        head += ' ✓'
+    return f'{head}  ✓ {pass_str}  ✗ {fail_str}  (※ IS Testing Status 패널 미수신)'
+
+
+def _is_setup_error(text: str) -> bool:
+    if not text:
+        return False
+    # auth_required 는 setup 이 아님 (재시도해도 똑같음, 사용자 액션 필요).
+    if _is_auth_required(text):
+        return False
+    sigs = (
+        'playwright_setup', 'editor mount timeout', 'tab click failed',
+        'set editor text failed', 'text verify fail', 'sim wait timeout',
+        'no result returned for this simulation', 'no result for slot',
+        'browser timeout', 'RESULT_JSON 파싱 실패',
+    )
+    return any(s in text for s in sigs)
+
+
+def _is_auth_required(text: str) -> bool:
+    """WQB 가 새 디바이스 인증/2FA 를 요구하는 에러인지."""
+    if not text:
+        return False
+    t = text.lower()
+    sigs = (
+        '새 디바이스 인증', 'new device', 'verification code',
+        'two-factor', '2fa', 'verify your identity', 'mfa',
+        'auth_required', 'wqb_auth_required',
+    )
+    return any(s in t for s in sigs)

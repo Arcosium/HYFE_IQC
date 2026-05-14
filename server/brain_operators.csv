@@ -1,0 +1,73 @@
+name,category,description
++,basic,addition
+-,basic,subtraction
+*,basic,multiplication
+/,basic,division
+^,basic,power
+?:,basic,if-else conditional (cond ? expr_true : expr_false)
+&&,logic,logical AND
+||,logic,logical OR
+!,logic,logical NOT
+<,logic,less than
+<=,logic,less than or equal
+>,logic,greater than
+>=,logic,greater than or equal
+==,logic,equal
+!=,logic,not equal
+abs,arithmetic,absolute value
+log,arithmetic,natural log
+exp,arithmetic,exponential
+sqrt,arithmetic,square root
+power,arithmetic,"power(x, y) = x^y"
+max,arithmetic,"max of two: max(x, y)"
+min,arithmetic,"min of two: min(x, y)"
+sigmoid,arithmetic,1/(1+exp(-x))
+tanh,arithmetic,hyperbolic tangent
+sign,arithmetic,"sign of x: -1/0/1"
+signed_power,arithmetic,"sign(x) * abs(x)^y"
+rank,cross_sectional,"rank(x) — uniform 0..1 rank within universe"
+zscore,cross_sectional,"(x - mean) / std across universe"
+scale,cross_sectional,"normalizes so sum(|x|)=1"
+normalize,cross_sectional,"(x - mean) / max(|x - mean|)"
+quantile,cross_sectional,"quantile(x, n) — n-quantile bucket id"
+inverse,cross_sectional,1/x
+log_diff,cross_sectional,log(x) - log(y)
+vec_avg,vector,row-wise average of vector field
+vec_sum,vector,row-wise sum
+vec_count,vector,non-NaN count
+vec_min,vector,row-wise min
+vec_max,vector,row-wise max
+vec_top3,vector,top-3 values average
+ts_sum,time_series,"sum over past n days: ts_sum(x, n)"
+ts_mean,time_series,"mean over past n days: ts_mean(x, n)"
+ts_median,time_series,"median over past n days"
+ts_max,time_series,"max over past n days"
+ts_min,time_series,"min over past n days"
+ts_std_dev,time_series,"std deviation over past n days"
+ts_skewness,time_series,"skewness over past n days"
+ts_kurtosis,time_series,"kurtosis over past n days"
+ts_rank,time_series,"rank of today's value among past n days (uniform 0..1)"
+ts_delta,time_series,"x[t] - x[t-n]"
+ts_delay,time_series,"x[t-n]"
+ts_corr,time_series,"correlation(x, y, n)"
+ts_partial_corr,time_series,"partial correlation(x, y, z, n)"
+ts_arg_max,time_series,"day index of max within window"
+ts_arg_min,time_series,"day index of min within window"
+ts_count,time_series,"count of non-NaN in window"
+ts_zscore,time_series,"zscore of x against past n days"
+ts_av_diff,time_series,"average abs difference across window"
+ts_co_skewness,time_series,"co-skewness(x,y,n)"
+ts_co_kurtosis,time_series,"co-kurtosis(x,y,n)"
+ts_decay_linear,time_series,"linearly weighted decay over past n days"
+group_neutralize,group,"demean by group (sector/industry/subindustry/market)"
+group_mean,group,"mean within group"
+group_std_dev,group,"std within group"
+group_rank,group,"rank within group"
+group_zscore,group,"zscore within group"
+group_count,group,"member count of group"
+group_max,group,"max within group"
+group_min,group,"min within group"
+group_sum,group,"sum within group"
+group_normalize,group,"(x - group_mean) / group_max(|x - group_mean|)"
+group_scale,group,"scale within group so sum(|x|)=1"
+trade_when,filter,"trade_when(cond, alpha, exit_cond) — only trade when cond holds"
