@@ -483,6 +483,16 @@ def set_editor_text(page, formula):
             log(f'step: set_editor_text FAIL (not empty after clear): {cur[:60]!r}')
             return False
         page.keyboard.insert_text(formula)
+        # WQB Simulate 버튼이 'editor-simulate-button-text--disabled-example' (튜토리얼
+        # 예시 코드 상태) 로 잠긴 채라면, 단순 insert_text 만으로는 React 가 "사용자 입력"
+        # 으로 인식 못 해 버튼이 안 풀린다. 실제 keystroke (space → backspace) 를 추가로
+        # 보내 React state 를 강제로 갱신.
+        try:
+            page.keyboard.press('End')
+            page.keyboard.press(' ')
+            page.keyboard.press('Backspace')
+        except Exception:
+            pass
         log(f'step: set_editor_text done')
         return True
     except Exception as e:
@@ -574,6 +584,7 @@ def click_simulate(page):
 
     # 진단 — click 후 1초 뒤 sim 버튼이 'Cancel'/'Stop'/'Running' 로 변경됐는지 확인.
     page.wait_for_timeout(1500)
+    post_running = False
     try:
         post = page.evaluate(r'''() => {
             const btns = [...document.querySelectorAll('button.editor-simulate-button-text, button[class*="editor-simulate-button"], button')];
@@ -581,18 +592,26 @@ def click_simulate(page):
                 && /simulate|cancel|stop|running/i.test((b.innerText||'').trim()))
                 .map(b => (b.innerText||'').trim().slice(0,40));
             const body = (document.body.innerText || '');
+            // 시뮬 버튼 자체가 'Cancel' / 'Stop' / 'Running' 라벨로 바뀌었으면 sim 시작된 것.
+            const btn_started = labels.some(l => /cancel|stop|running/i.test(l));
             return {
                 url: location.href.slice(0, 80),
                 sim_buttons: labels,
-                running_detected: /\bcancel sim|stop sim|simulating|sim running/i.test(body),
+                running_detected: btn_started
+                    || /\bcancel sim|stop sim|simulating|sim running/i.test(body),
                 error_detected: /session expired|please log in|unauthorized|server error|503|504/i.test(body),
                 progress_visible: !!document.querySelector('[class*="progress"], [class*="loading"], [class*="spinner"]'),
             };
         }''')
         log(f'step: click_simulate post sim_buttons={post.get("sim_buttons")} running={post.get("running_detected")} progress={post.get("progress_visible")} error={post.get("error_detected")}')
+        post_running = bool(post.get('running_detected'))
     except Exception as e:
         log(f'step: click_simulate post diag exception: {e}')
-    return locator_clicked + info.get('clicked', 0)
+    # Ctrl+Enter 가 실제로 sim 을 시작시켰으면 (locator/JS click 실패해도) 클릭 성공으로 인정.
+    # 이전 코드: locator_clicked + info.clicked → Ctrl+Enter 만으로 시작된 경우 0 을 반환해
+    # 호출자가 'simulate button not clicked' 오류 처리. 그 결과 첫 알파만 운 좋게 통과하고
+    # 나머지 알파가 줄줄이 실패하는 false-negative 발생.
+    return locator_clicked + info.get('clicked', 0) + (1 if post_running else 0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Settings 패널 자동화 — 시뮬 시작 전 Region/Universe/Delay/Neutralization/Decay/
@@ -2136,10 +2155,14 @@ try:
             #   떴다(= 새 sim 이 실제로 돌기 시작)" 를 확인한 뒤에야 시작 시각/before_metrics
             #   를 찍는다. 그 전 화면은 전부 옛 패널로 간주.
             started = False
+            click_ok_any = False
             for attempt in range(2):
-                if not click_simulate(page):
-                    results[fi]['error_text'] = 'simulate button not clicked'
-                    return False
+                ck = click_simulate(page)
+                if ck:
+                    click_ok_any = True
+                # click_simulate 가 0 을 반환해도 WQB UI 가 느려서 running 표시가 뒤늦게
+                # 뜨는 케이스가 있으므로 첫 attempt 에서는 무조건 running poll 까지 돌린다.
+                # 두 attempt 모두 click 도 안 됐고 running 도 못 봤으면 그때 단념.
                 for _ in range(16):   # ~24s 동안 running 확인
                     page.wait_for_timeout(1500)
                     st = extract_state(page)
@@ -2155,6 +2178,9 @@ try:
                 log(f'step: _start_sim[idx{_ix(fi)}] running 표시 안 뜸 (attempt {attempt+1}) — Simulate 재클릭')
                 page.wait_for_timeout(1200)
             if not started:
+                if not click_ok_any:
+                    results[fi]['error_text'] = 'simulate button not clicked'
+                    return False
                 results[fi]['error_text'] = 'sim did not start (직전 결과 패널이 막고 있을 수 있음)'
                 return False
             results[fi]['_sim_started_at'] = time.time()
