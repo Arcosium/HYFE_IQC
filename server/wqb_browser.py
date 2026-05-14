@@ -212,6 +212,82 @@ def emit_partial(slot, status, error_text='', metrics=None, is_status=None,
     }
     print('[partial] ' + json.dumps(payload, ensure_ascii=False), flush=True)
 
+def js_dismiss_introjs(page):
+    # WQB 신규/잠긴 계정에서 'intro-step-N' 으로 Simulate 버튼이 disabled-example 상태로
+    # 잠기는 경우 — 이 상태에서는 클릭/Ctrl+Enter/nudge 모두 React state 를 못 풀어 sim 시작 불가.
+    # 근본 해결: intro.js 의 Skip/Done 버튼 클릭 + overlay/clone 제거 + intro-step-* 클래스 제거.
+    try:
+        info = page.evaluate(r'''() => {
+            const out = {clicked: [], removed: 0, classes_stripped: 0, introjs_exited: false};
+            // 1) intro.js 표준 셀렉터로 skip/done/close 버튼 클릭.
+            const sels = [
+                '.introjs-skipbutton',
+                '.introjs-donebutton',
+                '.introjs-tooltip [class*="skip" i]',
+                '.introjs-tooltip [class*="close" i]',
+                '.introjs-tooltipbuttons [class*="skip" i]',
+                'button[aria-label*="skip tutorial" i]',
+                'button[aria-label*="exit tutorial" i]',
+            ];
+            for (const s of sels) {
+                document.querySelectorAll(s).forEach(b => {
+                    try {
+                        if (b.offsetParent !== null) {
+                            b.click(); out.clicked.push(s);
+                        }
+                    } catch(e) {}
+                });
+            }
+            // 2) intro.js API 직접 호출 (앱이 export 했을 때).
+            try {
+                if (window.introJs) {
+                    const inst = window.introJs();
+                    if (inst && typeof inst.exit === 'function') {
+                        inst.exit(true);
+                        out.introjs_exited = true;
+                    }
+                }
+            } catch(e) {}
+            // 3) overlay / clone / helper layer 강제 제거.
+            const overlayClasses = [
+                '.introjs-overlay', '.introjs-helperLayer', '.introjs-tooltipReferenceLayer',
+                '.introjs-tooltip', '.introjs-disableInteraction', '.introjs-fixParent',
+            ];
+            for (const c of overlayClasses) {
+                document.querySelectorAll(c).forEach(el => {
+                    try { el.remove(); out.removed++; } catch(e) {}
+                });
+            }
+            // 4) 모든 elem 에서 'intro-step-N' / 'introjs-showElement' 같은 잔존 class 제거.
+            //    이 클래스가 남아있으면 Simulate 버튼이 disabled-example 으로 유지됨.
+            document.querySelectorAll('[class*="intro-step-"], [class*="introjs-"]').forEach(el => {
+                try {
+                    const orig = (el.className || '').toString();
+                    const cleaned = orig
+                        .replace(/\bintro-step-\d+\b/g, '')
+                        .replace(/\bintrojs-[a-zA-Z0-9-]+\b/g, '')
+                        .replace(/\s+/g, ' ').trim();
+                    if (cleaned !== orig) {
+                        el.className = cleaned;
+                        out.classes_stripped++;
+                    }
+                } catch(e) {}
+            });
+            // 5) body 의 introjs-* 클래스 (introjs-showElement 등) 도 제거.
+            try {
+                document.body.className = (document.body.className || '')
+                    .replace(/\bintrojs-[a-zA-Z0-9-]+\b/g, '').replace(/\s+/g,' ').trim();
+            } catch(e) {}
+            return out;
+        }''')
+        if info.get('clicked') or info.get('removed') or info.get('classes_stripped') \
+                or info.get('introjs_exited'):
+            log(f'js_dismiss_introjs: clicked={info.get("clicked")} removed={info.get("removed")} '
+                f'classes_stripped={info.get("classes_stripped")} introjs_exited={info.get("introjs_exited")}')
+    except Exception as e:
+        log(f'js_dismiss_introjs exception: {e}')
+
+
 def js_dismiss_overlays(page):
     # 신규 사용자: cookie consent, EU GDPR, 첫 로그인 welcome tour, sidebar onboarding 등
     # 다양한 modal/banner 를 한 번에 dismiss. 최소 2회 호출 권장 (modal 이 chain 으로 뜸).
@@ -511,7 +587,12 @@ def click_simulate(page):
             return /disabled-example|--disabled\b/.test(cls) || btn.disabled === true;
         }''')
         if is_disabled_example:
-            log('step: click_simulate detected disabled-example, nudging editor')
+            log('step: click_simulate detected disabled-example, nudging editor + intro.js exit')
+            # 1) intro.js 잔존물이 React state 를 잠그고 있을 수 있으니 매번 강제 종료.
+            try:
+                js_dismiss_introjs(page)
+            except Exception:
+                pass
             try:
                 page.locator('.monaco-editor textarea.inputarea').first.focus(timeout=2000)
                 page.keyboard.press('End')
@@ -581,6 +662,47 @@ def click_simulate(page):
             log(f'step: click_simulate via keyboard Ctrl+Enter')
         except Exception:
             pass
+
+    # 4) Force-fire fallback — disabled-example 가 React state 에 영구 박혀있는 WQB 계정 대응.
+    #    버튼의 React onClick handler 를 __reactProps$* 통해 직접 invoke. disabled HTML 속성
+    #    + class 도 제거해서 onClick 내부의 if(disabled)return 가드까지 우회. 마지막 수단.
+    if locator_clicked == 0 and info.get("clicked", 0) == 0:
+        try:
+            forced = page.evaluate(r'''() => {
+                const btn = document.querySelector('button.editor-simulate-button-text, button[class*="editor-simulate-button"]');
+                if (!btn) return {ok: false, why: 'no-btn'};
+                try {
+                    btn.disabled = false;
+                    btn.removeAttribute('disabled');
+                    btn.classList.remove('editor-simulate-button-text--disabled',
+                                          'editor-simulate-button-text--disabled-example');
+                } catch(e) {}
+                // React onClick 핸들러 직접 호출. React 가 button 에 __reactProps$<key> 로
+                // 핸들러를 붙여놓음 (production build 도 동일).
+                const propsKey = Object.keys(btn).find(k => k.startsWith('__reactProps$'));
+                if (propsKey) {
+                    const p = btn[propsKey];
+                    if (p && typeof p.onClick === 'function') {
+                        try {
+                            p.onClick({
+                                preventDefault: () => {}, stopPropagation: () => {},
+                                currentTarget: btn, target: btn, type: 'click', bubbles: true,
+                            });
+                            return {ok: true, via: 'react-onClick', keys: Object.keys(p).slice(0,8)};
+                        } catch(e) { return {ok: false, why: 'react-onClick-err: ' + e.message}; }
+                    }
+                    return {ok: false, why: 'no-onClick', keys: Object.keys(p||{}).slice(0,8)};
+                }
+                // 폴백: native click() 그래도 시도.
+                try { btn.click(); return {ok: true, via: 'native-click'}; }
+                catch(e) { return {ok: false, why: 'native-err: ' + e.message}; }
+            }''')
+            log(f'step: click_simulate force-fire {forced}')
+            if forced and forced.get('ok'):
+                # 강제 발사 성공이면 클릭 카운트에 더해주기.
+                info['clicked'] = max(info.get('clicked', 0), 1)
+        except Exception as e:
+            log(f'step: click_simulate force-fire exception: {e}')
 
     # 진단 — click 후 1초 뒤 sim 버튼이 'Cancel'/'Stop'/'Running' 로 변경됐는지 확인.
     page.wait_for_timeout(1500)
@@ -923,7 +1045,19 @@ def extract_state(page):
         const errRX = /(Attempted to use[^"]+"[^"]+"|Unexpected character[^.]*\.|Operator [^"]+ does not support[^.]*\.)/i;
         const m2 = bodyText.match(errRX);
         if (m2) compileErr = m2[0];
-        const running = !!document.querySelector('.editor-tabs__tab-dot--running, [class*="--running"]');
+        let running = !!document.querySelector('.editor-tabs__tab-dot--running, [class*="--running"]');
+        // 보조 시그널 — Simulate 버튼이 Cancel/Stop/Running 라벨로 바뀌었으면 sim 진행 중.
+        // 사용자 tier 따라 tab-dot 가 안 보일 수 있어 (--running 안 잡힘) UI 폴백 필수.
+        if (!running) {
+            const sim_btn_labels = [...document.querySelectorAll('button.editor-simulate-button-text, button[class*="editor-simulate-button"]')]
+                .filter(b => b.offsetParent !== null)
+                .map(b => (b.innerText||'').trim());
+            if (sim_btn_labels.some(l => /cancel|stop|running/i.test(l))) running = true;
+        }
+        if (!running) {
+            // 마지막 폴백 — body 텍스트에 'Cancel Sim' / 'Stop Sim' / 'Simulating' 패턴.
+            if (/\bcancel\s*sim|stop\s*sim|simulating|sim\s*running/i.test(bodyText)) running = true;
+        }
         // IS Tests 패널 출현 시그널 — 'X PASS' / 'X FAIL' / 'X PENDING' 헤더가 보이면
         // 이 슬롯의 sim 은 끝나고 결과가 노출된 상태 (metrics 변화 detect 못 해도 done 으로 판정).
         const is_tests_visible = /\b\d+\s+(PASS|FAIL|ERROR|PENDING)\b/.test(bodyText);
@@ -2024,6 +2158,12 @@ try:
         page.wait_for_timeout(700)
         js_dismiss_overlays(page)
         page.wait_for_timeout(800)
+        # intro.js 튜토리얼 — Simulate 버튼이 'intro-step-N' / '--disabled-example' 로 잠길 수
+        # 있으므로 세션 시작 시 무조건 한번 강제 종료.
+        js_dismiss_introjs(page)
+        page.wait_for_timeout(500)
+        js_dismiss_introjs(page)
+        page.wait_for_timeout(500)
 
         # 시뮬 인터페이스가 로드될 때까지 짧게 polling — 빈 페이지 (탭 0 개) 일 때 안전.
         # 시뮬 탭이 적어도 1개 보이거나, '+' 버튼이 보일 때까지 최대 10초 대기.
