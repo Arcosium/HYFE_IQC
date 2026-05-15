@@ -195,6 +195,170 @@ N = len(formulas)
 def log(msg):
     print(f'[pw] {msg}', flush=True)
 
+# ── 실패 진단용 dump ─────────────────────────────────────────────────────────
+# click_tab / click_simulate 가 모든 fallback 다 시도하고도 실패한 시점에 호출.
+# /home/opc/.hyfe_iqc_tmp/wqb_fail_<tag>_<ts>.{png,html,json} 에 떨궈서 사람이
+# 사후 분석 가능하게 한다. (subprocess 환경이라 ~/path 직접 쓰기 OK)
+# IQC_MAX_FAIL_DUMPS (기본 20) 초과 시 가장 오래된 파일부터 정리.
+_FAIL_DUMP_DIR = os.path.join(os.path.expanduser('~'), '.hyfe_iqc_tmp')
+_FAIL_DUMP_SEEN = {'n': 0}
+def _dump_failure(page, tag):
+    try:
+        _FAIL_DUMP_SEEN['n'] += 1
+        cap = int(os.environ.get('IQC_MAX_FAIL_DUMPS', '20'))
+        if _FAIL_DUMP_SEEN['n'] > cap:
+            return
+        os.makedirs(_FAIL_DUMP_DIR, exist_ok=True)
+        ts = time.strftime('%H%M%S')
+        safe_tag = ''.join(c if (c.isalnum() or c in '_-') else '_' for c in tag)[:40]
+        base = os.path.join(_FAIL_DUMP_DIR, f'wqb_fail_{safe_tag}_{ts}')
+        png = base + '.png'
+        try: page.screenshot(path=png, full_page=False, timeout=4000)
+        except Exception as e: png = f'(screenshot err: {str(e)[:60]})'
+        meta = {}
+        try:
+            meta = page.evaluate(r'''() => ({
+                url: location.href,
+                title: document.title,
+                body_text_head: (document.body && document.body.innerText || '').slice(0, 600),
+                editor_checkbox_count: document.querySelectorAll('.editor__checkbox').length,
+                editor_checkbox_labels: [...document.querySelectorAll('.editor__checkbox')]
+                    .map(e => ((e.innerText||'').trim() + (/--selected/.test(e.className||'') ? '*' : ''))),
+                tab_count: document.querySelectorAll('.editor-tabs__tab-element').length,
+                tab_labels: [...document.querySelectorAll('.editor-tabs__tab-text')].map(t => (t.innerText||'').trim()).slice(0, 12),
+                sim_btn_class: (document.querySelector('button.editor-simulate-button-text, button[class*="editor-simulate-button"]')||{}).className || null,
+                monaco_count: document.querySelectorAll('.monaco-editor').length,
+                introjs_visible: document.querySelectorAll('[class*="introjs-"]:not(.introjs-hidden)').length,
+            })''')
+        except Exception as e:
+            meta = {'evaluate_err': str(e)[:120]}
+        try:
+            with open(base + '.json', 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception: pass
+        log(f'fail_dump: tag={safe_tag!r} png={png} meta_url={meta.get("url","?")[:80]!r} '
+            f'modes={meta.get("editor_checkbox_labels","?")} tabs={meta.get("tab_labels","?")} '
+            f'btn={(meta.get("sim_btn_class") or "None")[:80]!r}')
+    except Exception as e:
+        log(f'fail_dump exception: {e}')
+
+# ── 잉여 시뮬 탭 정리 ────────────────────────────────────────────────────────
+# SEQUENTIAL 모드는 한 페이지에서 같은 탭 1개를 반복 사용. 3배치 시절 만들어진
+# Simulation 2/3 잉여 탭이 페이지에 남아 WQB 의 동시 sim 슬롯을 점유하면
+# 새 sim 클릭 시 "You have reached the limit of concurrent simulations" 배너로
+# 거부됨. setup 진입 시 첫 탭만 남기고 나머지를 close — 단, sim 진행 중인 탭
+# (tab-dot 가 running 클래스) 은 결과 손실 막기 위해 close 하지 않는다.
+def close_extra_tabs(page, keep_label='Simulation 1'):
+    try:
+        info = page.evaluate(r'''(keep) => {
+            const out = {before: [], closed: [], skipped_running: [], err: null};
+            const tabs = [...document.querySelectorAll('.editor-tabs__tab-element')];
+            for (const t of tabs) {
+                const txtEl = t.querySelector('.editor-tabs__tab-text');
+                const label = txtEl ? (txtEl.innerText||'').trim() : '';
+                out.before.push(label);
+                if (!label) continue;
+                if (label === keep) continue;
+                // 이 탭이 sim 돌고 있으면 (tab-dot--running) close 안 함.
+                const dots = [...t.querySelectorAll('[class*="tab-dot"]')];
+                const dot_classes = dots.map(d => (d.className||'')).join(' ');
+                const running = /--running/.test(dot_classes);
+                if (running) { out.skipped_running.push(label); continue; }
+                // close 'x' 버튼 찾기 — selector 후보 여러 개 시도.
+                const close_sels = [
+                    '.editor-tabs__tab-close',
+                    '[class*="tab-close"]',
+                    '[class*="tab__close"]',
+                    '[class*="close-icon"]',
+                ];
+                let closer = null;
+                for (const sel of close_sels) {
+                    const c = t.querySelector(sel);
+                    if (c && c.offsetParent !== null) { closer = c; break; }
+                }
+                // selector fallback — 탭 내 SVG/icon 중 click 가능한 마지막 자식.
+                if (!closer) {
+                    const candidates = [...t.querySelectorAll('svg, i, [role="button"]')];
+                    closer = candidates.find(c => c.offsetParent !== null) || null;
+                }
+                if (closer) {
+                    try { closer.click(); out.closed.push(label); } catch(e) { out.err = e.message; }
+                }
+            }
+            return out;
+        }''', keep_label)
+        # 항상 log — close=0 케이스에서도 page 의 탭 상태가 보이도록 (진단성).
+        log(f'close_extra_tabs: before={info.get("before")} '
+            f'closed={info.get("closed")} skipped_running={info.get("skipped_running")}')
+        # close 후 confirm dialog 가 뜨는 경우 ('Are you sure?') — 'Yes' 클릭.
+        if info.get('closed'):
+            try:
+                page.evaluate(r'''() => {
+                    const btns = [...document.querySelectorAll('button, [role="button"]')];
+                    for (const b of btns) {
+                        const t = (b.innerText||'').trim().toLowerCase();
+                        if (b.offsetParent !== null && /^(yes|confirm|ok|discard)$/.test(t)) {
+                            try { b.click(); return; } catch(e) {}
+                        }
+                    }
+                }''')
+                page.wait_for_timeout(500)
+            except Exception: pass
+    except Exception as e:
+        log(f'close_extra_tabs exception: {e}')
+
+# ── simulator view 강제 복귀 ────────────────────────────────────────────────
+# show_test_results / settings panel / IS test detail 이 페이지 view 를 바꿔놓고
+# 자동 복귀를 안 해서 .editor__checkbox 도 .editor-tabs__tab-element 도 비는
+# 케이스가 1배치 시퀀셜 실행에서 빈발. 매 setup 직전 한 번 사전 점검.
+def _ensure_simulator_view(page):
+    try:
+        info = page.evaluate(r'''() => {
+            const url = location.href || '';
+            const body = (document.body && document.body.innerText) || '';
+            const tabs = document.querySelectorAll('.editor-tabs__tab-element').length;
+            const monaco = document.querySelectorAll('.monaco-editor').length;
+            const modes = document.querySelectorAll('.editor__checkbox').length;
+            const app_err = /Application Error Has Occurred|application encountered an error/i.test(body);
+            return {url, tabs, monaco, modes, app_err};
+        }''')
+    except Exception as e:
+        log(f'_ensure_simulator_view eval-err: {e}')
+        return
+    on_sim = ('/simulate' in info.get('url','') or '/simulator' in info.get('url','')
+              or '/research/alpha' in info.get('url',''))
+    ui_ok = (info.get('tabs', 0) > 0 and info.get('monaco', 0) > 0
+             and info.get('modes', 0) > 0)
+    app_err = bool(info.get('app_err'))
+    if on_sim and ui_ok and not app_err:
+        return
+    log(f'_ensure_simulator_view: missing UI (tabs={info.get("tabs")} '
+        f'monaco={info.get("monaco")} modes={info.get("modes")} app_err={app_err} '
+        f'url={info.get("url","")[:80]!r}) — recovering')
+    try:
+        if app_err:
+            # WQB 서버가 'An Application Error Has Occurred' 페이지를 띄운 상태 — goto 만으로는
+            # SPA 가 같은 broken state 를 재현할 수 있어 hard reload 로 React tree 자체를 reset.
+            page.reload(timeout=20000, wait_until='domcontentloaded')
+            page.wait_for_timeout(3000)
+            # 재확인 후 여전히 simulator UI 안 보이면 마지막으로 goto.
+            info2 = page.evaluate(r'''() => ({
+                tabs: document.querySelectorAll('.editor-tabs__tab-element').length,
+                monaco: document.querySelectorAll('.monaco-editor').length,
+                modes: document.querySelectorAll('.editor__checkbox').length,
+            })''')
+            if not (info2.get('tabs',0) > 0 and info2.get('monaco',0) > 0):
+                page.goto('https://platform.worldquantbrain.com/simulate',
+                          timeout=20000, wait_until='domcontentloaded')
+                page.wait_for_timeout(3000)
+        else:
+            # 다른 모듈(plugins, research) 로 빠져있을 때 강제 복귀.
+            page.goto('https://platform.worldquantbrain.com/simulate',
+                      timeout=20000, wait_until='domcontentloaded')
+            page.wait_for_timeout(2500)
+    except Exception as e:
+        log(f'_ensure_simulator_view recover-err: {e}')
+
 def emit_partial(slot, status, error_text='', metrics=None, is_status=None,
                  submitted=False, submit_status=''):
     # 슬롯 1개 완료 시점 단위로 worker 에 stream — UI 가 batch 끝날 때까지 안 기다리고 받음.
@@ -213,21 +377,60 @@ def emit_partial(slot, status, error_text='', metrics=None, is_status=None,
     print('[partial] ' + json.dumps(payload, ensure_ascii=False), flush=True)
 
 def toggle_tutorial_checkbox(page):
-    # WQB 시뮬 페이지의 'Tutorial / Results' 체크박스 처리.
-    # Tutorial 켜져 있으면 OFF, Results 꺼져 있으면 ON. 이 상태가 풀려야 Simulate 버튼이
-    # --disabled-example 잠금에서 풀린다. _click_show_test_results 안의 동일 로직이지만
-    # 세션 시작 직후 (login 후 / 시뮬 시도 전) 한번 실행되도록 분리.
+    # WQB 시뮬 페이지 우상단의 'Code / Results / Learn / Data / Tutorial' mode switcher 처리.
+    # 라디오 같은 single-select group. 활성 mode 는 `.editor__checkbox--selected` suffix class.
+    # 목표: Tutorial mode 비활성 + Results mode 활성. (사용자 매뉴얼 동작: 'Tutorial 해제 후
+    # Result 체크'). Results 가 활성화돼야 Simulate 버튼의 --disabled-example 가 풀린다.
+    try:
+        info = page.evaluate(r'''() => {
+            const out = {modes: [], clicked_results: false, clicked_tutorial_off_via: '',
+                         results_was_active: false, tutorial_was_active: false};
+            const items = [...document.querySelectorAll('.editor__checkbox')];
+            for (const el of items) {
+                const cls = (el.className || '').toString();
+                const label = (el.innerText || el.textContent || '').trim();
+                const active = /--selected\b/.test(cls);
+                out.modes.push({label, active, cls: cls.slice(0,100)});
+                if (/^tutorial$/i.test(label) && active) out.tutorial_was_active = true;
+                if (/^results?$/i.test(label) && active) out.results_was_active = true;
+            }
+            // 1) Tutorial 이 활성이면 다른 mode (Code 또는 Results) 클릭해서 해제.
+            //    아래 2) 에서 Results 클릭하므로 자동 해제됨.
+            // 2) Results 가 비활성이면 클릭.
+            if (!out.results_was_active) {
+                const res = items.find(el =>
+                    /^results?$/i.test((el.innerText||'').trim()));
+                if (res) {
+                    try { res.click(); out.clicked_results = true; } catch(e) {}
+                }
+            }
+            return out;
+        }''')
+        modes_str = ' | '.join(f"{m['label']}{'*' if m['active'] else ''}" for m in info.get('modes', []))
+        log(f'toggle_tutorial_checkbox: modes=[{modes_str}] (* = active) | '
+            f'tut_was_active={info.get("tutorial_was_active")} '
+            f'res_was_active={info.get("results_was_active")} '
+            f'clicked_results={info.get("clicked_results")}')
+        return info
+    except Exception as e:
+        log(f'toggle_tutorial_checkbox exception: {e}')
+        return {}
+
+
+def _unused_old_toggle_tutorial_checkbox(page):
     try:
         ti = page.evaluate(r'''() => {
             const out = {tutorial_unchecked: false, results_checked: false,
                          tutorial_already_off: false, results_already_on: false,
-                         debug_labels: []};
+                         debug_labels: [], matched_tutorial: '', matched_results: '',
+                         cb_count: 0};
             const cbs = new Set([
                 ...document.querySelectorAll('input[type="checkbox"]'),
                 ...document.querySelectorAll('[role="checkbox"], [role="switch"]'),
                 ...document.querySelectorAll('[class*="checkbox" i]:not(label):not(div[class*="container"])'),
                 ...document.querySelectorAll('[aria-checked]'),
             ]);
+            out.cb_count = cbs.size;
             function getLabel(cb) {
                 if (cb.id) {
                     const lbl = document.querySelector(`label[for="${cb.id}"]`);
@@ -276,27 +479,27 @@ def toggle_tutorial_checkbox(page):
                 if (cb.offsetParent === null && cb.type !== 'checkbox') continue;
                 const label = getLabel(cb);
                 if (!label) continue;
-                out.debug_labels.push(label.slice(0, 30));
+                out.debug_labels.push(label.slice(0, 40));
                 const checked = isChecked(cb);
                 if (/\btutorial\b/i.test(label)) {
+                    if (!out.matched_tutorial) out.matched_tutorial = label.slice(0, 60);
                     if (checked) { clickIt(cb); out.tutorial_unchecked = true; }
                     else { out.tutorial_already_off = true; }
                 }
                 if (/^results?\b/i.test(label) || /\btest\s*results?\b/i.test(label)) {
+                    if (!out.matched_results) out.matched_results = label.slice(0, 60);
                     if (!checked) { clickIt(cb); out.results_checked = true; }
                     else { out.results_already_on = true; }
                 }
             }
             return out;
         }''')
-        if (ti.get('tutorial_unchecked') or ti.get('results_checked')
-                or ti.get('tutorial_already_off') or ti.get('results_already_on')):
-            log(f'toggle_tutorial_checkbox: tut_off={ti.get("tutorial_unchecked")} '
-                f'(was_off={ti.get("tutorial_already_off")}) results_on={ti.get("results_checked")} '
-                f'(was_on={ti.get("results_already_on")})')
-        else:
-            log(f'toggle_tutorial_checkbox: NO Tutorial/Results checkbox found. '
-                f'labels_seen={ti.get("debug_labels",[])[:20]}')
+        log(f'toggle_tutorial_checkbox: cbs={ti.get("cb_count")} '
+            f'tut_match={ti.get("matched_tutorial")!r} '
+            f'tut_off={ti.get("tutorial_unchecked")} (was_off={ti.get("tutorial_already_off")}) | '
+            f'res_match={ti.get("matched_results")!r} '
+            f'res_on={ti.get("results_checked")} (was_on={ti.get("results_already_on")})')
+        log(f'toggle_tutorial_checkbox: ALL_LABELS={ti.get("debug_labels",[])[:30]}')
         return ti
     except Exception as e:
         log(f'toggle_tutorial_checkbox exception: {e}')
@@ -382,31 +585,89 @@ def js_dismiss_introjs(page):
 def js_dismiss_overlays(page):
     # 신규 사용자: cookie consent, EU GDPR, 첫 로그인 welcome tour, sidebar onboarding 등
     # 다양한 modal/banner 를 한 번에 dismiss. 최소 2회 호출 권장 (modal 이 chain 으로 뜸).
-    page.evaluate(r'''() => {
+    info = page.evaluate(r'''() => {
+        const out = {clicked_labels: [], removed_overlays: 0, removed_dimmer: 0};
         // 단어 시작이 아니라 단어 단위로 매칭 (예: "Accept all cookies" 도 잡음).
         const POSITIVE = /\b(Skip|Got it|Exit|Continue|Close|Dismiss|OK|Okay|Accept|Agree|Allow|Done|Next|Later|Confirm|확인|동의|허용|닫기|건너뛰기|나중에|시작|계속|취소)\b/i;
         const COOKIE = /\b(Accept (all|cookies)|I (accept|agree)|Allow all|Reject all|Only necessary|쿠키 허용|모두 허용|필수만)\b/i;
+        // WQB 의 onboarding-popup modal 안의 dismiss 버튼은 더 광범위한 label 가짐.
+        const ONBOARD = /\b(Got it|Skip|Skip tour|No thanks|Dismiss|Close|Continue|Next|Start|Begin|Maybe later|Later)\b/i;
         const candidates = [
-            ...document.querySelectorAll('button, a[role="button"], [role="button"]')
+            ...document.querySelectorAll('button, a[role="button"], [role="button"], [class*="button" i]')
         ];
-        let clicked = 0;
         for (const el of candidates) {
             try {
                 if (el.offsetParent === null) continue;
+                // onboarding-popup 내부 button 은 별도 처리 (안전 dismiss 만 click).
+                if (el.closest && el.closest('.onboarding-popup, [class*="onboarding"]')) continue;
                 const txt = ((el.innerText || el.textContent || '') + ' ' +
                              (el.getAttribute('aria-label') || '')).trim();
                 if (!txt) continue;
-                if (COOKIE.test(txt) || POSITIVE.test(txt)) {
+                if (COOKIE.test(txt) || POSITIVE.test(txt) || ONBOARD.test(txt)) {
                     el.click();
-                    clicked++;
+                    out.clicked_labels.push(txt.slice(0, 30));
                 }
             } catch(e) {}
         }
         // role=dialog 의 close 버튼도 시도.
         [...document.querySelectorAll('[role="dialog"] button[aria-label*="lose" i], [role="dialog"] [class*="close" i]')]
-            .forEach(b => { try { if (b.offsetParent !== null) { b.click(); clicked++; } } catch(e) {} });
-        return clicked;
+            .forEach(b => { try { if (b.offsetParent !== null) { b.click(); out.clicked_labels.push('dialog-close'); } } catch(e) {} });
+        // WQB onboarding-popup modal — Semantic UI 의 .ui.modal.transition.visible.active
+        // 그리고 .ui.page.modals.dimmer.transition.visible.active (전체 페이지 dimmer).
+        // dismiss 버튼이 onboarding-popup__modal-section--buttons 안에 있음.
+        // ★ SAFETY: 모든 버튼을 click 하면 'Apply to be a Research Consultant' 같은
+        //   acquisition 버튼을 실수로 누를 수 있음 (실측 사고). 절대 SAFE 한 dismiss text 만 click.
+        const SAFE_DISMISS = /^(skip(?:\s+(?:tour|tutorial|onboarding|for now))?|got it|no thanks|maybe later|later|close|dismiss|cancel|x)$/i;
+        const ONBOARD_DANGER = /\b(Apply|Subscribe|Sign\s*up|Sign\s*in|Submit|Send|Buy|Purchase|Enroll|Register|Get\s*started)\b/i;
+        const onboardingBtns = [...document.querySelectorAll(
+            '.onboarding-popup__modal-section--buttons button, .onboarding-popup__modal--content button, .onboarding-popup button')]
+            .filter(b => b.offsetParent !== null);
+        for (const b of onboardingBtns) {
+            try {
+                const t = (b.innerText || '').trim();
+                if (ONBOARD_DANGER.test(t)) {
+                    out.clicked_labels.push('SKIP-DANGEROUS:' + t.slice(0,30));
+                    continue;
+                }
+                if (SAFE_DISMISS.test(t)) {
+                    b.click();
+                    out.clicked_labels.push('onboarding:' + t.slice(0,30));
+                }
+            } catch(e) {}
+        }
+        // dismiss 가 안 통하는 경우 강제 제거 — onboarding modal + dimmer 둘 다 DOM 에서 빼냄.
+        // (사용자 권한 없는 modal/dimmer 는 click 으로 못 닫지만 제거하면 페이지 사용 가능.)
+        const overlaySelectors = [
+            '.onboarding-popup', '.onboarding-popup__modal',
+            '.ui.modal.transition.visible.active',
+            '.ui.page.modals',  // Semantic UI 의 dimmer 컨테이너
+            '.ui.dimmer.transition.visible.active',
+            '[class*="onboarding-popup"]',
+            '.modal.transition.visible',
+        ];
+        for (const sel of overlaySelectors) {
+            try {
+                document.querySelectorAll(sel).forEach(el => {
+                    try { el.remove(); out.removed_overlays++; } catch(e) {}
+                });
+            } catch(e) {}
+        }
+        // body 의 dimmable 클래스도 제거 (Semantic UI dimmer 가 body 에 'dimmable dimmed' 추가).
+        try {
+            const before = document.body.className || '';
+            document.body.className = before.replace(/\b(dimmable|dimmed|scrolling)\b/g, '').replace(/\s+/g,' ').trim();
+            if (document.body.className !== before) out.removed_dimmer++;
+        } catch(e) {}
+        return out;
     }''')
+    try:
+        if isinstance(info, dict) and (info.get('clicked_labels') or info.get('removed_overlays')
+                                        or info.get('removed_dimmer')):
+            log(f'js_dismiss_overlays: clicked={info.get("clicked_labels")[:6]} '
+                f'removed_overlays={info.get("removed_overlays")} '
+                f'removed_dimmer={info.get("removed_dimmer")}')
+    except Exception:
+        pass
 
 
 def detect_auth_block(page):
@@ -472,6 +733,8 @@ def click_tab(page, label):
             return false;
         }''', label)
         log(f'step: click_tab {"ok" if ok else "FAIL"} (js fallback) label={label!r} err={str(e)[:80]}')
+        if not ok:
+            _dump_failure(page, f'click_tab_{label}')
         return ok
 
 def click_new_tab(page):
@@ -660,16 +923,186 @@ def set_editor_text(page, formula):
             page.keyboard.press('Backspace')
         except Exception:
             pass
+        # 추가 보강: monaco editor 의 model.setValue() 를 직접 호출 → monaco 가 내부적으로
+        # change 이벤트를 발화시켜 React 가 listen 하는 onChange/onDidChangeModelContent 가
+        # trigger 된다. 이렇게 해야 React 가 "사용자가 진짜 입력했음" 으로 인식하고
+        # --disabled-example state 를 풀어준다. keyboard.insert_text 만으로는 keydown
+        # 이벤트만 fire 되고 model 변경 이벤트가 발화 안 될 수 있음.
+        # WQB 가 monaco 를 production bundle 에 inline 했을 가능성 있어 window.monaco 가
+        # 없을 수 있음 — 폴백으로 native textarea value setter + InputEvent dispatch (React
+        # 의 onChange listener 가 input 이벤트만 listen 하는 controlled component pattern).
+        try:
+            ok = page.evaluate(r'''(formula) => {
+                const out = {steps: []};
+                // 1) window.monaco 가 있으면 setValue 시도.
+                if (window.monaco && window.monaco.editor) {
+                    try {
+                        const editors = window.monaco.editor.getEditors() || [];
+                        for (const ed of editors) {
+                            try {
+                                const dom = ed.getDomNode();
+                                if (!dom || dom.offsetParent === null) continue;
+                                ed.setValue(formula);
+                                out.steps.push('monaco-setValue');
+                                break;
+                            } catch(e) { out.steps.push('monaco-err:' + String(e).slice(0,40)); }
+                        }
+                    } catch(e) { out.steps.push('monaco-getEditors-err'); }
+                } else {
+                    out.steps.push('no-window-monaco');
+                    // monaco namespace 가 다른 곳에 있는지 탐색.
+                    const monacoKeys = Object.keys(window).filter(k => /monaco/i.test(k));
+                    if (monacoKeys.length) out.monaco_keys = monacoKeys.slice(0, 5);
+                }
+                // 2) 폴백: 보이는 .monaco-editor 의 textarea 에 native value setter +
+                //    InputEvent dispatch. React 가 textarea 의 input 이벤트를 listen
+                //    하는 controlled component 패턴일 때 동작.
+                const eds = [...document.querySelectorAll('.monaco-editor')]
+                    .filter(el => el.offsetParent !== null);
+                if (eds.length) {
+                    const ta = eds[0].querySelector('textarea.inputarea');
+                    if (ta) {
+                        try {
+                            const proto = window.HTMLTextAreaElement.prototype;
+                            const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                            if (setter && setter.set) {
+                                // 한 글자 추가 → input 이벤트 → 한 글자 제거 → 다시 input 이벤트.
+                                // 이렇게 두 번 발화시켜 React 가 dirty change 를 확실히 인식.
+                                const orig = ta.value || '';
+                                setter.set.call(ta, orig + ' ');
+                                ta.dispatchEvent(new InputEvent('input', {
+                                    bubbles: true, inputType: 'insertText', data: ' '
+                                }));
+                                setter.set.call(ta, orig);
+                                ta.dispatchEvent(new InputEvent('input', {
+                                    bubbles: true, inputType: 'deleteContentBackward', data: null
+                                }));
+                                out.steps.push('native-setter-fire');
+                            } else {
+                                out.steps.push('no-native-setter');
+                            }
+                        } catch(e) { out.steps.push('native-setter-err:' + String(e).slice(0,40)); }
+                    } else {
+                        out.steps.push('no-textarea');
+                    }
+                } else {
+                    out.steps.push('no-visible-monaco-dom');
+                }
+                return out;
+            }''', formula)
+            log(f'step: set_editor_text monaco-fire {ok}')
+        except Exception as e:
+            log(f'step: set_editor_text monaco-fire exception: {e}')
         log(f'step: set_editor_text done')
         return True
     except Exception as e:
         log(f'step: set_editor_text EXCEPTION: {e}')
         return False
 
+def _ensure_results_mode(page):
+    # WQB 우상단 mode switcher 강제: TUTORIAL active 면 끄고 RESULTS active 면 둠.
+    # click_simulate 직전마다 호출 — WQB 가 어떤 트리거로 TUTORIAL 을 다시 켜는 race 차단.
+    try:
+        info = page.evaluate(r'''() => {
+            const items = [...document.querySelectorAll('.editor__checkbox')];
+            const out = {tut_off: false, res_on: false, before: [], after: []};
+            for (const el of items) {
+                const lbl = (el.innerText || '').trim();
+                const act = /--selected\b/.test((el.className||'').toString());
+                out.before.push(lbl + (act?'*':''));
+            }
+            // 1) TUTORIAL active 면 click 해서 deactivate.
+            for (const el of items) {
+                if (/^tutorial$/i.test((el.innerText||'').trim())
+                        && /--selected\b/.test((el.className||'').toString())) {
+                    try { el.click(); out.tut_off = true; } catch(e) {}
+                }
+            }
+            // 2) RESULTS inactive 면 click 해서 activate.
+            for (const el of items) {
+                if (/^results?$/i.test((el.innerText||'').trim())
+                        && !/--selected\b/.test((el.className||'').toString())) {
+                    try { el.click(); out.res_on = true; } catch(e) {}
+                }
+            }
+            for (const el of items) {
+                const lbl = (el.innerText || '').trim();
+                const act = /--selected\b/.test((el.className||'').toString());
+                out.after.push(lbl + (act?'*':''));
+            }
+            return out;
+        }''')
+        if info.get('tut_off') or info.get('res_on'):
+            log(f'_ensure_results_mode: before=[{",".join(info.get("before",[]))}] '
+                f'tut_off={info.get("tut_off")} res_on={info.get("res_on")} '
+                f'after=[{",".join(info.get("after",[]))}]')
+    except Exception as e:
+        log(f'_ensure_results_mode exception: {e}')
+
+
 def click_simulate(page):
     # Simulate 버튼이 'editor-simulate-button-text--disabled-example' 등 disabled 클래스로
     # 잠겨있으면 새 sim 못 시작. monaco editor 에 'space + backspace' 입력해서 *editing 상태*
     # 트리거 → React 가 disabled 풀고 enabled 로 전환.
+    # ── 진입 시 already-running 체크 (false-fail 차단) ──
+    # WQB 는 sim 중에도 button label='Simulate' 그대로 두고 진행 표시는 우측 패널의
+    # '10% / Click here to cancel the simulation' + progress bar 로만 한다. 우리는 그걸
+    # extract_state.running 으로 감지하므로, 진입 시 이미 running 이면 새 클릭 안 함.
+    try:
+        gate = page.evaluate(r'''() => {
+            const body = (document.body && document.body.innerText) || '';
+            const concurrent_limit = /limit of concurrent simulations|reached the limit of concurrent/i.test(body);
+            const sim_inflight = /cancel\s+the\s+simulation|simulations?\s+usually\s+take|\bcancel\s*sim|stop\s*sim|simulating/i.test(body);
+            const pb = document.querySelector('[class*="editor-simulate__progress"], [class*="simulate-progress"], [class*="progress-bar"]');
+            let pb_pct = false;
+            if (pb && pb.offsetParent !== null) {
+                const ptxt = (pb.innerText||'') + ' ' + (pb.textContent||'');
+                pb_pct = /\d+\s*%/.test(ptxt);
+            }
+            return {concurrent_limit, sim_inflight, pb_pct,
+                    body_head: body.slice(0, 200)};
+        }''')
+        # 진단성 — 매 호출 시 gate 결과 1줄 log (어떤 조건이 매치 됐는지 / 안 됐는지).
+        log(f'step: click_simulate gate inflight={gate.get("sim_inflight")} '
+            f'pb_pct={gate.get("pb_pct")} concurrent_limit={gate.get("concurrent_limit")} '
+            f'body_head={gate.get("body_head","")[:80]!r}')
+        if gate.get('concurrent_limit'):
+            log('step: click_simulate skip — concurrent simulations limit reached')
+            # 호출자 (_start_sim) 의 16x1.5s polling 동안 running 으로 인식되어 정상 path.
+            return 1
+        if gate.get('sim_inflight') or gate.get('pb_pct'):
+            log('step: click_simulate skip — sim already in progress')
+            return 1
+    except Exception as e:
+        log(f'step: click_simulate gate-err: {e}')
+    # 매 click 직전에 mode-switcher 가 Results 로 잠겼는지 보장 (TUTORIAL 자동 복원 race 차단).
+    _ensure_results_mode(page)
+    # WQB onboarding-popup modal 이 떠있으면 button 위에 dimmer 가 덮여 클릭이 dimmer 에
+    # 흡수됨 (FAIL-diag 에서 elementFromPoint 가 'DIV.ui page modals dimmer ...' 잡힌 패턴).
+    # 매 click 직전에 modal/dimmer 강제 제거.
+    try: js_dismiss_overlays(page)
+    except Exception: pass
+    # 후속 sim 실패 패턴: button class 에 'intro-step-N' 가 박혀있어 intro.js 가 click 을
+    # 가로채는 케이스 (FAIL-diag 에서 btn_class='intro-step-5 editor-simulate-button-text ...'
+    # 패턴). disabled-example 가 detect 안 돼도 intro-step 만 있어도 sim 시작 안 됨.
+    # 매 click 직전에 무조건 intro.js exit + button class 에서 intro-step-* 제거.
+    try: js_dismiss_introjs(page)
+    except Exception: pass
+    try:
+        page.evaluate(r'''() => {
+            const btns = document.querySelectorAll('button.editor-simulate-button-text, button[class*="editor-simulate-button"]');
+            for (const b of btns) {
+                try {
+                    const orig = (b.className||'').toString();
+                    const cleaned = orig
+                        .replace(/\bintro-step-\d+\b/g, '')
+                        .replace(/\bintrojs-[a-zA-Z0-9-]+\b/g, '')
+                        .replace(/\s+/g, ' ').trim();
+                    if (cleaned !== orig) b.className = cleaned;
+                } catch(e) {}
+            }
+        }''')
+    except Exception: pass
     try:
         is_disabled_example = page.evaluate(r'''() => {
             const btn = document.querySelector('button.editor-simulate-button-text, button[class*="editor-simulate-button"]');
@@ -820,6 +1253,159 @@ def click_simulate(page):
         post_running = bool(post.get('running_detected'))
     except Exception as e:
         log(f'step: click_simulate post diag exception: {e}')
+
+    # 5) Post-check 가 running=False 면 DOM 클릭은 됐지만 React 가 sim 을 안 띄운 상태.
+    #    Tutorial / example state 가 onClick 안에서 early-return 한 케이스 — React 의
+    #    onClick prop 을 __reactProps$* 통해 직접 invoke 해서 disabled-guard 까지 우회.
+    #    (이전엔 locator/JS click 둘 다 0 일 때만 force-fire 했는데, "DOM 은 clicked=1 인데
+    #    sim 안 시작" 케이스가 빈발 → 매번 한 번 더 보장.)
+    if not post_running:
+        try:
+            js_dismiss_introjs(page)
+        except Exception:
+            pass
+        try:
+            _ensure_results_mode(page)
+        except Exception:
+            pass
+        try:
+            forced2 = page.evaluate(r'''() => {
+                const btn = document.querySelector('button.editor-simulate-button-text, button[class*="editor-simulate-button"]');
+                if (!btn) return {ok: false, why: 'no-btn'};
+                try {
+                    btn.disabled = false;
+                    btn.removeAttribute('disabled');
+                    btn.classList.remove('editor-simulate-button-text--disabled',
+                                          'editor-simulate-button-text--disabled-example');
+                } catch(e) {}
+                const propsKey = Object.keys(btn).find(k => k.startsWith('__reactProps$'));
+                if (propsKey) {
+                    const p = btn[propsKey];
+                    if (p && typeof p.onClick === 'function') {
+                        try {
+                            p.onClick({
+                                preventDefault: () => {}, stopPropagation: () => {},
+                                currentTarget: btn, target: btn, type: 'click', bubbles: true,
+                            });
+                            return {ok: true, via: 'react-onClick-recover'};
+                        } catch(e) { return {ok: false, why: 'react-err: ' + e.message}; }
+                    }
+                    return {ok: false, why: 'no-onClick'};
+                }
+                try { btn.click(); return {ok: true, via: 'native-recover'}; }
+                catch(e) { return {ok: false, why: 'native-err: ' + e.message}; }
+            }''')
+            log(f'step: click_simulate post-recovery force-fire {forced2}')
+            if forced2 and forced2.get('ok'):
+                page.wait_for_timeout(1500)
+                try:
+                    post2 = page.evaluate(r'''() => {
+                        const btns = [...document.querySelectorAll('button.editor-simulate-button-text, button[class*="editor-simulate-button"], button')];
+                        const labels = btns.filter(b => b.offsetParent !== null
+                            && /simulate|cancel|stop|running/i.test((b.innerText||'').trim()))
+                            .map(b => (b.innerText||'').trim().slice(0,40));
+                        const body = (document.body.innerText || '');
+                        const btn_started = labels.some(l => /cancel|stop|running/i.test(l));
+                        return {sim_buttons: labels, running_detected: btn_started
+                            || /\bcancel sim|stop sim|simulating|sim running/i.test(body)};
+                    }''')
+                    post_running = bool(post2.get('running_detected'))
+                    log(f'step: click_simulate post-recovery check sim_buttons={post2.get("sim_buttons")} running={post_running}')
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f'step: click_simulate post-recovery exception: {e}')
+
+    # 6) Post-recovery 의 force-fire 도 막혔으면 (React props.disabled 가드로 onClick 본문이
+    #    early-return) — 마지막 수단: monaco editor 에 focus 후 Ctrl+Enter shortcut.
+    #    WQB 는 monaco editor command 로 sim 단축키를 등록하므로, button 의 disabled 가드를
+    #    우회한다. 또한 그 전에 monaco.editor.getEditors()[0].setValue() 로 model 변경 이벤트
+    #    재발화 → React 가 dirty state 인식 → --disabled-example 풀림.
+    if not post_running:
+        try:
+            page.evaluate(r'''() => {
+                if (!window.monaco || !window.monaco.editor) return;
+                const eds = window.monaco.editor.getEditors() || [];
+                for (const ed of eds) {
+                    try {
+                        const dom = ed.getDomNode();
+                        if (!dom || dom.offsetParent === null) continue;
+                        const cur = ed.getValue();
+                        // setValue 를 동일한 값으로 다시 호출 → onDidChangeModelContent fire.
+                        ed.setValue(cur);
+                        ed.focus();
+                        const ta = dom.querySelector('textarea.inputarea');
+                        if (ta) {
+                            try { ta.dispatchEvent(new Event('input', {bubbles: true})); } catch(e) {}
+                        }
+                        return;
+                    } catch(e) {}
+                }
+            }''')
+            page.locator('.monaco-editor textarea.inputarea').first.focus(timeout=2000)
+            page.wait_for_timeout(300)
+            page.keyboard.press('Control+Enter')
+            log('step: click_simulate post-recovery Ctrl+Enter shortcut')
+            page.wait_for_timeout(2000)
+            try:
+                post3 = page.evaluate(r'''() => {
+                    const btns = [...document.querySelectorAll('button.editor-simulate-button-text, button[class*="editor-simulate-button"], button')];
+                    const labels = btns.filter(b => b.offsetParent !== null
+                        && /simulate|cancel|stop|running/i.test((b.innerText||'').trim()))
+                        .map(b => (b.innerText||'').trim().slice(0,40));
+                    const body = (document.body.innerText || '');
+                    const btn_started = labels.some(l => /cancel|stop|running/i.test(l));
+                    return {sim_buttons: labels, running_detected: btn_started
+                        || /\bcancel sim|stop sim|simulating|sim running/i.test(body)};
+                }''')
+                post_running = bool(post3.get('running_detected'))
+                log(f'step: click_simulate post-recovery shortcut check sim_buttons={post3.get("sim_buttons")} running={post_running}')
+            except Exception:
+                pass
+        except Exception as e:
+            log(f'step: click_simulate post-recovery shortcut exception: {e}')
+
+    # 7) 모든 path 실패 — 페이지 상태 진단 로그.
+    if not post_running:
+        try:
+            diag = page.evaluate(r'''() => {
+                const out = {};
+                const btn = document.querySelector('button.editor-simulate-button-text, button[class*="editor-simulate-button"]');
+                if (btn) {
+                    out.btn_class = (btn.className||'').toString().slice(0, 200);
+                    out.btn_disabled = btn.disabled;
+                    out.btn_label = (btn.innerText||'').trim().slice(0, 40);
+                    const rect = btn.getBoundingClientRect();
+                    out.btn_rect = {x: Math.round(rect.x), y: Math.round(rect.y),
+                                    w: Math.round(rect.width), h: Math.round(rect.height)};
+                    // 버튼 위에 다른 element 가 가로채는지 확인 (overlay).
+                    const cx = rect.left + rect.width/2;
+                    const cy = rect.top + rect.height/2;
+                    const top = document.elementFromPoint(cx, cy);
+                    out.top_at_center = top ? (top.tagName + '.' + (top.className||'').toString().slice(0,80)) : null;
+                    out.btn_is_top = top === btn || btn.contains(top);
+                }
+                // overlay/modal 검사.
+                const overlays = [...document.querySelectorAll('[class*="modal" i], [class*="overlay" i], [class*="dialog" i], [class*="introjs" i], [class*="tutorial" i], [class*="onboarding" i]')]
+                    .filter(el => el.offsetParent !== null)
+                    .map(el => (el.tagName + '.' + (el.className||'').toString().slice(0,60)).slice(0,80));
+                out.overlays = overlays.slice(0, 8);
+                // 페이지 URL + body innerText 첫 부분.
+                out.url = (location.href || '').slice(0, 120);
+                // monaco 존재 여부 (sanity).
+                out.has_window_monaco = !!(window.monaco && window.monaco.editor);
+                out.monaco_doms = document.querySelectorAll('.monaco-editor').length;
+                return out;
+            }''')
+            log(f'step: click_simulate FAIL-diag btn_class={diag.get("btn_class")!r}')
+            log(f'step: click_simulate FAIL-diag btn_disabled={diag.get("btn_disabled")} label={diag.get("btn_label")!r} rect={diag.get("btn_rect")}')
+            log(f'step: click_simulate FAIL-diag top_at_center={diag.get("top_at_center")!r} btn_is_top={diag.get("btn_is_top")}')
+            log(f'step: click_simulate FAIL-diag overlays={diag.get("overlays")}')
+            log(f'step: click_simulate FAIL-diag has_window_monaco={diag.get("has_window_monaco")} monaco_doms={diag.get("monaco_doms")}')
+        except Exception as e:
+            log(f'step: click_simulate FAIL-diag exception: {e}')
+        _dump_failure(page, 'click_simulate')
+
     # Ctrl+Enter 가 실제로 sim 을 시작시켰으면 (locator/JS click 실패해도) 클릭 성공으로 인정.
     # 이전 코드: locator_clicked + info.clicked → Ctrl+Enter 만으로 시작된 경우 0 을 반환해
     # 호출자가 'simulate button not clicked' 오류 처리. 그 결과 첫 알파만 운 좋게 통과하고
@@ -1146,8 +1732,19 @@ def extract_state(page):
             if (sim_btn_labels.some(l => /cancel|stop|running/i.test(l))) running = true;
         }
         if (!running) {
-            // 마지막 폴백 — body 텍스트에 'Cancel Sim' / 'Stop Sim' / 'Simulating' 패턴.
-            if (/\bcancel\s*sim|stop\s*sim|simulating|sim\s*running/i.test(bodyText)) running = true;
+            // 마지막 폴백 — body 텍스트에 'Cancel Sim' / 'Stop Sim' / 'Simulating' /
+            // 'Click here to cancel the simulation' / 'Simulations usually take' 패턴.
+            // (WQB 는 sim 중에도 button label 을 'Simulate' 그대로 두고 진행 표시는
+            //  우측 패널 안의 cancel-link + progress bar 로만 표시함 — 핵심 폴백.)
+            if (/\bcancel\s*sim|stop\s*sim|simulating|sim\s*running|cancel\s+the\s+simulation|simulations?\s+usually\s+take/i.test(bodyText)) running = true;
+        }
+        if (!running) {
+            // progress bar 직접 매치 — `.editor-simulate__progress-bar` 또는 progress 클래스.
+            const pb = document.querySelector('[class*="editor-simulate__progress"], [class*="simulate-progress"], [class*="progress-bar"]');
+            if (pb && pb.offsetParent !== null) {
+                const ptxt = (pb.innerText||'') + ' ' + (pb.textContent||'');
+                if (/\d+\s*%/.test(ptxt)) running = true;
+            }
         }
         // IS Tests 패널 출현 시그널 — 'X PASS' / 'X FAIL' / 'X PENDING' 헤더가 보이면
         // 이 슬롯의 sim 은 끝나고 결과가 노출된 상태 (metrics 변화 detect 못 해도 done 으로 판정).
@@ -2175,19 +2772,14 @@ def collect_full_metrics(page, summary_metrics):
 
 
 def is_done_after(before_metrics, state_obj):
+    # IS Tests 패널(`N PASS / N FAIL / N PENDING` 헤더) 또는 compile/lint 에러 만
+    # 진짜 done 시그널. 같은 페이지 재사용 시 DOM 에 직전 알파의 sharpe/fitness 가 남아
+    # state.metrics 에 잡힐 수 있어, metrics 변화 기반 done 판정은 false-positive 위험.
+    # 사용자 요구: "IS Testing Panel 미수신이면 억지로 만들지 말고 에러값 내뱉기."
     if state_obj.get('error_text'):
         return True
-    # IS Tests 패널 출현 = sim 종료. metrics 변화 detect 못 해도 done 판정.
     if state_obj.get('is_tests_visible'):
         return True
-    m = state_obj.get('metrics') or {}
-    if not ('sharpe' in m and 'fitness' in m):
-        return False
-    if not before_metrics:
-        return True
-    for k in m:
-        if before_metrics.get(k) != m.get(k):
-            return True
     return False
 
 results = [{'slot': i+1, 'code': formulas[i], 'summary_metrics': {},
@@ -2295,6 +2887,46 @@ try:
         page.wait_for_timeout(800)
         toggle_tutorial_checkbox(page)
         page.wait_for_timeout(500)
+        # DEBUG: 첫 세션에서만 우상단 영역 스크린샷 + DOM dump (Tutorial 체크박스 찾기용).
+        # 환경변수 IQC_DEBUG_TOPRIGHT=1 일 때만 활성화.
+        if os.environ.get('IQC_DEBUG_TOPRIGHT') == '1':
+            try:
+                debug_out = os.path.expanduser('~/.hyfe_iqc_tmp/debug_topright')
+                page.screenshot(path=f'{debug_out}_full.png', full_page=False)
+                page.screenshot(path=f'{debug_out}_TR.png',
+                                clip={'x': 800, 'y': 0, 'width': 800, 'height': 450})
+                page.screenshot(path=f'{debug_out}_TR_tight.png',
+                                clip={'x': 1100, 'y': 0, 'width': 500, 'height': 250})
+                tr_info = page.evaluate(r'''() => {
+                    const out = [];
+                    const TR_X = 900, TR_Y = 250;
+                    const sel = 'button, input, [role="checkbox"], [role="switch"], [aria-checked], label, [class*="checkbox" i], [class*="toggle" i], [class*="switch" i]';
+                    for (const el of document.querySelectorAll(sel)) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width === 0 || r.height === 0) continue;
+                        if (el.offsetParent === null) continue;
+                        if (r.left < TR_X || r.top > TR_Y) continue;
+                        out.push({
+                            tag: el.tagName,
+                            text: ((el.innerText || el.textContent || '').trim()).slice(0, 60),
+                            aria_label: el.getAttribute('aria-label') || '',
+                            aria_checked: el.getAttribute('aria-checked') || '',
+                            role: el.getAttribute('role') || '',
+                            type: el.getAttribute('type') || '',
+                            cls: (el.className || '').toString().slice(0, 150),
+                            rect: {x: Math.round(r.left), y: Math.round(r.top),
+                                   w: Math.round(r.width), h: Math.round(r.height)},
+                            outer: (el.outerHTML || '').slice(0, 400),
+                        });
+                    }
+                    return out;
+                }''')
+                import json as _json
+                with open(f'{debug_out}_TR.json', 'w', encoding='utf-8') as _f:
+                    _json.dump(tr_info, _f, ensure_ascii=False, indent=2)
+                log(f'DEBUG_TOPRIGHT: dumped {len(tr_info)} elements to {debug_out}_TR.json + screenshots')
+            except Exception as _e:
+                log(f'DEBUG_TOPRIGHT failed: {_e}')
 
         # 시뮬 인터페이스가 로드될 때까지 짧게 polling — 빈 페이지 (탭 0 개) 일 때 안전.
         # 시뮬 탭이 적어도 1개 보이거나, '+' 버튼이 보일 때까지 최대 10초 대기.
@@ -2373,6 +3005,18 @@ try:
             # 탭 tab_label 을 열어 formulas[fi] 를 에디터에 넣고 검증. 성공 시 True,
             # 실패 시 results[fi]['error_text'] 설정 후 False.
             log(f'step: setup[idx{_ix(fi)}] tab={tab_label!r} formula_len={len(formulas[fi])}')
+            # 1배치 시퀀셜에서 show_test_results / results-detail navigate 등으로 페이지
+            # 가 simulator view 를 벗어난 채 click_tab 만 반복하면 8초 timeout 만 누적.
+            # setup 진입 시 한 번 강제 복귀 — 정상이면 no-op.
+            _ensure_simulator_view(page)
+            # SEQUENTIAL 1탭 모드에서 잉여 탭(Simulation 2/3 등) 정리 — 잉여 탭이 동시
+            # sim 슬롯을 점유하면 새 sim 클릭이 "limit of concurrent simulations" 로 거부됨.
+            log(f'step: setup[idx{_ix(fi)}] pre-check SEQUENTIAL={SEQUENTIAL}')
+            if SEQUENTIAL:
+                try:
+                    close_extra_tabs(page, keep_label=tab_label)
+                except Exception as e:
+                    log(f'step: setup[idx{_ix(fi)}] close_extra_tabs raised: {e}')
             if not click_tab(page, tab_label):
                 log(f'step: setup[idx{_ix(fi)}] FAIL tab_click')
                 results[fi]['error_text'] = 'tab click failed'
@@ -2428,6 +3072,22 @@ try:
             started = False
             click_ok_any = False
             for attempt in range(2):
+                if attempt > 0:
+                    # attempt 1 실패 후 attempt 2 전 — Tutorial/intro.js 잔존물이 React state
+                    # 를 잠갔을 수 있으므로 강제 reset 후 retry. 단순 재클릭만 하면 같은 상태에서
+                    # 또 실패한다 (실측 패턴).
+                    try: js_dismiss_introjs(page)
+                    except Exception: pass
+                    try: toggle_tutorial_checkbox(page)
+                    except Exception: pass
+                    try:
+                        # 에디터 dirty state 재트리거 — End → space → backspace.
+                        page.locator('.monaco-editor textarea.inputarea').first.focus(timeout=2000)
+                        page.keyboard.press('End')
+                        page.keyboard.press(' ')
+                        page.keyboard.press('Backspace')
+                        page.wait_for_timeout(500)
+                    except Exception: pass
                 ck = click_simulate(page)
                 if ck:
                     click_ok_any = True
@@ -2461,10 +3121,18 @@ try:
         def _collect_done(fi, state):
             if state.get('error_text'):
                 results[fi]['error_text'] = state['error_text'][:600]
-            else:
-                full = collect_full_metrics(page, state.get('metrics') or {})
-                results[fi]['summary_metrics'] = full['metrics']
-                results[fi]['is_status'] = full['is_status']
+                return
+            # ★ panel 없으면 metrics 신뢰 불가 (같은 페이지의 직전 알파 잔재일 수 있음).
+            #   summary_metrics / is_status 채우지 말고 error 로 마감.
+            if not state.get('is_tests_visible'):
+                log(f'step: SEQ idx{_ix(fi)} _collect_done refusing — no IS Testing Panel')
+                results[fi]['error_text'] = 'no IS Testing Panel (metrics unreliable — likely stale from previous alpha)'
+                results[fi]['summary_metrics'] = {}
+                results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': []}
+                return
+            full = collect_full_metrics(page, state.get('metrics') or {})
+            results[fi]['summary_metrics'] = full['metrics']
+            results[fi]['is_status'] = full['is_status']
 
         def _is_pass_slot(fi):
             if results[fi].get('error_text'):
@@ -2570,10 +3238,12 @@ try:
                         break
                     if (age > SEQ_TRIVIAL_QUIT_SEC and not panel_seen
                             and cur_metrics == (results[fi].get('before_metrics') or {})):
-                        log(f'step: SEQ idx{_ix(fi)} trivial_quit (no result {age}s, panel=False)')
+                        log(f'step: SEQ idx{_ix(fi)} trivial_quit → error (no panel {age}s, metrics unchanged)')
+                        results[fi]['error_text'] = (
+                            f'panel never showed after {age}s (metrics unchanged) — '
+                            'sim likely produced no result')
                         results[fi]['summary_metrics'] = {}
-                        results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': [],
-                                                    'raw': '(panel never showed; sim likely produced no result)'}
+                        results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': []}
                         done = True
                         break
                 if not done and not results[fi].get('error_text'):
@@ -2656,12 +3326,15 @@ try:
                         _emit_done(fi)
                         _fill_slot(w)
                         continue
-                    # trivial-quit — 6분 무결과 + metrics 안 변함 + panel 없음 → signal 0 알파.
+                    # trivial-quit — 6분 무결과 + metrics 안 변함 + panel 없음 → error 마감.
+                    # (panel 없으면 metrics 직전 알파 잔재일 수 있어 결과 신뢰 불가.)
                     if sim_age > 6 * 60 and metrics_unchanged and not panel_seen:
-                        log(f'parallel: slot{w} idx{_ix(fi)} trivial_quit (no result {sim_age:.0f}s)')
+                        log(f'parallel: slot{w} idx{_ix(fi)} trivial_quit → error (no panel {sim_age:.0f}s)')
+                        results[fi]['error_text'] = (
+                            f'panel never showed after {int(sim_age)}s (metrics unchanged) — '
+                            'sim likely produced no result')
                         results[fi]['summary_metrics'] = {}
-                        results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': [],
-                                                    'raw': '(panel never showed; sim likely produced no result)'}
+                        results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': []}
                         _emit_done(fi)
                         _fill_slot(w)
                         continue
@@ -2888,6 +3561,9 @@ def simulate_batch(
     env['IQC_PARALLEL_SLOTS'] = str(PLAYWRIGHT_PARALLEL_SLOTS)
     # PASS_THRESHOLD 는 worker.py 의 환경변수에서 읽음. Default 7 (8개 IS Tests 중 7개 통과).
     env['IQC_PASS_THRESHOLD'] = os.environ.get('HYFE_IQC_PASS_THRESHOLD', '7')
+    # 디버그 플래그 (subprocess 안에서 우상단 스크린샷 dump).
+    if os.environ.get('IQC_DEBUG_TOPRIGHT'):
+        env['IQC_DEBUG_TOPRIGHT'] = os.environ['IQC_DEBUG_TOPRIGHT']
     # 한 호출에 라운드 전체 알파를 넘기므로 subprocess 데드라인을 알파 수에 비례하게 늘린다.
     # 첫 wave (= 슬롯 수) 는 기본 타임아웃 안에, 그 뒤로 알파 1개당 ~5분 추가 예산.
     _n_alpha = max(1, len(payload_in))
@@ -2947,7 +3623,9 @@ def simulate_batch(
                       'menu_candidates', 'trigger_outer',
                       'apply_settings', 'step:',
                       'toggle_tutorial_checkbox', 'init_script:',
-                      'js_dismiss_introjs', 'js_dismiss_overlays')
+                      'js_dismiss_introjs', 'js_dismiss_overlays',
+                      '_ensure_results_mode',
+                      'fail_dump:', '_ensure_simulator_view')
 
     def _reader(stream, buf, is_err: bool):
         # 라인 buffer 로만 모음 — UI 로그가 [pw]/[pw err] 트레이스로 도배되는 걸 막기 위해
