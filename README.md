@@ -1,9 +1,59 @@
 # HYFE IQC — WorldQuant Brain Alpha Auto-Discovery
 
-Gemini 2.5 Flash 가 12개 알파를 한 라운드에 생성하면, Playwright 가 WQB 시뮬레이션 페이지에서
-3개씩 동시 시뮬 → IS Testing Status 패널 (PASS/FAIL/ERROR/PENDING 8개 항목) 을 scrape →
-PASS≥7 + FAIL=0 + ERROR=0 알파에 한해 자동으로 Submit 시도. WQB 가 실제로 받았는지는
-post-submit 재 scrape + 거절 텍스트 매칭으로 검증해 `Submitted` / `Unsubmitted (Rejected)` 분류.
+> **Hybrid Financial Engineering — In-Contest Optimizer**
+> Gemini 가 알파(트레이딩 시그널)를 생성하고, Playwright 가 WorldQuant Brain 에 24/7 자동 제출하는 멀티유저 자동화 봇.
+
+[WorldQuant Brain](https://platform.worldquantbrain.com) 은 트레이더가 알파(트레이딩 시그널) 을
+제출해 채점받는 글로벌 퀀트 컨테스트 플랫폼입니다.
+HYFE IQC 는 이 과정을 끝에서 끝까지 자동화합니다 — 알파 발상부터 시뮬레이션, 제출, 거절 분류까지.
+
+## 한 줄 요약
+
+```
+Gemini 2.5 Flash 가 12개 알파를 한 라운드에 생성
+  → Playwright 가 WQB 시뮬레이션 페이지에서 3개씩 동시 시뮬
+  → IS Testing Status 패널 (PASS/FAIL/ERROR/PENDING 8개 항목) 을 scrape
+  → PASS≥7 + FAIL=0 + ERROR=0 알파에 한해 자동으로 Submit 시도
+  → post-submit 재 scrape + 거절 텍스트 매칭으로
+     `Submitted` / `Unsubmitted (Rejected)` 분류
+```
+
+## 누가 쓰는가
+
+- **WQB 컨센턴트** — 알파 채굴을 24/7 무인 운영하고 싶은 사람
+- **자기 알파의 self-correlation 한계를 회피하고 싶은 사람** —
+  이미 제출한 코드를 Gemini 프롬프트에 명시해 다른 archetype/dataset 시도 가이드
+- **여러 WQB 계정을 동시에 굴리는 팀** — 사용자별 chromium 프로필 / DB scope / 워커 쓰레드 격리
+
+## 알아야 할 용어
+
+| 용어 | 의미 |
+|---|---|
+| **Alpha** | 주가 데이터에서 미래 수익을 예측하는 수식 (예: `rank(-delta(close, 5))`) |
+| **WQB / Brain** | WorldQuant Brain — 알파 시뮬레이션·채점·실거래 플랫폼 |
+| **IS Tests** | In-Sample 검사. 8개 항목 (Sharpe, Turnover, Fitness, Sub-universe, Self-correlation 등) |
+| **Submit** | 알파를 정식 채점 큐에 올림. Self-correlation, 제출 한도 등을 통과해야 Submitted |
+
+## 30초 빠른 시작
+
+```bash
+# 의존성
+python3 -m pip install --user --upgrade flask google-genai cryptography python-dotenv
+sudo dnf install -y python3.11 python3.11-pip          # Playwright 전용 인터프리터
+python3.11 -m pip install --user playwright
+python3.11 -m playwright install chromium
+
+# 기동
+git clone https://github.com/Arcosium/HYFE_IQC.git
+cd HYFE_IQC
+./run.sh                # 포트 8088 foreground
+# → http://localhost:8088 접속
+# → 첫 화면에서 WQB 이메일/비밀번호 + Gemini API 키 입력하면 끝
+```
+
+상세 운영(systemd, Cloudflare Tunnel, Nginx, 멀티유저 운영)은 아래로 계속 읽으세요.
+
+---
 
 ## 기능 요약
 
