@@ -331,14 +331,49 @@
     } catch (_) {}
   });
 
-  // ── Best 알파 표 ─────────────────────────────────────────
+  // ── 알파 제출 시도 표 (모바일 /api/m_submits 와 동일 소스·비우기) ────────
+  function fmtTime(ts) {
+    if (!ts) return '—';
+    try {
+      // 뷰어/서버 타임존 무관하게 항상 KST(Asia/Seoul) 로 표기.
+      return new Date(ts * 1000).toLocaleTimeString('en-GB', {
+        timeZone: 'Asia/Seoul', hour12: false,
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+    } catch (_) {
+      const d = new Date((ts + 9 * 3600) * 1000);  // UTC+9 수동 폴백
+      const z = (n) => String(n).padStart(2, '0');
+      return `${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;
+    }
+  }
+  // XSS 안전: innerHTML 미사용 — 동적 값은 textContent/.title 로만.
+  function bestCell(text, title) {
+    const td = document.createElement('td');
+    td.textContent = (text == null ? '' : String(text));
+    if (title) td.title = String(title);
+    return td;
+  }
+  function bestBadge(submitted, ss) {
+    const span = document.createElement('span');
+    let cls = 'unsubmitted', label = '— 미제출', title = ss || '제출 시도';
+    if (submitted) { cls = 'submitted'; label = '✓ 제출'; title = '제출 성공'; }
+    else if (ss.startsWith('rejected:')) {
+      cls = 'unsubmitted'; label = '✗ 거절'; title = ss.slice('rejected:'.length).trim().slice(0, 80);
+    } else if (ss.startsWith('fail:')) { cls = 'unsubmitted'; label = '⚠ 실패'; title = ss; }
+    else if (ss === 'disabled') { cls = 'unsubmitted'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
+    else if (ss === 'not_found') { cls = 'unsubmitted'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }
+    span.className = 'status-badge ' + cls;
+    span.textContent = label;
+    span.title = title;
+    return span;
+  }
   async function refreshBest() {
-    const r = await api('/api/best');
+    const r = await api('/api/m_submits?limit=50');
     if (!(r.ok && r.data && r.data.ok)) return;
     const tbody = $('#best-table tbody');
     const empty = $('#best-empty');
-    tbody.innerHTML = '';
-    const rows = r.data.best || [];
+    tbody.replaceChildren();
+    const rows = r.data.attempts || [];
     if (rows.length === 0) {
       empty.style.display = '';
       $('#best-table').style.display = 'none';
@@ -348,27 +383,29 @@
     $('#best-table').style.display = '';
     for (const a of rows) {
       const tr = document.createElement('tr');
-      const total = (a.pass_count || 0) + (a.fail_count || 0);
-      const denom = total > 0 ? total : '?';
-      const ss = (a.submit_status || '').toLowerCase();
-      let badge;
-      if (a.submitted) {
-        badge = '<span class="status-badge submitted">✓ Submitted</span>';
-      } else if (ss.startsWith('rejected:')) {
-        const reason = a.submit_status.slice('rejected:'.length).trim().slice(0, 40);
-        badge = `<span class="status-badge unsubmitted" title="${escapeHtml(reason)}">✗ Unsubmitted</span>`;
-      } else {
-        badge = '<span class="status-badge unsubmitted">— Unsubmitted</span>';
-      }
-      tr.innerHTML = `
-        <td>${a.round_num}</td>
-        <td>${a.idx}</td>
-        <td><strong>${a.pass_count}/${denom}</strong></td>
-        <td title="${escapeHtml(a.code)}">${escapeHtml((a.code || '').slice(0, 200))}</td>
-        <td>${escapeHtml((a.desc || '').slice(0, 80))}</td>
-        <td>${badge}</td>`;
+      tr.appendChild(bestCell(a.round_num));
+      tr.appendChild(bestCell(a.idx));
+      tr.appendChild(bestCell(a.pass_count || 0));
+      tr.appendChild(bestCell(a.fail_count || 0));
+      const bcell = document.createElement('td');
+      bcell.appendChild(bestBadge(!!a.submitted, a.submit_status || ''));
+      tr.appendChild(bcell);
+      tr.appendChild(bestCell(fmtTime(a.ts)));
+      tr.appendChild(bestCell((a.code || '').slice(0, 120), a.code || ''));
       tbody.appendChild(tr);
     }
+  }
+
+  const btnClearSubmits = $('#btn-clear-submits');
+  if (btnClearSubmits) {
+    btnClearSubmits.addEventListener('click', async () => {
+      btnClearSubmits.disabled = true;
+      try {
+        await api('/api/m_submits/clear', { method: 'POST' });
+      } catch (_) {}
+      btnClearSubmits.disabled = false;
+      try { refreshBest(); } catch (_) {}
+    });
   }
 
   // ── 부팅 ─────────────────────────────────────────────────

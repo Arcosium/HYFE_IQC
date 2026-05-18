@@ -332,6 +332,25 @@ class Worker(threading.Thread):
                                                 submit_status=submit_status)
                     self._log(_round_num, line,
                               level='pass' if status == 'pass' else 'info')
+                    # ★ 제출 시도가 있었으면 (submit_status 가 있거나 submitted) 라운드
+                    #   종료를 기다리지 않고 즉시 기록 — 모바일이 실시간 열람.
+                    #   어떤 예외도 워커 흐름을 절대 중단시키지 않는다.
+                    if submit_status or obj.get('submitted'):
+                        try:
+                            _code = ''
+                            for _b in batch:
+                                if int(_b.get('idx') or 0) == s_idx:
+                                    _code = _b.get('code', '')
+                                    break
+                            _isr = obj.get('is_status') or {}
+                            _db.record_submit_attempt(
+                                self.user_id, _round_num, s_idx, _code,
+                                bool(obj.get('submitted')), submit_status,
+                                len(_isr.get('pass', []) or []),
+                                len(_isr.get('fail', []) or []))
+                        except Exception as _e:
+                            self._log_quiet(_round_num,
+                                            f'⚠ submit_attempt 기록 실패: {_e}')
 
                 try:
                     results = wqb_browser.simulate_batch(

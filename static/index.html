@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>HYFE IQC — WQB Alpha Auto-Discovery</title>
-  <link rel="stylesheet" href="/style.css?v=5-status" />
+  <link rel="stylesheet" href="/style.css?v=6-submits" />
 </head>
 <body>
   <header class="topbar">
@@ -69,15 +69,18 @@
     </section>
 
     <section class="best-section">
-      <h2>🚀 알파 제출 시도</h2>
+      <div class="best-header">
+        <h2>🚀 알파 제출 시도</h2>
+        <button id="btn-clear-submits" class="btn-link">화면 비우기</button>
+      </div>
       <table id="best-table">
-        <thead><tr><th>R</th><th>#</th><th>PASS</th><th>코드</th><th>설명</th><th>상태</th></tr></thead>
+        <thead><tr><th>R</th><th>#</th><th>PASS</th><th>FAIL</th><th>상태</th><th>시각</th><th>코드</th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="empty-msg" id="best-empty">아직 제출 시도된 알파가 없습니다.</div>
     </section>
   </main>
 
-  <script src="/app.js?v=9-status" defer></script>
+  <script src="/app.js?v=11-kst" defer></script>
 </body>
 </html>

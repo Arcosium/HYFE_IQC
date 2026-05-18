@@ -1051,26 +1051,63 @@ def click_simulate(page):
     try:
         gate = page.evaluate(r'''() => {
             const body = (document.body && document.body.innerText) || '';
+            // concurrent-limit 은 WQB 의 *특정* 에러 문구 — body 매치해도 오탐 소스 아님.
             const concurrent_limit = /limit of concurrent simulations|reached the limit of concurrent/i.test(body);
-            const sim_inflight = /cancel\s+the\s+simulation|simulations?\s+usually\s+take|\bcancel\s*sim|stop\s*sim|simulating/i.test(body);
+
+            // ── 'sim 진행 중' 신호는 전부 element-scoped ──
+            // (구버전 버그: body innerText 전체에 /simulating|simulations usually take|
+            //  cancel the simulation/ 정규식 → WQB static UI 텍스트에 영구 오탐 →
+            //  매 idx inflight=True 로 굳어 Simulate 영구 skip → 직전 결과 패널을
+            //  새 결과로 재보고. 그래서 body 전체 텍스트 매치 전면 폐기.)
+
+            // 1) 진행 표시줄 element + live % (가장 신뢰도 높음).
             const pb = document.querySelector('[class*="editor-simulate__progress"], [class*="simulate-progress"], [class*="progress-bar"]');
             let pb_pct = false;
             if (pb && pb.offsetParent !== null) {
                 const ptxt = (pb.innerText||'') + ' ' + (pb.textContent||'');
                 pb_pct = /\d+\s*%/.test(ptxt);
             }
-            return {concurrent_limit, sim_inflight, pb_pct,
-                    body_head: body.slice(0, 200)};
+            // 2) --running 탭-dot element 존재.
+            const running_dot = !!document.querySelector(
+                '.editor-tabs__tab-dot--running, [class*="tab-dot--running"], [class*="--running"]');
+            // 3) Simulate 버튼 라벨이 cancel/stop/running 으로 바뀜 (버튼 element 한정).
+            const btn_cancel_label = [...document.querySelectorAll(
+                    'button.editor-simulate-button-text, button[class*="editor-simulate-button"]')]
+                .filter(b => b.offsetParent !== null)
+                .some(b => /cancel|stop|running/i.test((b.innerText||'').trim()));
+            // 4) 'cancel the simulation' 링크/영역 — element *자체* 텍스트만 검사.
+            //    static UI 잔재 오탐 방지: clickable/link-ish + 짧은(<120자) element 한정.
+            const CANCEL_RX = /cancel\s+the\s+simulation|\bcancel\s*sim\b|\bstop\s*sim\b/i;
+            const visible_cancel_link = [...document.querySelectorAll(
+                    'a, button, [role="button"], [class*="cancel"], [class*="editor-simulate"]')]
+                .some(el => {
+                    if (el.offsetParent === null) return false;
+                    const t = (el.innerText || '').trim();
+                    return t.length > 0 && t.length < 120 && CANCEL_RX.test(t);
+                });
+
+            return {concurrent_limit, pb_pct, running_dot, btn_cancel_label,
+                    visible_cancel_link, body_head: body.slice(0, 120)};
         }''')
-        # 진단성 — 매 호출 시 gate 결과 1줄 log (어떤 조건이 매치 됐는지 / 안 됐는지).
-        log(f'step: click_simulate gate inflight={gate.get("sim_inflight")} '
-            f'pb_pct={gate.get("pb_pct")} concurrent_limit={gate.get("concurrent_limit")} '
-            f'body_head={gate.get("body_head","")[:80]!r}')
-        if gate.get('concurrent_limit'):
+        pb_pct          = bool(gate.get('pb_pct'))
+        running_dot     = bool(gate.get('running_dot'))
+        btn_cancel      = bool(gate.get('btn_cancel_label'))
+        cancel_link     = bool(gate.get('visible_cancel_link'))
+        concurrent_limit = bool(gate.get('concurrent_limit'))
+        # ── '시뮬레이션 진행 중' 판정 (정책: Signals + scoped cancel-link) ──
+        # 진짜 live element 신호만 사용 — 진행표시줄% / --running 탭dot /
+        # 버튼 cancel 라벨 / scoped cancel-the-simulation 링크. body 텍스트 불사용.
+        sim_inflight = pb_pct or running_dot or btn_cancel or cancel_link
+        # 진단성 — 매 호출 시 신호 breakdown 1줄 log.
+        log(f'step: click_simulate gate inflight={sim_inflight} '
+            f'pb_pct={pb_pct} running_dot={running_dot} btn_cancel={btn_cancel} '
+            f'cancel_link={cancel_link} concurrent_limit={concurrent_limit} '
+            f'body_head={gate.get("body_head","")[:60]!r}')
+        if concurrent_limit:
             log('step: click_simulate skip — concurrent simulations limit reached')
             # 호출자 (_start_sim) 의 16x1.5s polling 동안 running 으로 인식되어 정상 path.
             return 1
-        if gate.get('sim_inflight') or gate.get('pb_pct'):
+        if sim_inflight:
             log('step: click_simulate skip — sim already in progress')
             return 1
     except Exception as e:

@@ -363,6 +363,27 @@ def api_m_recent():
     return jsonify({'ok': True, 'alphas': _db.list_recent_alpha_summaries(uid, limit=limit)})
 
 
+@app.route('/api/m_submits', methods=['GET'])
+def api_m_submits():
+    """모바일용 — 최근 '제출 시도' 알파 (라운드 종료 안 기다리고 발생 즉시 기록).
+    '화면 비우기' 지점 이후만 노출."""
+    uid, err = _require_user()
+    if err:
+        return err
+    limit = int(request.args.get('limit', '50') or 50)
+    return jsonify({'ok': True, 'attempts': _db.list_submit_attempts(uid, limit=limit)})
+
+
+@app.route('/api/m_submits/clear', methods=['POST'])
+def api_m_submits_clear():
+    """제출 시도 화면 비우기 — 데이터는 보존, 비우기 지점만 latest 로 이동."""
+    uid, err = _require_user()
+    if err:
+        return err
+    new_id = _db.set_last_cleared_submit_id(uid, _db.latest_submit_id(uid))
+    return jsonify({'ok': True, 'last_cleared_submit_id': new_id})
+
+
 @app.route('/api/m_status', methods=['GET'])
 def api_m_status():
     """모바일 경량 상태 — 진행/완료 라운드, 오류 패턴 수, 제출 / 거절 알파 수."""

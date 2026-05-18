@@ -165,6 +165,22 @@ def init() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_logs_user ON logs(user_id, id);
+
+            CREATE TABLE IF NOT EXISTS submit_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                round_num INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                code TEXT NOT NULL DEFAULT '',
+                submitted INTEGER NOT NULL DEFAULT 0,
+                submit_status TEXT NOT NULL DEFAULT '',
+                pass_count INTEGER NOT NULL DEFAULT 0,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                ts REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_submit_attempts_user
+                ON submit_attempts(user_id, id);
             ''')
 
             # 마이그레이션 — 기존 DB 에 신규 컬럼 없으면 추가.
@@ -179,6 +195,13 @@ def init() -> None:
                 # 이 id 이후의 로그를 전부 replay → 새로고침/재접속해도 누적 로그 유지.
                 conn.execute(
                     'ALTER TABLE users ADD COLUMN last_cleared_log_id '
+                    'INTEGER NOT NULL DEFAULT 0'
+                )
+            if 'last_cleared_submit_id' not in cols:
+                # 사용자가 마지막으로 "제출 시도 화면 비우기" 한 시점의
+                # submit_attempts.id. 모바일 제출 시도 목록은 이 id 초과만 노출.
+                conn.execute(
+                    'ALTER TABLE users ADD COLUMN last_cleared_submit_id '
                     'INTEGER NOT NULL DEFAULT 0'
                 )
 
@@ -275,6 +298,72 @@ def set_last_cleared_log_id(user_id: int, log_id: int) -> int:
         row = conn.execute('SELECT last_cleared_log_id FROM users WHERE id=?',
                            (user_id,)).fetchone()
     return int(row['last_cleared_log_id'] or 0) if row else 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 제출 시도 (submit_attempts) — 알파 제출 시도를 라운드 종료를 기다리지 않고
+# 발생 즉시 기록. 모바일 대시보드가 '최근 제출 시도' 를 실시간 열람.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_submit_attempt(user_id: int, round_num: int, idx: int, code: str,
+                           submitted: Any, submit_status: str,
+                           pass_count: int = 0, fail_count: int = 0) -> None:
+    """Submit 버튼 클릭이 발생한 알파 1건 — 발생 즉시 호출 (worker _on_partial)."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        conn.execute(
+            'INSERT INTO submit_attempts (user_id, round_num, idx, code, '
+            'submitted, submit_status, pass_count, fail_count, ts) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (user_id, int(round_num or 0), int(idx or 0), code or '',
+             1 if submitted else 0, str(submit_status or ''),
+             int(pass_count or 0), int(fail_count or 0), time.time()),
+        )
+
+
+def latest_submit_id(user_id: int) -> int:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            'SELECT MAX(id) AS m FROM submit_attempts WHERE user_id=?',
+            (user_id,)).fetchone()
+    return int(row['m'] or 0) if row else 0
+
+
+def get_last_cleared_submit_id(user_id: int) -> int:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute('SELECT last_cleared_submit_id FROM users WHERE id=?',
+                           (user_id,)).fetchone()
+    return int(row['last_cleared_submit_id'] or 0) if row else 0
+
+
+def set_last_cleared_submit_id(user_id: int, submit_id: int) -> int:
+    """비우기 지점을 앞으로만 이동 (로그 비우기와 동일 의미 — 데이터는 보존)."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        conn.execute(
+            'UPDATE users SET last_cleared_submit_id=MAX(last_cleared_submit_id, ?) '
+            'WHERE id=?',
+            (int(submit_id or 0), user_id),
+        )
+        row = conn.execute('SELECT last_cleared_submit_id FROM users WHERE id=?',
+                           (user_id,)).fetchone()
+    return int(row['last_cleared_submit_id'] or 0) if row else 0
+
+
+def list_submit_attempts(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    """최근 제출 시도 — 비우기 지점 이후만, 최신순. 모바일 대시보드용."""
+    init()
+    cleared = get_last_cleared_submit_id(user_id)
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT id, round_num, idx, code, submitted, submit_status, '
+            'pass_count, fail_count, ts FROM submit_attempts '
+            'WHERE user_id=? AND id>? ORDER BY id DESC LIMIT ?',
+            (user_id, cleared, int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -138,6 +138,8 @@ html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); fon
 
 .best-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
 .best-section h2 { margin: 0 0 14px; font-size: 16px; font-weight: 600; }
+.best-header { display: flex; justify-content: space-between; align-items: center; margin: 0 0 14px; }
+.best-header h2 { margin: 0; }
 .empty-msg { color: var(--fg-dim); font-size: 13px; text-align: center; padding: 18px; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 table th { text-align: left; padding: 8px 10px; color: var(--fg-dim); font-weight: 500; border-bottom: 1px solid var(--border); }

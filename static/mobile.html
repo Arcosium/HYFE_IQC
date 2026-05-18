@@ -167,9 +167,19 @@
       max-width: 540px; margin: 24px auto 0;
     }
     .recent-section h3 {
-      margin: 0 0 8px; font-size: 13px; color: #93a0b5;
+      margin: 0; font-size: 13px; color: #93a0b5;
       text-transform: uppercase; letter-spacing: 0.6px;
     }
+    .recent-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin: 0 0 8px;
+    }
+    .btn-clear-submits {
+      background: #2a3142; color: #9aa6bb; border: 1px solid #394157;
+      border-radius: 6px; padding: 5px 12px; font-size: 12px;
+    }
+    .btn-clear-submits:active { background: #20263a; }
+    .btn-clear-submits:disabled { opacity: 0.5; }
     #recent-table {
       width: 100%; border-collapse: collapse;
       background: #161922; border: 1px solid #232838; border-radius: 10px;
@@ -259,21 +269,23 @@
       <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
 
       <section class="recent-section">
-        <h3>최근 알파</h3>
+        <div class="recent-head">
+          <h3>최근 제출 시도</h3>
+          <button type="button" id="btn-clear-submits" class="btn-clear-submits">화면 비우기</button>
+        </div>
         <table id="recent-table">
           <thead>
             <tr>
               <th>R/#</th>
               <th class="c-pass">PASS</th>
               <th class="c-fail">FAIL</th>
-              <th class="c-err">ERR</th>
-              <th class="c-pend">PEND</th>
               <th>상태</th>
+              <th>시각</th>
             </tr>
           </thead>
           <tbody></tbody>
         </table>
-        <div id="recent-empty" class="recent-empty" hidden>아직 결과가 없습니다.</div>
+        <div id="recent-empty" class="recent-empty" hidden>제출 시도가 아직 없습니다.</div>
       </section>
 
       <div class="desktop-btn-row">
@@ -359,10 +371,46 @@
       ));
     }
 
+    function fmtTime(ts) {
+      if (!ts) return '—';
+      try {
+        // 뷰어/서버 타임존 무관하게 항상 KST(Asia/Seoul) 로 표기.
+        return new Date(ts * 1000).toLocaleTimeString('en-GB', {
+          timeZone: 'Asia/Seoul', hour12: false,
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+        });
+      } catch (_) {
+        const d = new Date((ts + 9 * 3600) * 1000);  // UTC+9 수동 폴백
+        const z = (n) => String(n).padStart(2, '0');
+        return `${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;
+      }
+    }
+    // XSS 안전: innerHTML 미사용 — 모든 동적 값은 textContent/.title 로만.
+    function mkCell(text, cls, title) {
+      const td = document.createElement('td');
+      td.textContent = (text == null ? '' : String(text));
+      if (cls) td.className = cls;
+      if (title) td.title = String(title);
+      return td;
+    }
+    function mkBadge(submitted, ss) {
+      const span = document.createElement('span');
+      let extra = 'dot', label = '—', title = ss || '제출 시도';
+      if (submitted) { extra = 'sub'; label = '✓ 제출'; title = '제출 성공'; }
+      else if (ss.startsWith('rejected:')) {
+        extra = 'rej'; label = '✗ 거절'; title = ss.slice('rejected:'.length).slice(0, 60);
+      } else if (ss.startsWith('fail:')) { extra = 'errt'; label = '⚠ 실패'; title = ss; }
+      else if (ss === 'disabled') { extra = 'dot'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
+      else if (ss === 'not_found') { extra = 'errt'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }
+      span.className = 'badge-mini ' + extra;
+      span.textContent = label;
+      span.title = title;
+      return span;
+    }
     function renderRecent(rows) {
       const tbody = document.querySelector('#recent-table tbody');
       const empty = document.querySelector('#recent-empty');
-      tbody.innerHTML = '';
+      tbody.replaceChildren();
       if (!rows || rows.length === 0) {
         empty.hidden = false;
         document.querySelector('#recent-table').style.display = 'none';
@@ -372,36 +420,14 @@
       document.querySelector('#recent-table').style.display = '';
       for (const a of rows) {
         const tr = document.createElement('tr');
-        const p = a.pass_count || 0, f = a.fail_count || 0;
-        const e = a.error_count || 0, pn = a.pending_count || 0;
-        const sum = p + f + e + pn;
-        const isTimeout = (a.error_text || '').length > 0;
-        let badge;
-        if (isTimeout) {
-          badge = `<span class="badge-mini errt" title="${escapeHtml(a.error_text)}">⚠ ERR</span>`;
-        } else if (a.submitted) {
-          badge = '<span class="badge-mini sub">✓ Sub</span>';
-        } else if ((a.submit_status || '').startsWith('rejected:')) {
-          const reason = a.submit_status.slice('rejected:'.length).slice(0, 30);
-          badge = `<span class="badge-mini rej" title="${escapeHtml(reason)}">✗ Rej</span>`;
-        } else if (sum === 0) {
-          // PASS/FAIL/ERROR/PENDING 모두 0 — IS panel 못 받음 (trivial / panel-empty / timeout)
-          badge = '<span class="badge-mini errt" title="IS Tests 결과 미수신">⚠ ERR</span>';
-        } else if (sum > 0 && sum !== 8) {
-          // scrape 누락 — 일부 항목 못 잡은 케이스. 사용자에게 시각적으로 표시.
-          badge = `<span class="badge-mini partial" title="합=${sum} (정상=8)">⚠ 합${sum}</span>`;
-        } else {
-          badge = '<span class="badge-mini dot">—</span>';
-        }
-        const rlabel = a.round_label || String(a.round_num);
-        tr.innerHTML = `
-          <td>R${rlabel}/#${a.idx}</td>
-          <td class="c-pass">${p}</td>
-          <td class="c-fail">${f}</td>
-          <td class="c-err">${e}</td>
-          <td class="c-pend">${pn}</td>
-          <td>${badge}</td>`;
-        if (sum !== 8 && !isTimeout) tr.classList.add('row-partial');
+        const ss = (a.submit_status || '');
+        tr.appendChild(mkCell(`R${a.round_num}/#${a.idx}`, null, (a.code || '').slice(0, 200)));
+        tr.appendChild(mkCell(a.pass_count || 0, 'c-pass'));
+        tr.appendChild(mkCell(a.fail_count || 0, 'c-fail'));
+        const bcell = document.createElement('td');
+        bcell.appendChild(mkBadge(!!a.submitted, ss));
+        tr.appendChild(bcell);
+        tr.appendChild(mkCell(fmtTime(a.ts), 'c-pend'));
         tbody.appendChild(tr);
       }
     }
@@ -417,9 +443,9 @@
         applyStatus(r.data);
       }
       try {
-        const r2 = await api('/api/m_recent?limit=5');
+        const r2 = await api('/api/m_submits?limit=30');
         if (r2.ok && r2.data && r2.data.ok) {
-          renderRecent(r2.data.alphas || []);
+          renderRecent(r2.data.attempts || []);
         }
       } catch (_) {}
     }
@@ -471,6 +497,16 @@
       if (!(r.ok && r.data && r.data.ok)) {
         alert('일시정지 실패: ' + (r.data && r.data.detail || JSON.stringify(r.data)));
       }
+      refresh();
+    });
+
+    $('#btn-clear-submits').addEventListener('click', async () => {
+      const b = $('#btn-clear-submits'); b.disabled = true;
+      try {
+        await api('/api/m_submits/clear', { method: 'POST' });
+        renderRecent([]);   // 즉시 비움 (다음 polling 때 비우기 지점 반영됨)
+      } catch (_) {}
+      b.disabled = false;
       refresh();
     });
 
