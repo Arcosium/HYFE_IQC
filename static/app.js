@@ -358,7 +358,12 @@
     let cls = 'unsubmitted', label = '— 미제출', title = ss || '제출 시도';
     if (submitted) { cls = 'submitted'; label = '✓ 제출'; title = '제출 성공'; }
     else if (ss.startsWith('rejected:')) {
-      cls = 'unsubmitted'; label = '✗ 거절'; title = ss.slice('rejected:'.length).trim().slice(0, 80);
+      cls = 'unsubmitted'; label = '✗ 거절';
+      const body = ss.slice('rejected:'.length).trim();
+      const m = body.match(/\d+\.\d+/);
+      // 구체 self-correlation 수치를 받았으면 미제출 배지에 직접 노출.
+      if (m && /correlation/i.test(body)) label = '✗ 거절 · corr ' + m[0];
+      title = body.slice(0, 80);
     } else if (ss.startsWith('fail:')) { cls = 'unsubmitted'; label = '⚠ 실패'; title = ss; }
     else if (ss === 'disabled') { cls = 'unsubmitted'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
     else if (ss === 'not_found') { cls = 'unsubmitted'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }

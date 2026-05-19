@@ -398,7 +398,12 @@
       let extra = 'dot', label = '—', title = ss || '제출 시도';
       if (submitted) { extra = 'sub'; label = '✓ 제출'; title = '제출 성공'; }
       else if (ss.startsWith('rejected:')) {
-        extra = 'rej'; label = '✗ 거절'; title = ss.slice('rejected:'.length).slice(0, 60);
+        extra = 'rej'; label = '✗ 거절';
+        const body = ss.slice('rejected:'.length);
+        const m = body.match(/\d+\.\d+/);
+        // 구체 self-correlation 수치를 받았으면 미제출 배지에 직접 노출.
+        if (m && /correlation/i.test(body)) label = '✗ 거절 · corr ' + m[0];
+        title = body.slice(0, 80);
       } else if (ss.startsWith('fail:')) { extra = 'errt'; label = '⚠ 실패'; title = ss; }
       else if (ss === 'disabled') { extra = 'dot'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
       else if (ss === 'not_found') { extra = 'errt'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }

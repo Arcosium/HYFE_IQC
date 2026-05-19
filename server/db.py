@@ -237,6 +237,17 @@ def init() -> None:
                 'ON alphas(user_id, submitted)'
             )
 
+            # 데이터 마이그레이션 (idempotent) — Submit 클릭이 발생했으나
+            # '구체 수치 동반 self-corr 거절' 이 아닌 모든 알파를 제출 성공으로 정정.
+            # 과거에 fail:no_response_modal_less / rejected:Cannot submit 로
+            # 잘못 미제출 처리된 행들을 한 번에 바로잡는다. 진짜 self-corr
+            # 거절(수치 포함)만 submitted=0 으로 남는다. 이미 1 인 행은 무변화.
+            conn.execute(
+                'UPDATE alphas SET submitted=1 '
+                "WHERE submitted=0 AND TRIM(submit_status) <> '' "
+                f'AND NOT ({_GENUINE_SELFCORR_SQL})'
+            )
+
             # rounds 테이블 마이그레이션 — focused sub-round 메타.
             round_cols = {r['name'] for r in conn.execute("PRAGMA table_info(rounds)").fetchall()}
             if 'phase' not in round_cols:
@@ -689,6 +700,56 @@ def finish_round(round_id: int, user_id: int, round_num: int, *,
                          (round_num, user_id, round_num))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 제출 판정 — 단일 진실 공급원 (single source of truth)
+#
+# 사용자 정책: 알파가 "제출 안 됨" 으로 간주되는 유일한 경우는
+#   ┌ Submit 후 Self-correlation 테스트가 실제로 돌았고
+#   ├ Failed 가 떠서 7 Pass / 1 Fail 로 바뀌었으며
+#   └ 구체적인 self-correlation 수치(예: 0.9415, ≥ 0.7)가 잡힌
+# 케이스뿐이다. 그 외 모든 결과 — 무응답(no_response_modal_less),
+# 'Cannot submit', 예외, 버튼 비활성, 수치 없는 'above cutoff' 등 — 는
+# 전부 제출된 것으로 간주한다. WQB 는 제출을 self-corr 로 거절할 때만
+# 구체 수치를 노출하므로, 그 신호의 부재 == 사실상 제출 성공이기 때문.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 'rejected:%' AND self-corr 언급 AND 구체 소수값 포함 → 진짜 미제출.
+# SQL 에서도 동일 규칙을 적용할 수 있도록 GLOB 패턴을 함께 둔다.
+_SELFCORR_NUM_RE = re.compile(r'\d+\.\d+')
+_GENUINE_SELFCORR_SQL = (
+    "submit_status LIKE 'rejected:%' "
+    "AND LOWER(submit_status) LIKE '%correlation%' "
+    "AND submit_status GLOB '*[0-9].[0-9]*'"
+)
+
+
+def genuine_selfcorr_reject(submit_status: str) -> bool:
+    """submit_status 가 '구체 수치를 동반한 Self-correlation 거절' 인가.
+
+    True 인 경우에만 알파를 미제출로 취급한다 — 그 외는 전부 제출 간주.
+    """
+    s = (submit_status or '').strip()
+    if not s.lower().startswith('rejected:'):
+        return False
+    body = s[len('rejected:'):]
+    if 'correlation' not in body.lower():
+        return False
+    return _SELFCORR_NUM_RE.search(body) is not None
+
+
+def effectively_submitted(submitted: Any, submit_status: str) -> bool:
+    """이 알파를 제출 성공으로 간주할지 — 위 정책의 구현.
+
+    submit_status 가 비어 있으면(= Submit 시도 자체가 없었음, 예: sim 에러/
+    7개 미통과) submitted 플래그를 그대로 따른다. 시도가 있었으면
+    '구체 수치 동반 self-corr 거절' 일 때만 미제출, 그 외 전부 제출.
+    """
+    s = (submit_status or '').strip()
+    if not s:
+        return bool(submitted)
+    return not genuine_selfcorr_reject(s)
+
+
 def insert_alpha(user_id: int, round_id: int, round_num: int, alpha: dict[str, Any]) -> None:
     init()
     code = alpha.get('code', '')
@@ -729,7 +790,10 @@ def insert_alpha(user_id: int, round_id: int, round_num: int, alpha: dict[str, A
                 json.dumps(dict(alpha.get('metrics') or {}), ensure_ascii=False),
                 alpha.get('mode', ''),
                 1 if alpha.get('cached') else 0,
-                1 if alpha.get('submitted') else 0,
+                # 제출 여부는 단일 규칙으로 정규화 — 호출부가 무엇을 넘기든
+                # '구체 수치 동반 self-corr 거절' 이 아니면 제출로 기록.
+                1 if effectively_submitted(alpha.get('submitted'),
+                                           str(alpha.get('submit_status') or '')) else 0,
                 str(alpha.get('submit_status') or ''),
                 error_count,
                 pending_count,
@@ -955,11 +1019,13 @@ def submitted_count(user_id: int) -> int:
 
 
 def unsubmitted_count(user_id: int) -> int:
-    """제출 시도했으나 WQB 가 거절한 알파 갯수 (예: correlation 너무 높음)."""
+    """제출 안 됨으로 간주되는 알파 갯수 — 구체 수치를 동반한 Self-correlation
+    거절만 카운트한다 ('Cannot submit'·무응답 등은 제출로 간주하므로 제외)."""
     init()
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM alphas WHERE user_id=? AND submit_status LIKE 'rejected:%'",
+            'SELECT COUNT(*) AS n FROM alphas WHERE user_id=? '
+            f'AND ({_GENUINE_SELFCORR_SQL})',
             (user_id,),
         ).fetchone()
     return int(row['n'] or 0)

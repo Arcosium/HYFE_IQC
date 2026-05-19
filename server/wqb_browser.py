@@ -179,6 +179,20 @@ def _count_pass(metrics):
     if corr is not None and corr < 0.7: n += 1
     return n
 
+
+# 제출 판정 규칙 — server/db.py 의 genuine_selfcorr_reject 와 동일.
+# 알파가 '제출 안 됨' 인 유일한 경우: Submit 후 self-corr 검사가 돌아
+# 7 Pass / 1 Fail 로 바뀌고 구체 수치(0.7 이상)가 잡힌 거절.
+# 그 외(무응답·Cannot submit·예외·수치 없는 above cutoff 등)는 제출 간주.
+def _genuine_selfcorr_reject(submit_status):
+    s = (submit_status or '').strip()
+    if not s.lower().startswith('rejected:'):
+        return False
+    body = s[len('rejected:'):]
+    if 'correlation' not in body.lower():
+        return False
+    return re.search(r'\d+\.\d+', body) is not None
+
 _INPUT = json.loads(sys.stdin.read())
 # stdin 은 [{idx, code, settings}] 형식을 우선 지원 — 워커가 알파 idx + sim settings 를
 # 알리고 싶을 때. 호환성: code 문자열 리스트도 받음 (idx 는 1..N, settings 는 {}).
@@ -2669,21 +2683,29 @@ def _try_submit_alpha(page):
                 return ('fail:modal_did_not_close', f'confirm={confirm!r}')
 
         # 150초 폴링 동안 reject/success 신호 모두 못 잡음.
-        # modal/page-sweep 으로 confirm 한 케이스 → 일반적으로 success (WQB 가 silent submit).
-        # 순수 modal-less 케이스 → 1차 click 이 effective 였는지 불확실 → 보수적으로 fail.
+        # 정책상 '구체 수치 동반 self-corr 거절' 이 아니면 제출 간주이므로
+        # modal-less/무응답 케이스도 submitted 로 본다 (rescrape 가 한 번 더
+        # 늦은 진짜 self-corr 거절을 확인). 진단용으로 detail 만 남긴다.
+        # 'UNCONFIRMED ' detail 접두사 = '명시 success 신호 없이 제출 간주' →
+        # 호출부가 지연(1~2분) self-corr 재확인을 한 번 더 돌리게 하는 신호.
+        # status 자체는 'submitted' 유지 (SSOT/worker 영향 없음).
         if modal_after_first or confirm.get('match') == 'page_sweep':
-            log('submit_alpha: confirm 클릭됨 + 150s 내 명시 신호 없음 — submitted 추정')
-            return ('submitted', f'confirm={confirm!r} (no explicit signal in 150s)')
-        log('submit_alpha: modal-less + no signal in 150s — fail 보수적 처리')
-        return ('fail:no_response_modal_less',
-                f'1차 click 후 modal/toast/IS변화 모두 없음 (150s polled). label={info.get("label","")!r}')
+            log('submit_alpha: confirm 클릭됨 + 150s 내 명시 신호 없음 — submitted 간주 (지연확인 대상)')
+            return ('submitted', f'UNCONFIRMED confirm={confirm!r} (no explicit signal in 150s)')
+        log('submit_alpha: modal-less + no signal in 150s — submitted 간주 (지연확인 대상)')
+        return ('submitted',
+                f'UNCONFIRMED no_response_modal_less: modal/toast/IS변화 모두 없음 (150s polled). '
+                f'label={info.get("label","")!r}')
     except Exception as e:
-        return ('fail:exception', str(e)[:150])
+        # 예외도 '구체 수치 self-corr 거절' 이 아니므로 제출 간주 (지연확인 대상).
+        log(f'submit_alpha: exception — submitted 간주 (지연확인 대상): {str(e)[:120]}')
+        return ('submitted', f'UNCONFIRMED exception(treated submitted): {str(e)[:150]}')
 
 
-def _rescrape_submit_outcome(page, retries=8, interval_ms=5000):
+def _rescrape_submit_outcome(page, retries=15, interval_ms=8000):
     # Submit 클릭 후 IS Tests 패널을 재시도 폴링 — WQB 의 self-correlation 검사가
-    # 끝나길 기다림. PASS=8 → 'success' / FAIL·ERROR 항목 등장 → 'reject' (self-corr 값 추출).
+    # 끝나길 기다림 (기본 ~120s = retries 15 × 8s, 최대 1~2분 지연 케이스 커버).
+    # PASS=8 → 'success' / FAIL·ERROR 항목 등장 → 'reject' (self-corr 값 추출).
     # 둘 다 안 잡혔지만 패널 스크랩은 됐고 self-corr 거절 신호가 한 번도 안 떴으면 →
     # 'success_implied' (WQB 는 제출 거절 시 반드시 Self-Correlation 항목에 실측값을 노출하므로,
     # 그 신호의 부재 == 사실상 제출 성공. modal-less 라 confirm 모달만 못 본 케이스).
@@ -3191,30 +3213,33 @@ try:
             sub_status, sub_detail = _try_submit_alpha(page)
             log(f'idx{_ix(fi)} submit status={sub_status} detail={sub_detail}')
             results[fi]['submit_status'] = sub_status
-            results[fi]['submitted'] = (sub_status == 'submitted')
+            # 정책: '구체 수치 동반 self-corr 거절' 이 아니면 전부 제출 간주.
+            results[fi]['submitted'] = not _genuine_selfcorr_reject(sub_status)
             page.wait_for_timeout(600)
-            if sub_status.startswith('rejected') or sub_status.startswith('fail:no_response'):
-                ro = _rescrape_submit_outcome(page, retries=8, interval_ms=5000)
+            # 지연 확인 — WQB 의 self-corr 검사는 Submit 후 최대 1~2분 늦게 끝날
+            # 수 있다. 명시 success 도, 구체 수치 self-corr 거절도 아직 아닌 경우
+            # — 거절·실패, 또는 'UNCONFIRMED'(무응답·예외·무신호로 제출 간주한
+            # 케이스) — 한 번 더 IS 패널을 ~120s 폴링해 늦게 확정되는 '진짜'
+            # self-corr 거절을 잡는다. 미제출로 내릴 수 있는 건 '구체 수치 동반
+            # self-corr 거절' 일 때뿐 (그 외엔 제출로 확정).
+            _unconf = str(sub_detail or '').startswith('UNCONFIRMED')
+            if not _genuine_selfcorr_reject(sub_status) and (sub_status != 'submitted' or _unconf):
+                ro = _rescrape_submit_outcome(page, retries=15, interval_ms=8000)
                 if ro.get('ist') is not None and (ro.get('verdict') in ('reject', 'success', 'success_implied')):
                     results[fi]['is_status'] = ro['ist']
-                if ro.get('verdict') in ('success', 'success_implied'):
-                    results[fi]['submit_status'] = 'submitted'
-                    results[fi]['submitted'] = True
-                elif ro.get('verdict') == 'reject':
+                scv = (ro.get('self_corr') or '').strip()
+                if ro.get('verdict') == 'reject' and ro.get('is_selfcorr') and scv:
+                    # 늦게 확정된 진짜 self-corr 거절 (구체 수치 있음) → 미제출.
                     results[fi]['submitted'] = False
-                    scv = ro.get('self_corr') or ''
-                    cur_ss = results[fi].get('submit_status') or ''
-                    if ro.get('is_selfcorr') and 'self-corr' not in cur_ss.lower():
-                        results[fi]['submit_status'] = (
-                            f'rejected:Self-correlation {scv} > 0.7' if scv
-                            else 'rejected:Self-correlation above cutoff')
-                    elif not cur_ss.startswith('rejected'):
-                        _nm = ''
-                        for _e in (ro.get('ist') or {}).get('fail', []) or []:
-                            _nm = (_e.get('name') or '').strip()
-                            if _nm:
-                                break
-                        results[fi]['submit_status'] = f'rejected:post-submit fail{": "+_nm if _nm else ""}'
+                    results[fi]['submit_status'] = f'rejected:Self-correlation {scv} > 0.7'
+                    log(f'idx{_ix(fi)} rescrape: 진짜 self-corr 거절 확정 ({scv}) — 미제출')
+                else:
+                    # success / success_implied / 수치 없는 reject / none → 제출 간주.
+                    results[fi]['submitted'] = True
+                    if ro.get('verdict') in ('success', 'success_implied'):
+                        results[fi]['submit_status'] = 'submitted'
+                    log(f'idx{_ix(fi)} rescrape verdict={ro.get("verdict")} '
+                        f'self_corr={scv or "—"} — 제출 간주')
 
         def _emit_done(fi):
             err = results[fi].get('error_text') or ''
