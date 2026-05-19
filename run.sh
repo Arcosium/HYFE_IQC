@@ -14,6 +14,16 @@ PYTHON="${HYFE_PY:-/usr/bin/python3}"
 # Playwright 서브프로세스는 python3.11.
 export IQC_PY="${IQC_PY:-/usr/bin/python3.11}"
 
+# ── 보안 기본값 ──────────────────────────────────────────────────────────
+# 공개망 직접 노출 차단: Cloudflare 터널(iqc.ai-ve.uk → http://localhost:8088)
+# 이 루프백으로 붙으므로 127.0.0.1 만 바인딩한다. 0.0.0.0 으로 띄우면 VM
+# 공인 IP:8088 로 평문 직접 접근이 가능해 터널/TLS 가 우회된다.
+# (LAN/공인 IP 직접 공개가 꼭 필요하면 호출 시 HYFE_IQC_HOST=0.0.0.0 override)
+export HYFE_IQC_HOST="${HYFE_IQC_HOST:-127.0.0.1}"
+# 터널이 HTTPS 종단이므로 세션 쿠키에 Secure 플래그 강제.
+export HYFE_IQC_COOKIE_SECURE="${HYFE_IQC_COOKIE_SECURE:-1}"
+# ─────────────────────────────────────────────────────────────────────────
+
 # 의존성 자동 설치 (이미 깔려 있으면 빠르게 통과).
 if ! "$PYTHON" -c "import flask, cryptography; from google import genai" 2>/dev/null; then
   echo "[run.sh] 시스템 python3 에 의존성 누락 — pip install --user 진행"
