@@ -37,6 +37,11 @@ SECRET_KEY_PATH = os.path.abspath(os.path.join(_THIS_DIR, '..', 'data', '.fernet
 _DB_LOCK = threading.Lock()
 _INIT_LOCK = threading.Lock()
 _INITIALIZED = False
+
+# 스키마/데이터 마이그레이션 버전. ALTER·백필을 프로세스마다 재실행하지 않도록
+# PRAGMA user_version 게이트의 기준값. 향후 스키마/데이터 마이그레이션을
+# 추가하면 반드시 이 값을 올려야 새 마이그레이션이 1회 적용된다.
+_SCHEMA_VERSION = 1
 _FERNET: Fernet | None = None
 
 FEEDBACK_CAP = 30
@@ -52,6 +57,75 @@ def _connect() -> sqlite3.Connection:
     conn.execute('PRAGMA synchronous=NORMAL')
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
+
+
+def _with_conn(fn):
+    """init() + _DB_LOCK + _connect() 보일러플레이트 데코레이터.
+
+    *전체 본문이 정확히* `init(); with _DB_LOCK, _connect() as conn: ...` 인
+    함수에만 적용 — 래퍼가 그 셋업을 똑같이 수행하고 conn 을 첫 인자로 주입.
+    연결 종료 후 추가 작업이 있는 함수에는 적용하지 않는다(의미가 달라짐).
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        init()
+        with _DB_LOCK, _connect() as conn:
+            return fn(conn, *args, **kwargs)
+    return wrapper
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 제출 판정 — 단일 진실 공급원 (single source of truth)
+#
+# 사용자 정책: 알파가 "제출 안 됨" 으로 간주되는 유일한 경우는
+#   ┌ Submit 후 Self-correlation 테스트가 실제로 돌았고
+#   ├ Failed 가 떠서 7 Pass / 1 Fail 로 바뀌었으며
+#   └ 구체적인 self-correlation 수치(예: 0.9415, ≥ 0.7)가 잡힌
+# 케이스뿐이다. 그 외 모든 결과 — 무응답(no_response_modal_less),
+# 'Cannot submit', 예외, 버튼 비활성, 수치 없는 'above cutoff' 등 — 는
+# 전부 제출된 것으로 간주한다. WQB 는 제출을 self-corr 로 거절할 때만
+# 구체 수치를 노출하므로, 그 신호의 부재 == 사실상 제출 성공이기 때문.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 정책 권위 = genuine_selfcorr_reject() (행 단위 판정·insert_alpha 가 사용).
+# 아래 _GENUINE_SELFCORR_SQL 은 bulk count/migration 쿼리용 *동일 규칙의 SQL
+# 미러* 일 뿐이다 (rejected: 접두 + 'correlation' 언급 + 소수값). 한쪽을
+# 고치면 반드시 다른 쪽도 함께 고치고 양자 일치를 검증할 것.
+_SELFCORR_NUM_RE = re.compile(r'\d+\.\d+')
+_GENUINE_SELFCORR_SQL = (
+    "submit_status LIKE 'rejected:%' "
+    "AND LOWER(submit_status) LIKE '%correlation%' "
+    "AND submit_status GLOB '*[0-9].[0-9]*'"
+)
+
+
+def genuine_selfcorr_reject(submit_status: str) -> bool:
+    """submit_status 가 '구체 수치를 동반한 Self-correlation 거절' 인가.
+
+    True 인 경우에만 알파를 미제출로 취급한다 — 그 외는 전부 제출 간주.
+    """
+    s = (submit_status or '').strip()
+    if not s.lower().startswith('rejected:'):
+        return False
+    body = s[len('rejected:'):]
+    if 'correlation' not in body.lower():
+        return False
+    return _SELFCORR_NUM_RE.search(body) is not None
+
+
+def effectively_submitted(submitted: Any, submit_status: str) -> bool:
+    """이 알파를 제출 성공으로 간주할지 — 위 정책의 구현.
+
+    submit_status 가 비어 있으면(= Submit 시도 자체가 없었음, 예: sim 에러/
+    7개 미통과) submitted 플래그를 그대로 따른다. 시도가 있었으면
+    '구체 수치 동반 self-corr 거절' 일 때만 미제출, 그 외 전부 제출.
+    """
+    s = (submit_status or '').strip()
+    if not s:
+        return bool(submitted)
+    return not genuine_selfcorr_reject(s)
 
 
 def init() -> None:
@@ -183,94 +257,100 @@ def init() -> None:
                 ON submit_attempts(user_id, id);
             ''')
 
-            # 마이그레이션 — 기존 DB 에 신규 컬럼 없으면 추가.
-            cols = {r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-            if 'submittable_list_created' not in cols:
+            # ── 스키마/데이터 마이그레이션 (PRAGMA user_version 게이트) ──
+            # CREATE TABLE IF NOT EXISTS 는 신규 DB 위해 항상 실행하되, ALTER·백필은
+            # 프로세스마다 재실행할 필요가 없어 user_version < _SCHEMA_VERSION 일 때 1회만.
+            _ver = conn.execute("PRAGMA user_version").fetchone()[0]
+            if _ver < _SCHEMA_VERSION:
+                # 마이그레이션 — 기존 DB 에 신규 컬럼 없으면 추가.
+                cols = {r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+                if 'submittable_list_created' not in cols:
+                    conn.execute(
+                        'ALTER TABLE users ADD COLUMN submittable_list_created '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'last_cleared_log_id' not in cols:
+                    # 사용자가 마지막으로 "화면 비우기" 한 시점의 log id. SSE 첫 연결 시
+                    # 이 id 이후의 로그를 전부 replay → 새로고침/재접속해도 누적 로그 유지.
+                    conn.execute(
+                        'ALTER TABLE users ADD COLUMN last_cleared_log_id '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'last_cleared_submit_id' not in cols:
+                    # 사용자가 마지막으로 "제출 시도 화면 비우기" 한 시점의
+                    # submit_attempts.id. 모바일 제출 시도 목록은 이 id 초과만 노출.
+                    conn.execute(
+                        'ALTER TABLE users ADD COLUMN last_cleared_submit_id '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+
+                # alphas 테이블에 신규 컬럼 마이그레이션 — 기존 DB 도 호환.
+                alpha_cols = {r['name'] for r in conn.execute("PRAGMA table_info(alphas)").fetchall()}
+                if 'submitted' not in alpha_cols:
+                    conn.execute(
+                        'ALTER TABLE alphas ADD COLUMN submitted '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'submit_status' not in alpha_cols:
+                    conn.execute(
+                        "ALTER TABLE alphas ADD COLUMN submit_status TEXT NOT NULL DEFAULT ''"
+                    )
+                if 'error_count' not in alpha_cols:
+                    conn.execute(
+                        'ALTER TABLE alphas ADD COLUMN error_count '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'pending_count' not in alpha_cols:
+                    conn.execute(
+                        'ALTER TABLE alphas ADD COLUMN pending_count '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'phase' not in alpha_cols:
+                    # focused sub-round 번호. 0 = 메인 라운드, 1+ = N번째 sub-round.
+                    conn.execute(
+                        'ALTER TABLE alphas ADD COLUMN phase '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
                 conn.execute(
-                    'ALTER TABLE users ADD COLUMN submittable_list_created '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'last_cleared_log_id' not in cols:
-                # 사용자가 마지막으로 "화면 비우기" 한 시점의 log id. SSE 첫 연결 시
-                # 이 id 이후의 로그를 전부 replay → 새로고침/재접속해도 누적 로그 유지.
-                conn.execute(
-                    'ALTER TABLE users ADD COLUMN last_cleared_log_id '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'last_cleared_submit_id' not in cols:
-                # 사용자가 마지막으로 "제출 시도 화면 비우기" 한 시점의
-                # submit_attempts.id. 모바일 제출 시도 목록은 이 id 초과만 노출.
-                conn.execute(
-                    'ALTER TABLE users ADD COLUMN last_cleared_submit_id '
-                    'INTEGER NOT NULL DEFAULT 0'
+                    'CREATE INDEX IF NOT EXISTS idx_alphas_submitted '
+                    'ON alphas(user_id, submitted)'
                 )
 
-            # alphas 테이블에 신규 컬럼 마이그레이션 — 기존 DB 도 호환.
-            alpha_cols = {r['name'] for r in conn.execute("PRAGMA table_info(alphas)").fetchall()}
-            if 'submitted' not in alpha_cols:
+                # 데이터 마이그레이션 (idempotent) — Submit 클릭이 발생했으나
+                # '구체 수치 동반 self-corr 거절' 이 아닌 모든 알파를 제출 성공으로 정정.
+                # 과거에 fail:no_response_modal_less / rejected:Cannot submit 로
+                # 잘못 미제출 처리된 행들을 한 번에 바로잡는다. 진짜 self-corr
+                # 거절(수치 포함)만 submitted=0 으로 남는다. 이미 1 인 행은 무변화.
                 conn.execute(
-                    'ALTER TABLE alphas ADD COLUMN submitted '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'submit_status' not in alpha_cols:
-                conn.execute(
-                    "ALTER TABLE alphas ADD COLUMN submit_status TEXT NOT NULL DEFAULT ''"
-                )
-            if 'error_count' not in alpha_cols:
-                conn.execute(
-                    'ALTER TABLE alphas ADD COLUMN error_count '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'pending_count' not in alpha_cols:
-                conn.execute(
-                    'ALTER TABLE alphas ADD COLUMN pending_count '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'phase' not in alpha_cols:
-                # focused sub-round 번호. 0 = 메인 라운드, 1+ = N번째 sub-round.
-                conn.execute(
-                    'ALTER TABLE alphas ADD COLUMN phase '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            conn.execute(
-                'CREATE INDEX IF NOT EXISTS idx_alphas_submitted '
-                'ON alphas(user_id, submitted)'
-            )
-
-            # 데이터 마이그레이션 (idempotent) — Submit 클릭이 발생했으나
-            # '구체 수치 동반 self-corr 거절' 이 아닌 모든 알파를 제출 성공으로 정정.
-            # 과거에 fail:no_response_modal_less / rejected:Cannot submit 로
-            # 잘못 미제출 처리된 행들을 한 번에 바로잡는다. 진짜 self-corr
-            # 거절(수치 포함)만 submitted=0 으로 남는다. 이미 1 인 행은 무변화.
-            conn.execute(
-                'UPDATE alphas SET submitted=1 '
-                "WHERE submitted=0 AND TRIM(submit_status) <> '' "
-                f'AND NOT ({_GENUINE_SELFCORR_SQL})'
-            )
-
-            # rounds 테이블 마이그레이션 — focused sub-round 메타.
-            round_cols = {r['name'] for r in conn.execute("PRAGMA table_info(rounds)").fetchall()}
-            if 'phase' not in round_cols:
-                conn.execute(
-                    'ALTER TABLE rounds ADD COLUMN phase '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'parent_idx' not in round_cols:
-                conn.execute(
-                    'ALTER TABLE rounds ADD COLUMN parent_idx '
-                    'INTEGER NOT NULL DEFAULT 0'
-                )
-            if 'focus_fail' not in round_cols:
-                conn.execute(
-                    "ALTER TABLE rounds ADD COLUMN focus_fail TEXT NOT NULL DEFAULT ''"
+                    'UPDATE alphas SET submitted=1 '
+                    "WHERE submitted=0 AND TRIM(submit_status) <> '' "
+                    f'AND NOT ({_GENUINE_SELFCORR_SQL})'
                 )
 
-            # users 테이블 — 다음 라운드에서 처리할 focused sub-round 큐.
-            user_cols = {r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-            if 'focus_queue' not in user_cols:
-                conn.execute(
-                    "ALTER TABLE users ADD COLUMN focus_queue TEXT NOT NULL DEFAULT '[]'"
-                )
+                # rounds 테이블 마이그레이션 — focused sub-round 메타.
+                round_cols = {r['name'] for r in conn.execute("PRAGMA table_info(rounds)").fetchall()}
+                if 'phase' not in round_cols:
+                    conn.execute(
+                        'ALTER TABLE rounds ADD COLUMN phase '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'parent_idx' not in round_cols:
+                    conn.execute(
+                        'ALTER TABLE rounds ADD COLUMN parent_idx '
+                        'INTEGER NOT NULL DEFAULT 0'
+                    )
+                if 'focus_fail' not in round_cols:
+                    conn.execute(
+                        "ALTER TABLE rounds ADD COLUMN focus_fail TEXT NOT NULL DEFAULT ''"
+                    )
+
+                # users 테이블 — 다음 라운드에서 처리할 focused sub-round 큐.
+                user_cols = {r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+                if 'focus_queue' not in user_cols:
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN focus_queue TEXT NOT NULL DEFAULT '[]'"
+                    )
+                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         _INITIALIZED = True
 
 
@@ -282,11 +362,10 @@ def get_submittable_list_created(user_id: int) -> bool:
     return bool(row and int(row['submittable_list_created'] or 0))
 
 
-def set_submittable_list_created(user_id: int, value: bool = True) -> None:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute('UPDATE users SET submittable_list_created=? WHERE id=?',
-                     (1 if value else 0, user_id))
+@_with_conn
+def set_submittable_list_created(conn, user_id: int, value: bool = True) -> None:
+    conn.execute('UPDATE users SET submittable_list_created=? WHERE id=?',
+                 (1 if value else 0, user_id))
 
 
 def get_last_cleared_log_id(user_id: int) -> int:
@@ -316,20 +395,19 @@ def set_last_cleared_log_id(user_id: int, log_id: int) -> int:
 # 발생 즉시 기록. 모바일 대시보드가 '최근 제출 시도' 를 실시간 열람.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def record_submit_attempt(user_id: int, round_num: int, idx: int, code: str,
+@_with_conn
+def record_submit_attempt(conn, user_id: int, round_num: int, idx: int, code: str,
                            submitted: Any, submit_status: str,
                            pass_count: int = 0, fail_count: int = 0) -> None:
     """Submit 버튼 클릭이 발생한 알파 1건 — 발생 즉시 호출 (worker _on_partial)."""
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute(
-            'INSERT INTO submit_attempts (user_id, round_num, idx, code, '
-            'submitted, submit_status, pass_count, fail_count, ts) '
-            'VALUES (?,?,?,?,?,?,?,?,?)',
-            (user_id, int(round_num or 0), int(idx or 0), code or '',
-             1 if submitted else 0, str(submit_status or ''),
-             int(pass_count or 0), int(fail_count or 0), time.time()),
-        )
+    conn.execute(
+        'INSERT INTO submit_attempts (user_id, round_num, idx, code, '
+        'submitted, submit_status, pass_count, fail_count, ts) '
+        'VALUES (?,?,?,?,?,?,?,?,?)',
+        (user_id, int(round_num or 0), int(idx or 0), code or '',
+         1 if submitted else 0, str(submit_status or ''),
+         int(pass_count or 0), int(fail_count or 0), time.time()),
+    )
 
 
 def latest_submit_id(user_id: int) -> int:
@@ -513,11 +591,10 @@ def update_user_secrets(user_id: int, *, wqb_password: str | None = None,
         conn.execute(f'UPDATE users SET {", ".join(sets)} WHERE id=?', tuple(args))
 
 
-def reset_user_running_flags(user_id: int) -> None:
+@_with_conn
+def reset_user_running_flags(conn, user_id: int) -> None:
     """running/paused 플래그 모두 0 으로. 재시작 직후 stale 한 in-process 워커 정리용."""
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute('UPDATE users SET running=0, paused=0 WHERE id=?', (user_id,))
+    conn.execute('UPDATE users SET running=0, paused=0 WHERE id=?', (user_id,))
 
 
 def delete_user_sessions(user_id: int) -> int:
@@ -545,15 +622,14 @@ def get_user_credentials(user_id: int) -> tuple[str, str, str] | None:
     return u['wqb_username'], u['wqb_password'], u['gemini_api_key']
 
 
-def set_user_running(user_id: int, running: bool, paused: bool | None = None) -> None:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        if paused is None:
-            conn.execute('UPDATE users SET running=? WHERE id=?',
-                         (1 if running else 0, user_id))
-        else:
-            conn.execute('UPDATE users SET running=?, paused=? WHERE id=?',
-                         (1 if running else 0, 1 if paused else 0, user_id))
+@_with_conn
+def set_user_running(conn, user_id: int, running: bool, paused: bool | None = None) -> None:
+    if paused is None:
+        conn.execute('UPDATE users SET running=? WHERE id=?',
+                     (1 if running else 0, user_id))
+    else:
+        conn.execute('UPDATE users SET running=?, paused=? WHERE id=?',
+                     (1 if running else 0, 1 if paused else 0, user_id))
 
 
 def get_user_status(user_id: int) -> dict[str, Any]:
@@ -622,17 +698,15 @@ def lookup_session(token: str) -> int | None:
     return int(row['user_id'])
 
 
-def delete_session(token: str) -> None:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute('DELETE FROM sessions WHERE token=?', (token,))
+@_with_conn
+def delete_session(conn, token: str) -> None:
+    conn.execute('DELETE FROM sessions WHERE token=?', (token,))
 
 
-def gc_sessions() -> int:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        cur = conn.execute('DELETE FROM sessions WHERE expires_at<?', (time.time(),))
-        return cur.rowcount or 0
+@_with_conn
+def gc_sessions(conn) -> int:
+    cur = conn.execute('DELETE FROM sessions WHERE expires_at<?', (time.time(),))
+    return cur.rowcount or 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -671,17 +745,15 @@ def get_focus_queue(user_id: int) -> list[dict[str, Any]]:
         return []
 
 
-def set_focus_queue(user_id: int, queue: list[dict[str, Any]]) -> None:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute('UPDATE users SET focus_queue=? WHERE id=?',
-                     (json.dumps(queue or [], ensure_ascii=False), user_id))
+@_with_conn
+def set_focus_queue(conn, user_id: int, queue: list[dict[str, Any]]) -> None:
+    conn.execute('UPDATE users SET focus_queue=? WHERE id=?',
+                 (json.dumps(queue or [], ensure_ascii=False), user_id))
 
 
-def update_round_status(round_id: int, status: str) -> None:
-    init()
-    with _DB_LOCK, _connect() as conn:
-        conn.execute('UPDATE rounds SET status=? WHERE id=?', (status, round_id))
+@_with_conn
+def update_round_status(conn, round_id: int, status: str) -> None:
+    conn.execute('UPDATE rounds SET status=? WHERE id=?', (status, round_id))
 
 
 def finish_round(round_id: int, user_id: int, round_num: int, *,
@@ -698,56 +770,6 @@ def finish_round(round_id: int, user_id: int, round_num: int, *,
         if status == 'done':
             conn.execute('UPDATE users SET last_round_num=? WHERE id=? AND last_round_num<?',
                          (round_num, user_id, round_num))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 제출 판정 — 단일 진실 공급원 (single source of truth)
-#
-# 사용자 정책: 알파가 "제출 안 됨" 으로 간주되는 유일한 경우는
-#   ┌ Submit 후 Self-correlation 테스트가 실제로 돌았고
-#   ├ Failed 가 떠서 7 Pass / 1 Fail 로 바뀌었으며
-#   └ 구체적인 self-correlation 수치(예: 0.9415, ≥ 0.7)가 잡힌
-# 케이스뿐이다. 그 외 모든 결과 — 무응답(no_response_modal_less),
-# 'Cannot submit', 예외, 버튼 비활성, 수치 없는 'above cutoff' 등 — 는
-# 전부 제출된 것으로 간주한다. WQB 는 제출을 self-corr 로 거절할 때만
-# 구체 수치를 노출하므로, 그 신호의 부재 == 사실상 제출 성공이기 때문.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# 'rejected:%' AND self-corr 언급 AND 구체 소수값 포함 → 진짜 미제출.
-# SQL 에서도 동일 규칙을 적용할 수 있도록 GLOB 패턴을 함께 둔다.
-_SELFCORR_NUM_RE = re.compile(r'\d+\.\d+')
-_GENUINE_SELFCORR_SQL = (
-    "submit_status LIKE 'rejected:%' "
-    "AND LOWER(submit_status) LIKE '%correlation%' "
-    "AND submit_status GLOB '*[0-9].[0-9]*'"
-)
-
-
-def genuine_selfcorr_reject(submit_status: str) -> bool:
-    """submit_status 가 '구체 수치를 동반한 Self-correlation 거절' 인가.
-
-    True 인 경우에만 알파를 미제출로 취급한다 — 그 외는 전부 제출 간주.
-    """
-    s = (submit_status or '').strip()
-    if not s.lower().startswith('rejected:'):
-        return False
-    body = s[len('rejected:'):]
-    if 'correlation' not in body.lower():
-        return False
-    return _SELFCORR_NUM_RE.search(body) is not None
-
-
-def effectively_submitted(submitted: Any, submit_status: str) -> bool:
-    """이 알파를 제출 성공으로 간주할지 — 위 정책의 구현.
-
-    submit_status 가 비어 있으면(= Submit 시도 자체가 없었음, 예: sim 에러/
-    7개 미통과) submitted 플래그를 그대로 따른다. 시도가 있었으면
-    '구체 수치 동반 self-corr 거절' 일 때만 미제출, 그 외 전부 제출.
-    """
-    s = (submit_status or '').strip()
-    if not s:
-        return bool(submitted)
-    return not genuine_selfcorr_reject(s)
 
 
 def insert_alpha(user_id: int, round_id: int, round_num: int, alpha: dict[str, Any]) -> None:
@@ -1008,25 +1030,35 @@ def list_recent_alpha_summaries(user_id: int, limit: int = 30) -> list[dict[str,
 
 
 def submitted_count(user_id: int) -> int:
-    """본인 계정으로 제출 성공한 알파 갯수 (실제로 WQB 가 받음)."""
+    """'제출 성공으로 간주' 시도 수 — 비우기 지점(last_cleared_submit_id)
+    이후 submit_attempts 만 집계하므로 "화면 비우기" 시 함께 0 으로 리셋된다.
+    정책: 빈 submit_status 면 submitted 플래그, 아니면 '구체 수치 self-corr
+    거절'(=_GENUINE_SELFCORR_SQL) 이 아닌 것 (effectively_submitted 의 SQL 미러)."""
     init()
+    cleared = get_last_cleared_submit_id(user_id)
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
-            'SELECT COUNT(*) AS n FROM alphas WHERE user_id=? AND submitted=1',
-            (user_id,),
+            'SELECT COUNT(*) AS n FROM submit_attempts '
+            'WHERE user_id=? AND id>? AND ('
+            "  (TRIM(submit_status)='' AND submitted=1) OR "
+            f' (TRIM(submit_status)<>\'\' AND NOT ({_GENUINE_SELFCORR_SQL}))'
+            ')',
+            (user_id, cleared),
         ).fetchone()
     return int(row['n'] or 0)
 
 
 def unsubmitted_count(user_id: int) -> int:
-    """제출 안 됨으로 간주되는 알파 갯수 — 구체 수치를 동반한 Self-correlation
-    거절만 카운트한다 ('Cannot submit'·무응답 등은 제출로 간주하므로 제외)."""
+    """'제출 안 됨' 시도 수 — 구체 수치 동반 Self-correlation 거절만.
+    submitted_count 과 동일하게 비우기 지점 이후 submit_attempts 만 집계 →
+    "화면 비우기" 시 함께 0 으로 리셋된다 ('Cannot submit'·무응답 제외)."""
     init()
+    cleared = get_last_cleared_submit_id(user_id)
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
-            'SELECT COUNT(*) AS n FROM alphas WHERE user_id=? '
-            f'AND ({_GENUINE_SELFCORR_SQL})',
-            (user_id,),
+            'SELECT COUNT(*) AS n FROM submit_attempts '
+            f'WHERE user_id=? AND id>? AND ({_GENUINE_SELFCORR_SQL})',
+            (user_id, cleared),
         ).fetchone()
     return int(row['n'] or 0)
 

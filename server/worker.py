@@ -29,6 +29,10 @@ LOG = logging.getLogger('hyfe.worker')
 # Fitness/Returns/Turnover/Drawdown/Margin) 라 실 max 는 6. 환경변수로 override.
 PASS_THRESHOLD = int(os.environ.get('HYFE_IQC_PASS_THRESHOLD', '7'))
 
+# 서킷 브레이커 — _run_one_round 가 연속 이만큼 예외나면 워커를 자동 중단.
+# (기존엔 무한 재시도라 같은 버그로 영원히 spin 했음.)
+_MAX_CONSEC_FAILS = 5
+
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY: dict[int, 'Worker'] = {}
 
@@ -107,12 +111,19 @@ class Worker(threading.Thread):
 
     def _main_loop(self) -> None:
         _db.set_user_running(self.user_id, running=True, paused=False)
+        consec_fails = 0
         while not self._stop_event.is_set():
             try:
                 self._run_one_round()
+                consec_fails = 0          # 성공 → 카운터 리셋
             except Exception as e:
+                consec_fails += 1
                 LOG.exception('worker round exception')
-                self._log(0, f'⚠ 워커 라운드 예외: {e}')
+                self._log(0, f'⚠ 워커 라운드 예외 ({consec_fails}/{_MAX_CONSEC_FAILS}): {e}')
+                if consec_fails >= _MAX_CONSEC_FAILS:
+                    self._log(0, f'⛔ 연속 {consec_fails}회 실패 — 워커 자동 중단 '
+                                 f'(무한 루프 방지). 원인 수정 후 다시 시작하세요.')
+                    break
                 # 잠시 쉬고 다음 라운드.
                 if self._stop_event.wait(timeout=10):
                     break
@@ -488,14 +499,7 @@ class Worker(threading.Thread):
                 # Submit 시점 self-correlation 거절 → 8개 IS 테스트 중 7개(실질 테스트) 전부
                 # 통과한 케이스. is_status 에 self-corr FAIL 1개가 들어가 있어도 "PASS≥7 best"
                 # 로 계속 인정 (제출만 못 했을 뿐).
-                _fail0_name = ((ist_r.get('fail') or [{}])[0].get('name') or '').lower()
-                only_selfcorr_fail = (f_n == 1 and e_n == 0 and 'correlation' in _fail0_name)
-                _rej = sub_status.startswith('rejected') or sub_status.startswith('fail:no_response')
-                if (p_n + f_n + e_n) > 0:
-                    is_best = (p_n >= PASS_THRESHOLD
-                               and ((f_n == 0 and e_n == 0) or (only_selfcorr_fail and _rej)))
-                else:
-                    is_best = (pc >= PASS_THRESHOLD)
+                is_best = _is_best_alpha(r)   # 단일 진실: 위 _is_best_alpha 헬퍼
                 if is_best:
                     pass_total += 1
                     if r.get('submitted'):
@@ -548,35 +552,10 @@ class Worker(threading.Thread):
                     #   (c) PASS=7 FAIL=0 + Submit 거절 (재스크랩 실패 fallback)  → kind='correlation'
                     focus_candidates: list[tuple[dict, str, str]] = []  # (alpha, kind, self_corr_value)
                     for r in all_results:
-                        if r.get('cached'):
-                            continue
-                        ist_r = r.get('is_status') or {}
-                        p_n = len(ist_r.get('pass', []) or [])
-                        f_n = len(ist_r.get('fail', []) or [])
-                        e_n = len(ist_r.get('error', []) or [])
-                        pn_n = len(ist_r.get('pending', []) or [])
-                        if (p_n + f_n + e_n + pn_n) > 0:
-                            pc, fc, ec, pnc = p_n, f_n, e_n, pn_n
-                        else:
-                            pc = int(r.get('pass_count') or 0)
-                            fc = int(r.get('fail_count') or 0)
-                            ec = int(r.get('error_count') or 0)
-                            pnc = int(r.get('pending_count') or 0)
-                        sub_st = (r.get('submit_status') or '').strip()
-                        is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
-                        # (a) PASS=6 FAIL=1 ERROR=0 (PENDING 무관, 단 sum=8 정상 케이스).
-                        if pc == 6 and fc == 1 and ec == 0 and (pc + fc + ec + pnc) == 8:
-                            focus_candidates.append((r, 'fail', ''))
-                            continue
-                        # (b) PASS=7 FAIL=1 + 거절 — 재스크랩으로 잡힌 self-corr fail.
-                        if is_rejected and pc == 7 and fc == 1 and ec == 0:
-                            scv = _extract_self_corr_value(ist_r.get('fail') or [])
-                            focus_candidates.append((r, 'correlation', scv))
-                            continue
-                        # (c) PASS=7 FAIL=0 + 거절 — 재스크랩 실패 fallback.
-                        if is_rejected and pc >= 7 and fc == 0 and ec == 0:
-                            focus_candidates.append((r, 'correlation', ''))
-                            continue
+                        # 단일 진실: 위 _classify_focus 헬퍼 ((a)/(b)/(c) 동일)
+                        _kind, _scv = _classify_focus(r)
+                        if _kind:
+                            focus_candidates.append((r, _kind, _scv))
 
                     if focus_candidates:
                         new_q = _db.get_focus_queue(self.user_id)
@@ -689,6 +668,55 @@ def _extract_self_corr_value(fail_items: list[dict]) -> str:
             if m:
                 return m.group(1)
     return ''
+
+
+def _is_counts(r: dict) -> tuple[int, int, int, int]:
+    """결과 r 의 is_status 에서 (pass, fail, error, pending) 갯수. 없으면 0."""
+    ist = r.get('is_status') or {}
+    return (len(ist.get('pass', []) or []), len(ist.get('fail', []) or []),
+            len(ist.get('error', []) or []), len(ist.get('pending', []) or []))
+
+
+def _is_best_alpha(r: dict) -> bool:
+    """라운드 요약의 'best' 판정 (인라인 로직과 동일):
+    IS 권위 있으면 PASS>=T AND (FAIL=0&ERR=0 또는 self-corr 거절뿐),
+    IS 없으면 pass_count>=T."""
+    p_n, f_n, e_n, _ = _is_counts(r)
+    sub_status = (r.get('submit_status') or '').strip()
+    ist_r = r.get('is_status') or {}
+    _fail0_name = ((ist_r.get('fail') or [{}])[0].get('name') or '').lower()
+    only_selfcorr_fail = (f_n == 1 and e_n == 0 and 'correlation' in _fail0_name)
+    _rej = sub_status.startswith('rejected') or sub_status.startswith('fail:no_response')
+    if (p_n + f_n + e_n) > 0:
+        return (p_n >= PASS_THRESHOLD
+                and ((f_n == 0 and e_n == 0) or (only_selfcorr_fail and _rej)))
+    return int(r.get('pass_count') or 0) >= PASS_THRESHOLD
+
+
+def _classify_focus(r: dict) -> tuple[str | None, str]:
+    """focus 큐 후보 분류 → (kind|None, self_corr_value). 인라인 (a)/(b)/(c) 동일.
+    (a) PASS=6 FAIL=1 ERR=0 sum=8 → 'fail'
+    (b) 거절 + PASS=7 FAIL=1 ERR=0 → 'correlation' (self-corr 값 추출)
+    (c) 거절 + PASS>=7 FAIL=0 ERR=0 → 'correlation' (fallback)."""
+    if r.get('cached'):
+        return (None, '')
+    p_n, f_n, e_n, pn_n = _is_counts(r)
+    if (p_n + f_n + e_n + pn_n) > 0:
+        pc, fc, ec, pnc = p_n, f_n, e_n, pn_n
+    else:
+        pc = int(r.get('pass_count') or 0)
+        fc = int(r.get('fail_count') or 0)
+        ec = int(r.get('error_count') or 0)
+        pnc = int(r.get('pending_count') or 0)
+    sub_st = (r.get('submit_status') or '').strip()
+    is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
+    if pc == 6 and fc == 1 and ec == 0 and (pc + fc + ec + pnc) == 8:
+        return ('fail', '')
+    if is_rejected and pc == 7 and fc == 1 and ec == 0:
+        return ('correlation', _extract_self_corr_value((r.get('is_status') or {}).get('fail') or []))
+    if is_rejected and pc >= 7 and fc == 0 and ec == 0:
+        return ('correlation', '')
+    return (None, '')
 
 
 def _short_metric_label(entry: dict) -> str:

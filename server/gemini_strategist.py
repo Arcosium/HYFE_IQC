@@ -506,6 +506,23 @@ def _build_preference_section(stats: dict) -> str:
     return '\n'.join(parts)
 
 
+def _common_sections(round_num: int, feedback: list[dict], errors: list[dict],
+                      avoid_codes: list[str] | None,
+                      submitted_codes: list[str] | None,
+                      seeds: list[dict] | None,
+                      pref_stats: dict | None) -> list[str]:
+    """full/cached 프롬프트가 공유하는 6개 섹션 (순서 고정) — 단일 진실.
+    여기 섹션을 추가/수정하면 두 빌더 모두 자동 반영됨 (한쪽 누락 버그 방지)."""
+    return [
+        _build_challenging_section(),
+        _build_dynamic_section(round_num, feedback, errors),
+        _build_building_blocks_section(seeds or []),
+        _build_preference_section(pref_stats or {}),
+        _build_submitted_anticorr_section(submitted_codes or []),
+        _build_avoid_codes_section(avoid_codes or []),
+    ]
+
+
 def _build_user_prompt_full(round_num: int, feedback: list[dict],
                              errors: list[dict],
                              avoid_codes: list[str] | None = None,
@@ -523,12 +540,8 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
         "===== IQC_brain_datafields.csv =====",
         datafields,
         "",
-        _build_challenging_section(),
-        _build_dynamic_section(round_num, feedback, errors),
-        _build_building_blocks_section(seeds or []),
-        _build_preference_section(pref_stats or {}),
-        _build_submitted_anticorr_section(submitted_codes or []),
-        _build_avoid_codes_section(avoid_codes or []),
+        *_common_sections(round_num, feedback, errors, avoid_codes,
+                          submitted_codes, seeds, pref_stats),
     ]
     return '\n'.join(parts)
 
@@ -539,13 +552,10 @@ def _build_user_prompt_cached(round_num: int, feedback: list[dict],
                                submitted_codes: list[str] | None = None,
                                seeds: list[dict] | None = None,
                                pref_stats: dict | None = None) -> str:
-    return f"라운드 #{round_num} — 12개 알파를 새로 생성하라.\n\n" + \
-           _build_challenging_section() + '\n' + \
-           _build_dynamic_section(round_num, feedback, errors) + '\n' + \
-           _build_building_blocks_section(seeds or []) + '\n' + \
-           _build_preference_section(pref_stats or {}) + '\n' + \
-           _build_submitted_anticorr_section(submitted_codes or []) + '\n' + \
-           _build_avoid_codes_section(avoid_codes or [])
+    # 원본과 byte-동일: 기존 `A + '\n' + B + ...` == `'\n'.join([A,B,...])`.
+    return f"라운드 #{round_num} — 12개 알파를 새로 생성하라.\n\n" + '\n'.join(
+        _common_sections(round_num, feedback, errors, avoid_codes,
+                         submitted_codes, seeds, pref_stats))
 
 
 def _build_challenging_section() -> str:

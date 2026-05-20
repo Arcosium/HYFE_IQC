@@ -65,7 +65,7 @@ cd HYFE_IQC
 - **Self-correlation 회피** — 이미 제출 성공한 알파 코드를 Gemini prompt 에 명시 → 다른 archetype/dataset 시도 가이드
 - **Auto-resume** — 서버 재시작 시 `running=1` 인 워커 자동 재기동 (사용자 클릭 불필요)
 - **로그 누적 보존** — 사용자가 "화면 비우기" 누르기 전까진 SSE 재연결 / 새 디바이스 접속에도 누적 로그 복원
-- **모바일 UI** — `/m` 또는 모바일 UA 자동 분기. ID/PW 만으로 로그인. 진행 상황 + 최근 알파 카운트 + 시작/일시정지 버튼.
+- **모바일 UI** — `/m` 또는 모바일 UA 자동 분기. ID/PW 만으로 로그인. 진행 상황 + 최근 제출 시도 + 시작/일시정지 버튼.
 - **데스크톱 UI** — 실시간 SSE 로그 + 제출 시도 알파 표 (Submitted/Unsubmitted 배지)
 
 ## 화면 흐름
@@ -89,7 +89,7 @@ cd HYFE_IQC
    - Submitted (제출 성공 누적)
    - Unsubmitted (제출 거절됨 누적)
 3. **시작 / 일시정지 버튼** — 데스크톱과 동일한 워커 제어
-4. **최근 알파 표** — R/# / PASS / FAIL / ERR / PEND / 상태 (Sub/Rej/ERR)
+4. **최근 제출 시도 표** — R/# / PASS / FAIL / 상태 / 시각 (시각은 KST). "화면 비우기" 로 표시 지점 이동(DB 보존)
 
 ## 디렉터리
 
@@ -135,7 +135,7 @@ cd /home/opc/projects/HYFE_IQC
 ```
 
 기본 포트 `8088`. 환경변수:
-- `HYFE_IQC_HOST` — 디폴트 `0.0.0.0` (서비스로 띄울 땐 `127.0.0.1` 권장 + 리버스 프록시)
+- `HYFE_IQC_HOST` — `run.sh` 기본값 `127.0.0.1` (Cloudflare 터널이 localhost 로 붙으므로 공개망 직접 노출 차단). LAN/공인 IP 직접 공개가 필요할 때만 `HYFE_IQC_HOST=0.0.0.0 ./run.sh` 로 override
 - `HYFE_IQC_PORT` — 디폴트 `8088`
 - `HYFE_IQC_FERNET_KEY` — Fernet 암호화 키 (미설정 시 `data/.fernet.key` 자동 생성)
 - `HYFE_IQC_PASS_THRESHOLD` — Submit 시도 임계 PASS 수 (디폴트 `7`)
@@ -156,11 +156,13 @@ cd /home/opc/projects/HYFE_IQC
 | `/api/pause` | POST | 워커 일시정지 (서브프로세스 SIGKILL 포함) |
 | `/api/status` | GET | 데스크톱용 — 현재/완료 라운드 + 오류 패턴 + 로그 ID |
 | `/api/m_status` | GET | 모바일용 — 라운드 + Submitted/Unsubmitted 카운트 |
-| `/api/m_recent` | GET | 모바일용 — 최근 N 알파의 PASS/FAIL/ERR/PEND 카운트 |
+| `/api/m_submits` | GET | 데스크톱·모바일 공용 — 최근 제출 시도 목록 (현재 UI 가 사용) |
+| `/api/m_submits/clear` | POST | 제출 시도 표 비우기 지점 이동 (DB 데이터 보존, 웹·모바일 공유) |
 | `/api/logs` | GET | `?since=<id>&limit=<n>` 페이지네이션 |
 | `/api/logs/stream` | GET | SSE 실시간 로그 |
 | `/api/logs/clear` | POST | 비우기 지점만 latest 로 이동 (DB 데이터 보존) |
-| `/api/best` | GET | Submitted + Rejected 알파 목록 |
+| `/api/m_recent` | GET | (legacy, 현재 UI 미사용) 최근 N 알파 PASS/FAIL/ERR/PEND 카운트 |
+| `/api/best` | GET | (legacy, 현재 UI 미사용) Submitted + Rejected 알파 목록 |
 
 ## systemd 등록
 

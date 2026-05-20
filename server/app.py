@@ -51,7 +51,10 @@ COOKIE_SAMESITE = os.environ.get('HYFE_IQC_COOKIE_SAMESITE') or ('None' if COOKI
 _LOGIN_LOCK_LOCK = threading.Lock()
 _LOGIN_IN_FLIGHT: set[str] = set()
 
-_db.init()
+# 주의: _db.init() / _auto_resume_workers() 는 import 부작용으로 두지 않는다.
+# (모듈 import 만으로 DB 생성·워커 기동 → 테스트 불가, WSGI 다중워커서 중복
+#  resume). 둘 다 main() 에서 1회 수행. _db.* 호출은 내부적으로 init() 을
+#  lazy 하게 부르므로 라우트 동작에는 영향 없음.
 
 
 def _auto_resume_workers() -> None:
@@ -72,7 +75,34 @@ def _auto_resume_workers() -> None:
         LOG.warning('auto-resume sweep failed: %s', e)
 
 
-_auto_resume_workers()
+# ─────────────────────────────────────────────────────────────────────────────
+# 공용 헬퍼
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _int_arg(name: str, default: int) -> int:
+    """request.args 의 정수 쿼리 파라미터 안전 파싱 (비정상 입력 → default).
+
+    기존 `int(request.args.get('x','N') or N)` 패턴은 `?x=abc` 에서
+    ValueError → 처리 안 된 500. 한 곳으로 모아 견고하게.
+    """
+    try:
+        v = request.args.get(name)
+        return int(v) if v not in (None, '') else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _status_payload(uid: int) -> dict[str, Any]:
+    """SSE/REST 공용 상태 dict — DB 상태 + in-memory 워커 살아있음 + 카운트.
+    thread_alive 가 두 경로에서 동일해야 클라이언트 버튼 상태가 깜빡이지 않음."""
+    s = _db.get_user_status(uid)
+    w = _worker.get(uid)
+    s['thread_alive'] = bool(w and w.is_alive())
+    s['paused_in_memory'] = bool(w and w.is_paused())
+    s['errors_count'] = _db.total_errors_count(uid)
+    s['latest_log_id'] = _db.latest_log_id(uid)
+    s['last_cleared_log_id'] = _db.get_last_cleared_log_id(uid)
+    return s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,7 +180,13 @@ def static_files(path: str):
         return _no_cache_html('index.html')
     if path.endswith('.html'):
         return _no_cache_html(path)
-    return send_from_directory(STATIC_DIR, path)
+    # JS/CSS 등 정적 자산: ETag/Last-Modified 기반 *재검증 강제*.
+    # 'no-cache' = 매 요청 조건부 검증(미변경이면 304, 변경 즉시 반영) →
+    # 수동 ?v= 캐시버스터가 필요 없어진다. send_from_directory 가 ETag/
+    # Last-Modified + 조건부 304 를 이미 처리하므로 헤더만 보강.
+    resp = make_response(send_from_directory(STATIC_DIR, path))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,14 +379,7 @@ def api_status():
     uid, err = _require_user()
     if err:
         return err
-    s = _db.get_user_status(uid)
-    w = _worker.get(uid)
-    s['thread_alive'] = bool(w and w.is_alive())
-    s['paused_in_memory'] = bool(w and w.is_paused())
-    s['errors_count'] = _db.total_errors_count(uid)
-    s['latest_log_id'] = _db.latest_log_id(uid)
-    s['last_cleared_log_id'] = _db.get_last_cleared_log_id(uid)
-    return jsonify({'ok': True, **s})
+    return jsonify({'ok': True, **_status_payload(uid)})
 
 
 @app.route('/api/m_recent', methods=['GET'])
@@ -359,7 +388,7 @@ def api_m_recent():
     uid, err = _require_user()
     if err:
         return err
-    limit = int(request.args.get('limit', '30') or 30)
+    limit = _int_arg('limit', 30)
     return jsonify({'ok': True, 'alphas': _db.list_recent_alpha_summaries(uid, limit=limit)})
 
 
@@ -370,7 +399,7 @@ def api_m_submits():
     uid, err = _require_user()
     if err:
         return err
-    limit = int(request.args.get('limit', '50') or 50)
+    limit = _int_arg('limit', 50)
     return jsonify({'ok': True, 'attempts': _db.list_submit_attempts(uid, limit=limit)})
 
 
@@ -418,8 +447,8 @@ def api_logs():
     uid, err = _require_user()
     if err:
         return err
-    since = int(request.args.get('since', '0') or 0)
-    limit = int(request.args.get('limit', '500') or 500)
+    since = _int_arg('since', 0)
+    limit = _int_arg('limit', 500)
     rows = _db.list_logs_since(uid, since_id=since, limit=limit)
     return jsonify({'ok': True, 'logs': rows})
 
@@ -442,25 +471,12 @@ def api_logs_stream():
     if uid is None:
         return _err('unauthorized', '', 401)
 
-    since = int(request.args.get('since', '0') or 0)
-
-    def _build_status() -> dict[str, Any]:
-        """SSE/REST 공용 — DB 상태 + in-memory 워커 살아있음 여부 + 에러카운트.
-        thread_alive 가 status 이벤트마다 들어 있어야 클라이언트의 버튼 disable 상태가
-        REST 폴링과 SSE 사이에서 일관됨 (안 그러면 매 10초마다 깜빡임)."""
-        s = _db.get_user_status(uid)
-        w = _worker.get(uid)
-        s['thread_alive'] = bool(w and w.is_alive())
-        s['paused_in_memory'] = bool(w and w.is_paused())
-        s['errors_count'] = _db.total_errors_count(uid)
-        s['latest_log_id'] = _db.latest_log_id(uid)
-        s['last_cleared_log_id'] = _db.get_last_cleared_log_id(uid)
-        return s
+    since = _int_arg('since', 0)
 
     def _gen():
         last_id = since
         # 첫 연결 직후 상태 한 번.
-        yield f'event: status\ndata: {json.dumps(_build_status(), ensure_ascii=False)}\n\n'
+        yield f'event: status\ndata: {json.dumps(_status_payload(uid), ensure_ascii=False)}\n\n'
         # 무한 폴링.
         idle_ticks = 0
         while True:
@@ -479,7 +495,7 @@ def api_logs_stream():
             else:
                 idle_ticks += 1
                 if idle_ticks >= 10:  # 10초마다 keepalive + status.
-                    yield f'event: status\ndata: {json.dumps(_build_status(), ensure_ascii=False)}\n\n'
+                    yield f'event: status\ndata: {json.dumps(_status_payload(uid), ensure_ascii=False)}\n\n'
                     idle_ticks = 0
                 else:
                     yield 'event: ping\ndata: {}\n\n'
@@ -499,7 +515,7 @@ def api_rounds():
     uid, err = _require_user()
     if err:
         return err
-    limit = int(request.args.get('limit', '50') or 50)
+    limit = _int_arg('limit', 50)
     return jsonify({'ok': True, 'rounds': _db.list_rounds(uid, limit=limit)})
 
 
@@ -517,7 +533,7 @@ def api_recent_alphas():
     uid, err = _require_user()
     if err:
         return err
-    limit = int(request.args.get('limit', '60') or 60)
+    limit = _int_arg('limit', 60)
     return jsonify({'ok': True, 'alphas': _db.list_recent_alphas(uid, limit=limit)})
 
 
@@ -539,8 +555,13 @@ def api_health():
 
 
 def main():
+    # import 부작용 제거 → 시작 시 1회 명시 수행 (fail-fast + 테스트 가능).
+    _db.init()
+    _auto_resume_workers()
     port = int(os.environ.get('HYFE_IQC_PORT', '8088'))
-    host = os.environ.get('HYFE_IQC_HOST', '0.0.0.0')
+    # 코드 기본값도 안전하게 루프백 (run.sh/systemd 없이 직접 실행해도 공개망
+    # 직접 노출 방지). LAN/공인 IP 공개는 HYFE_IQC_HOST=0.0.0.0 으로 명시.
+    host = os.environ.get('HYFE_IQC_HOST', '127.0.0.1')
     debug = os.environ.get('HYFE_IQC_DEBUG', '').lower() in ('1', 'true', 'yes')
     LOG.info('starting HYFE_IQC on %s:%d (debug=%s)', host, port, debug)
     app.run(host=host, port=port, debug=debug, threaded=True)

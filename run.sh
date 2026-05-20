@@ -26,8 +26,10 @@ export HYFE_IQC_COOKIE_SECURE="${HYFE_IQC_COOKIE_SECURE:-1}"
 
 # 의존성 자동 설치 (이미 깔려 있으면 빠르게 통과).
 if ! "$PYTHON" -c "import flask, cryptography; from google import genai" 2>/dev/null; then
-  echo "[run.sh] 시스템 python3 에 의존성 누락 — pip install --user 진행"
-  "$PYTHON" -m pip install --user --upgrade flask google-genai cryptography python-dotenv
+  echo "[run.sh] 시스템 python3 에 의존성 누락 — requirements.txt 로 설치"
+  # 단일 진실 공급원 = requirements.txt (정확 버전 핀). --upgrade 무버전 설치는
+  # 부팅마다 메이저 깨짐 위험이 있어 금지.
+  "$PYTHON" -m pip install --user -r "$(dirname "$0")/requirements.txt"
 fi
 
 # Playwright 인터프리터 검사 (없으면 경고만).
