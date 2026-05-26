@@ -202,6 +202,16 @@ class Worker(threading.Thread):
             self._log_quiet(round_num, f'⚠ seeds/pref_stats 조회 실패: {e}')
             seeds, pref_stats = [], {}
 
+        # 탐색(비-focus) 라운드: 기존 30-알파 history / seeds / preference / 제출코드를 주입하지
+        # 않는다. 오류 캐시만 학습해 archetype 틀에 갇히지 않고 최대한 다양한 알파를 생성한다.
+        # (제출 자체를 하지 않으므로 submitted 기반 사전 유사도 필터도 자동 비활성화된다.
+        #  avoid_codes 만 유지해 '글자까지 동일한' 중복 생성=cache-hit 낭비를 막는다.)
+        if not is_focus:
+            feedback = []
+            seeds = []
+            pref_stats = {}
+            submitted_codes = []
+
         new_feedback: list[dict] = []
         pass_total = 0
         err_total = 0
@@ -210,7 +220,7 @@ class Worker(threading.Thread):
         try:
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
-                self._log(round_num, f'1) Gemini focused 12 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
+                self._log(round_num, f'1) Gemini focused 10 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
                 # correlation 모드는 직교화 가이드 위해 제출/거절 알파 코드를 함께 전달
                 # (submitted_codes 는 위에서 이미 제출+거절 합본으로 만들어 둠).
                 _submitted_for_corr = list(submitted_codes) if focus_kind == 'correlation' else []
@@ -230,7 +240,7 @@ class Worker(threading.Thread):
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
             else:
-                self._log(round_num, '1) Gemini 12 알파 생성 호출...')
+                self._log(round_num, '1) Gemini 10 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
                 strategies = gemini_strategist.generate_strategies(
                     api_key=api_key,
                     round_num=round_num,
@@ -537,33 +547,32 @@ class Worker(threading.Thread):
                     # 처리 완료한 entry pop.
                     try:
                         new_q = _db.get_focus_queue(self.user_id)
+                        # 한 부모가 phase 1·2·3 을 가지므로 (round_num, phase) 만으로는 모호.
+                        # 방금 처리한 front entry 를 parent_idx 까지 맞춰 정확히 pop.
                         if new_q and new_q[0].get('parent_round_num') == round_num \
-                                and int(new_q[0].get('phase') or 0) == phase:
+                                and int(new_q[0].get('phase') or 0) == phase \
+                                and int(new_q[0].get('parent_idx') or 0) == parent_idx:
                             new_q = new_q[1:]
                             _db.set_focus_queue(self.user_id, new_q)
                             self._log(round_num,
-                                      f'  focus 큐 #{parent_idx} 처리 완료 (남은 항목 {len(new_q)})')
+                                      f'  focus 큐 #{parent_idx} (phase {phase}) 처리 완료 (남은 항목 {len(new_q)})')
                     except Exception as e:
                         self._log_quiet(round_num, f'⚠ focus 큐 pop 실패: {e}')
                 else:
-                    # 메인 라운드 종료 — focus 큐 추가 트리거:
-                    #   (a) PASS=6 FAIL=1 (sum=8)            → kind='fail'        (실패 1개 개선)
-                    #   (b) PASS=7 + Submit 거절 → IS 재스크랩 후 PASS=7 FAIL=1   → kind='correlation'
-                    #   (c) PASS=7 FAIL=0 + Submit 거절 (재스크랩 실패 fallback)  → kind='correlation'
-                    focus_candidates: list[tuple[dict, str, str]] = []  # (alpha, kind, self_corr_value)
+                    # 메인 라운드 종료 — PASS>=6 이고 미통과 항목(FAIL/ERROR)이 남은 알파마다
+                    # FAIL 사유를 넣어 3 라운드(phase 1·2·3)씩 개선 변형을 큐에 추가한다.
+                    focus_candidates: list[dict] = []
                     for r in all_results:
-                        # 단일 진실: 위 _classify_focus 헬퍼 ((a)/(b)/(c) 동일)
-                        _kind, _scv = _classify_focus(r)
+                        _kind, _ = _classify_focus(r)
                         if _kind:
-                            focus_candidates.append((r, _kind, _scv))
+                            focus_candidates.append(r)
 
                     if focus_candidates:
                         new_q = _db.get_focus_queue(self.user_id)
-                        n_fail = sum(1 for _, k, _ in focus_candidates if k == 'fail')
-                        n_corr = sum(1 for _, k, _ in focus_candidates if k == 'correlation')
-                        for ph_i, (a, kind, scv) in enumerate(focus_candidates, start=1):
+                        PHASES_PER_PARENT = 3
+                        for a in focus_candidates:
                             ist_r = a.get('is_status') or {}
-                            f_list = list(ist_r.get('fail') or [])
+                            f_list = list(ist_r.get('fail') or []) + list(ist_r.get('error') or [])
                             p_list = list(ist_r.get('pass') or [])
                             fail_descs = [
                                 str(it.get('desc') or it.get('name') or '').strip()
@@ -573,32 +582,25 @@ class Worker(threading.Thread):
                                 str(it.get('desc') or it.get('name') or '').strip()
                                 for it in p_list
                             ]
-                            if kind == 'correlation':
-                                fd = (f'Self-Correlation {scv} > 0.7 (Submit reject)'
-                                      if scv else 'Self-Correlation > 0.7 (Submit reject)')
-                            else:
-                                fd = ' / '.join([d for d in fail_descs if d])[:200]
-                            new_q.append({
-                                'parent_round_num': round_num,
-                                'phase': ph_i,
-                                'parent_idx': int(a.get('idx') or 0),
-                                'parent_code': str(a.get('code') or ''),
-                                'parent_desc': str(a.get('desc') or ''),
-                                'fail_desc': fd,
-                                'parent_pass_items': pass_descs[:8],
-                                'parent_fail_items': fail_descs[:4],
-                                'focus_kind': kind,
-                                'self_corr_value': scv,
-                            })
+                            fd = ' / '.join([d for d in fail_descs if d])[:200]
+                            for ph in range(1, PHASES_PER_PARENT + 1):
+                                new_q.append({
+                                    'parent_round_num': round_num,
+                                    'phase': ph,
+                                    'parent_idx': int(a.get('idx') or 0),
+                                    'parent_code': str(a.get('code') or ''),
+                                    'parent_desc': str(a.get('desc') or ''),
+                                    'fail_desc': fd,
+                                    'parent_pass_items': pass_descs[:8],
+                                    'parent_fail_items': fail_descs[:4],
+                                    'focus_kind': 'fail',
+                                    'self_corr_value': '',
+                                })
                         _db.set_focus_queue(self.user_id, new_q)
-                        bits = []
-                        if n_fail:
-                            bits.append(f'PASS=6 FAIL=1 {n_fail}개')
-                        if n_corr:
-                            bits.append(f'PASS=7 Submit거절 {n_corr}개')
                         self._log(round_num,
-                                  f'  🎯 focus 후보 {len(focus_candidates)}개 발견 ({", ".join(bits)}) — '
-                                  f'다음 라운드부터 sub-round 진행 ({round_num}-1, {round_num}-2, ...)',
+                                  f'  🎯 PASS≥6 focus 후보 {len(focus_candidates)}개 — '
+                                  f'각 {PHASES_PER_PARENT} 라운드씩 FAIL 개선 변형 생성 예정 '
+                                  f'(총 {len(focus_candidates) * PHASES_PER_PARENT} sub-round)',
                                   level='pass')
         except Exception as e:
             self._log(round_num, f'⚠ 라운드 예외: {e}')
@@ -694,28 +696,23 @@ def _is_best_alpha(r: dict) -> bool:
 
 
 def _classify_focus(r: dict) -> tuple[str | None, str]:
-    """focus 큐 후보 분류 → (kind|None, self_corr_value). 인라인 (a)/(b)/(c) 동일.
-    (a) PASS=6 FAIL=1 ERR=0 sum=8 → 'fail'
-    (b) 거절 + PASS=7 FAIL=1 ERR=0 → 'correlation' (self-corr 값 추출)
-    (c) 거절 + PASS>=7 FAIL=0 ERR=0 → 'correlation' (fallback)."""
+    """focus 큐 후보 분류 → (kind|None, self_corr_value).
+
+    새 정책 (제출 폐지): PASS>=6 이면서 아직 통과 못한 항목(FAIL/ERROR)이 남아 있으면
+    'fail' 개선 focus 대상이다. 이런 알파마다 FAIL 사유를 넣어 3 라운드씩 개선 변형을 생성한다.
+    (self-correlation 은 별표 단계에서 Correlation 상자의 Maximum 으로 직접 확인하므로
+     제출-거절 기반 'correlation' kind 는 더 이상 사용하지 않는다.)"""
     if r.get('cached'):
         return (None, '')
     p_n, f_n, e_n, pn_n = _is_counts(r)
     if (p_n + f_n + e_n + pn_n) > 0:
-        pc, fc, ec, pnc = p_n, f_n, e_n, pn_n
+        pc, fc, ec = p_n, f_n, e_n
     else:
         pc = int(r.get('pass_count') or 0)
         fc = int(r.get('fail_count') or 0)
         ec = int(r.get('error_count') or 0)
-        pnc = int(r.get('pending_count') or 0)
-    sub_st = (r.get('submit_status') or '').strip()
-    is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
-    if pc == 6 and fc == 1 and ec == 0 and (pc + fc + ec + pnc) == 8:
+    if pc >= 6 and (fc + ec) >= 1:
         return ('fail', '')
-    if is_rejected and pc == 7 and fc == 1 and ec == 0:
-        return ('correlation', _extract_self_corr_value((r.get('is_status') or {}).get('fail') or []))
-    if is_rejected and pc >= 7 and fc == 0 and ec == 0:
-        return ('correlation', '')
     return (None, '')
 
 
@@ -747,37 +744,36 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
     p_list = is_status.get('pass') or []
     f_list = is_status.get('fail') or []
     e_list = is_status.get('error') or []
-    pn_list = is_status.get('pending') or []
-    total = len(p_list) + len(f_list) + len(e_list) + len(pn_list)
+    # PENDING(주로 'Self-correlation check pending')은 더 이상 표시/대기하지 않는다 —
+    # self-correlation 은 Correlation 상자의 Maximum 으로 직접 읽어 별표 판정에 쓴다.
+    total = len(p_list) + len(f_list) + len(e_list)
     sub_st = (submit_status or '').strip()
-    is_rejected = sub_st.startswith('rejected') or sub_st.startswith('fail:no_response')
+
+    # 별표(저장) 상태 + self-correlation 값 표기.
+    star_note = ''
+    if sub_st.startswith('starred'):
+        star_note = f'  ⭐ 별표 저장 ({sub_st[len("starred"):].strip().strip("()") or "self-corr ?"})'
+    elif sub_st.startswith('skip_star'):
+        star_note = f'  ☆ 미저장 — {sub_st[len("skip_star:"):].strip()}'
+    elif sub_st.startswith('star_fail'):
+        star_note = f'  ⚠ 별표 실패 ({sub_st[len("star_fail"):].strip().strip("()")})'
+    elif sub_st.startswith('rejected') or sub_st.startswith('fail:'):  # 구버전 제출 기록 호환
+        star_note = f'  📝 {sub_st.split(":", 1)[-1].strip()[:80]}'
 
     if total > 0:
         pass_str = ' '.join(_short_metric_label(e) for e in p_list) or '(없음)'
         fail_str = ' '.join(_short_metric_label(e) for e in f_list) or '(없음)'
         err_str = ' '.join((e.get('name') or '?').strip() for e in e_list)
-        pend_str = ' '.join((e.get('name') or '?').strip() for e in pn_list)
-        if is_rejected:
-            head_status = '🚫 SUBMIT 거절'
-            check = ''
-        else:
-            head_status = 'PASS' if status == 'pass' else 'fail'
-            check = ' ✓' if status == 'pass' else ''
+        head_status = 'PASS' if status == 'pass' else 'fail'
+        check = ' ✓' if status == 'pass' else ''
         head = f'      #{idx} → {head_status} ({len(p_list)} PASS / {len(f_list)} FAIL'
         if e_list:
             head += f' / {len(e_list)} ERR'
-        if pn_list:
-            head += f' / {len(pn_list)} PEND'
         head += f'){check}'
         body = f'  ✓ {pass_str}  ✗ {fail_str}'
         if err_str:
             body += f'  ⚠ {err_str}'
-        if pend_str:
-            body += f'  ⏳ {pend_str}'
-        if is_rejected and ':' in sub_st:
-            reason = sub_st.split(':', 1)[1].strip()
-            if reason:
-                body += f'  📝 {reason[:80]}'
+        body += star_note
         return head + body
 
     # Fallback — IS Testing Status 미수신 시 summary metrics 기반 표기 (값 포함).

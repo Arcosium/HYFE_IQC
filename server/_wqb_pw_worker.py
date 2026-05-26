@@ -134,6 +134,210 @@ def _dump_failure(page, tag):
     except Exception as e:
         log(f'fail_dump exception: {e}')
 
+
+def _read_self_correlation(page):
+    """Correlation 상자를 활성화하고 Self-Correlation 행의 'V' 아래 화살표를 눌러
+    self-correlation 계산을 트리거한 뒤, ~30s 내에 뜨는 Maximum 값을 float 로 반환한다.
+    값 미수집(계산 안 됨/'-')이면 None.
+
+    셀렉터 출처: 라이브 실험(2026-05-21) — 화살표 `.correlation__content-status-arrow--down`,
+    값 라벨 `.correlation__content-status*title` ('Maximum') + 형제값. ('Self Correlation'
+    아래 Maximum=최대 self-corr, Minimum=최소.)"""
+    try:
+        # 0) 혹시 Tutorial 모드면 완전 종료 — 'Exit tutorial mode' → confirm 'Exit'.
+        #    Tutorial 모드는 Correlation 상자를 가린다. 평소(이미 종료됨)엔 no-op.
+        for _ in range(2):
+            did = page.evaluate(r'''() => {
+                let acted=false;
+                for(const b of [...document.querySelectorAll('button,[role="button"],a')]){
+                  if(b.offsetParent===null) continue;
+                  if(/^exit tutorial mode$/i.test((b.innerText||'').trim())){ try{b.click();}catch(e){} acted=true; }
+                }
+                return acted;
+            }''')
+            if not did:
+                break
+            page.wait_for_timeout(700)
+            page.evaluate(r'''() => {
+                for(const b of [...document.querySelectorAll('button,[role="button"],a')]){
+                  if(b.offsetParent===null) continue;
+                  if(/^exit$/i.test((b.innerText||'').trim())){ try{b.click();}catch(e){} return; }
+                }
+            }''')
+            page.wait_for_timeout(1200)
+        # 1) Correlation 섹션 활성화.
+        page.evaluate(r'''() => {
+            const c=document.querySelector('.alphas-details__actions-item--correlation');
+            if(c){ try{c.click();}catch(e){} }
+        }''')
+        page.wait_for_timeout(1000)
+        # 2) 클릭 전 'Last Run' 값 캡처 — 같은 탭을 알파마다 재사용하므로 직전 알파의
+        #    self-corr 잔상값을 그대로 읽는 stale-read 위험이 있다. 화살표 클릭 후 Last Run 이
+        #    바뀌어야(=현재 알파 fresh 계산 완료) Maximum 을 신뢰한다.
+        prev_run = page.evaluate(r'''() => { const m=(document.body.innerText||'').match(/Last Run:\s*([^\n]*)/i); return m?m[1].trim():''; }''') or ''
+        # 3) Self-Correlation 행의 down-arrow 클릭 → 계산 트리거.
+        clicked = page.evaluate(r'''() => {
+            function ownText(el){let t='';for(const n of el.childNodes){if(n.nodeType===3)t+=n.textContent;}return t.trim();}
+            const sc=[...document.querySelectorAll('*')].find(el=>/^self[-\s]?correlation$/i.test(ownText(el)));
+            const arrows=[...document.querySelectorAll('[class*="correlation__content-status-arrow"]')];
+            if(!arrows.length) return false;
+            let target=arrows[0];
+            if(sc){const r=sc.getBoundingClientRect();let bd=1e9;
+              for(const a of arrows){const ar=a.getBoundingClientRect();const d=Math.abs(ar.y-r.y);if(d<bd){bd=d;target=a;}}}
+            try{target.click();}catch(e){}
+            try{target.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){}
+            return true;
+        }''')
+        if not clicked:
+            log('_read_self_correlation: correlation arrow 없음')
+            return None
+        # 4) ~60s 폴링 — Last Run 갱신(fresh) + Maximum 값 등장 동시 충족 시에만 채택.
+        for _ in range(15):
+            page.wait_for_timeout(4000)
+            st = page.evaluate(r'''() => {
+                let mx='';
+                const titles=[...document.querySelectorAll('[class*="correlation__content-status"][class*="title"]')];
+                for(const t of titles){
+                  if(/^maximum$/i.test((t.innerText||'').trim())){
+                    let sib=t.nextElementSibling, v='';
+                    while(sib && !v){ v=(sib.innerText||'').trim(); sib=sib.nextElementSibling; }
+                    if(!v && t.parentElement) v=(t.parentElement.innerText||'').replace(/maximum/i,'').trim();
+                    mx=v; break;
+                  }
+                }
+                if(!mx){ const m=(document.body.innerText||'').match(/Maximum\s*\n\s*([-+]?\d*\.?\d+)/i); if(m) mx=m[1]; }
+                const lr=(document.body.innerText||'').match(/Last Run:\s*([^\n]*)/i);
+                return {mx:(mx||'').trim(), run:lr?lr[1].trim():''};
+            }''')
+            mx = (st or {}).get('mx', '')
+            run = (st or {}).get('run', '')
+            fresh = bool(run) and run not in ('-', '—') and run != prev_run
+            if fresh and mx and mx not in ('-', '—'):
+                m = re.search(r'[-+]?\d*\.?\d+', mx)
+                if m:
+                    try:
+                        return float(m.group(0))
+                    except ValueError:
+                        pass
+        log(f'_read_self_correlation: fresh Maximum ~60s 내 미수집 (prev_run={prev_run!r})')
+        return None
+    except Exception as e:
+        log(f'_read_self_correlation err: {e}')
+        return None
+
+
+def _add_alpha_to_list(page, list_name='Submit'):
+    """알파 상세 페이지를 새 탭으로 열고('Open alpha details in new tab'), 우상단
+    'Add Alpha to a List'(`button.alpha__header-add`) 를 눌러 Semantic-UI 모달을 띄운 뒤,
+    'List name' 드롭다운(`.alphaAdd__content-dropdown`)에서 기존 'Submit' 리스트를
+    선택하고 'Add Alpha to List' 버튼을 눌러 그 리스트에 추가한다. 성공 시 True.
+
+    (기존엔 우상단 별표 `.alpha__header-star` 로 favorite 저장했으나, 사용자 요청으로
+    'Submit' 리스트 추가로 교체. downstream(submitted/submit_status) 의미는 그대로.)
+
+    셀렉터 출처: 라이브 실험(2026-05-24) — 상세 페이지(/alpha/<id>) 헤더 우상단
+    'Add Alpha to a List' 버튼 → 모달 `.ui.modal` → 드롭다운 `.alphaAdd__content-dropdown`
+    의 `.menu .item`('Submit') → 버튼 'Add Alpha to List'. 추가 성공 시 모달이 닫힌다.
+    'Add Alpha and View List' 는 새 탭으로 리스트를 여니 피하고 'Add Alpha to List' 사용."""
+    detail = None
+    try:
+        ctx = page.context
+        with ctx.expect_page(timeout=15000) as np_info:
+            page.evaluate(r'''() => {
+                function ownText(el){let t='';for(const n of el.childNodes){if(n.nodeType===3)t+=n.textContent;}return t.trim();}
+                const el=[...document.querySelectorAll('*')].find(e=>/^open alpha details in new tab$/i.test(ownText(e)));
+                if(el){ const b=el.closest('button,a,[role="button"]')||el; try{b.click();}catch(e){} }
+            }''')
+        detail = np_info.value
+        detail.wait_for_load_state('domcontentloaded')
+        # 액션 헤더('Add Alpha to a List' 버튼) 는 SPA 렌더 직후 약간 늦게 뜬다.
+        try:
+            detail.wait_for_selector('button.alpha__header-add', timeout=15000)
+        except Exception:
+            detail.wait_for_timeout(3000)
+        # ★ promo/onboarding modal('Apply to be a Research Consultant' 등) 을 add-to-list
+        #   모달 '열기 전' 에 제거한다. js_dismiss_overlays 는 .ui.modal.transition.visible.active
+        #   를 강제 remove 하므로, add-to-list 모달을 연 뒤 부르면 우리 모달까지 날아간다.
+        js_dismiss_overlays(detail)
+        detail.wait_for_timeout(600)
+        # 1) 'Add Alpha to a List' 클릭 → Semantic-UI 모달 오픈.
+        opened = bool(detail.evaluate(r'''() => {
+            const b=document.querySelector('button.alpha__header-add');
+            if(!b) return false;
+            try{b.click();}catch(e){}
+            try{b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){}
+            return true;
+        }'''))
+        if not opened:
+            log('_add_alpha_to_list: button.alpha__header-add 없음')
+            return False
+        try:
+            detail.wait_for_selector('.alphaAdd__content-dropdown', timeout=8000)
+        except Exception:
+            detail.wait_for_timeout(1500)
+        # 2) 'List name' 드롭다운 열기 (Semantic-UI: click 으로 .menu 펼침).
+        detail.evaluate(r'''() => {
+            const dd=document.querySelector('.alphaAdd__content-dropdown');
+            if(dd){ try{dd.click();}catch(e){}
+                dd.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}));
+                dd.dispatchEvent(new MouseEvent('click',{bubbles:true})); }
+        }''')
+        detail.wait_for_timeout(800)
+        # 3) 기존 'Submit' 리스트 항목 선택. (없으면 실패 — 새 리스트 생성은 하지 않음.)
+        sel = detail.evaluate(r'''(name) => {
+            const dd=document.querySelector('.alphaAdd__content-dropdown');
+            if(!dd) return 'no-dropdown';
+            const items=[...dd.querySelectorAll('.menu .item,[role="option"]')];
+            const want=items.find(e=>(e.innerText||e.textContent||'').trim().toLowerCase()===name.toLowerCase())
+                     || items.find(e=>new RegExp(name,'i').test(e.innerText||''));
+            if(!want) return 'no-item:'+items.map(e=>(e.innerText||'').trim()).join('|').slice(0,80);
+            try{want.click();}catch(e){}
+            want.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+            return 'selected';
+        }''', list_name)
+        log(f'_add_alpha_to_list: select {list_name!r} -> {sel}')
+        if sel != 'selected':
+            return False
+        detail.wait_for_timeout(600)
+        # 4) 'Add Alpha to List' 버튼 클릭 (disabled 면 선택 미반영 → 실패).
+        added = bool(detail.evaluate(r'''() => {
+            const btns=[...document.querySelectorAll('button')].filter(b=>/^add alpha to list$/i.test((b.innerText||'').trim()));
+            if(!btns.length) return false;
+            const b=btns[0];
+            if(b.disabled) return false;
+            try{b.click();}catch(e){}
+            b.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+            return true;
+        }'''))
+        # 성공 판정: 'Submit' 이 선택된 상태에서 *활성화된* 'Add Alpha to List' 버튼을
+        # 눌렀으면(=added) 서버측 추가는 성사된다 — 이게 권위 있는 신호다.
+        # 모달 닫힘은 *보조* 신호로만 본다: 이전엔 `.ui.modal.visible.active`(임의 모달)
+        # 가 사라졌는지로 판정했는데, 추가 직후 promo/온보딩 모달이 재등장하거나 우리
+        # 모달의 닫힘 트랜지션이 고정 대기(1.5s) 안에 안 끝나면 modal_gone=False 가 떠
+        # added=True 인데도 star_fail(추가실패)로 오판했다(2026-05-24 R346 idx8 사례).
+        # → 우리 add-to-list 모달(`.alphaAdd__content-dropdown`)만 스코프해 grace
+        # 재폴링으로 닫힘을 확인하되, 최종 판정은 added 를 우선한다.
+        own_modal_open = True
+        for _ in range(10):                 # ~5s grace (0.5s × 10)
+            detail.wait_for_timeout(500)
+            own_modal_open = bool(detail.evaluate(
+                '() => !!document.querySelector(".alphaAdd__content-dropdown, .alphaAdd__content")'))
+            if not own_modal_open:
+                break
+        modal_gone = not own_modal_open
+        log(f'_add_alpha_to_list: added={added} modal_gone={modal_gone} url={detail.url}')
+        return bool(added)
+    except Exception as e:
+        log(f'_add_alpha_to_list err: {e}')
+        return False
+    finally:
+        try:
+            if detail:
+                detail.close()
+        except Exception:
+            pass
+
+
 # ── 잉여 시뮬 탭 정리 ────────────────────────────────────────────────────────
 # SEQUENTIAL 모드는 한 페이지에서 같은 탭 1개를 반복 사용. 3배치 시절 만들어진
 # Simulation 2/3 잉여 탭이 페이지에 남아 WQB 의 동시 sim 슬롯을 점유하면
@@ -3104,42 +3308,47 @@ try:
                 return False
             return (p_n >= PASS_THRESHOLD and f_n == 0 and e_n == 0)
 
-        def _submit_if_pass(tab_label, fi):
-            # PASS 슬롯이면 해당 탭으로 가 Submit Alpha 시도 + 거절/무응답 시 IS 재스크랩.
-            if not _is_pass_slot(fi):
+        def _corr_check_and_star(tab_label, fi):
+            # 새 정책 (제출 폐지): PASS>=6 인 알파만 Correlation 상자의 V-화살표를 눌러
+            # Self-Correlation Maximum 을 읽고, IS 전체 PASS(FAIL=0 & ERROR=0) 이면서
+            # self-corr<=0.7 이면 알파 상세 페이지 우상단 'Add Alpha to a List' 로
+            # 'Submit' 리스트에 추가한다(기존 별표 favorite 저장을 대체).
+            # downstream 호환을 위해 'submitted'(=추가됨), 'submit_status'(상태문구) 필드와
+            # 기존 토큰 접두사('starred'/'star_fail'/'skip_star') 를 그대로 재사용한다.
+            ist = results[fi].get('is_status') or {}
+            p_n = len(ist.get('pass', []) or [])
+            f_n = len(ist.get('fail', []) or [])
+            e_n = len(ist.get('error', []) or [])
+            if (p_n + f_n + e_n) == 0:
+                return
+            if p_n < 6:
                 return
             click_tab(page, tab_label)
             page.wait_for_timeout(700)
-            sub_status, sub_detail = _try_submit_alpha(page)
-            log(f'idx{_ix(fi)} submit status={sub_status} detail={sub_detail}')
-            results[fi]['submit_status'] = sub_status
-            # 정책: '구체 수치 동반 self-corr 거절' 이 아니면 전부 제출 간주.
-            results[fi]['submitted'] = not _genuine_selfcorr_reject(sub_status)
-            page.wait_for_timeout(600)
-            # 지연 확인 — WQB 의 self-corr 검사는 Submit 후 최대 1~2분 늦게 끝날
-            # 수 있다. 명시 success 도, 구체 수치 self-corr 거절도 아직 아닌 경우
-            # — 거절·실패, 또는 'UNCONFIRMED'(무응답·예외·무신호로 제출 간주한
-            # 케이스) — 한 번 더 IS 패널을 ~120s 폴링해 늦게 확정되는 '진짜'
-            # self-corr 거절을 잡는다. 미제출로 내릴 수 있는 건 '구체 수치 동반
-            # self-corr 거절' 일 때뿐 (그 외엔 제출로 확정).
-            _unconf = str(sub_detail or '').startswith('UNCONFIRMED')
-            if not _genuine_selfcorr_reject(sub_status) and (sub_status != 'submitted' or _unconf):
-                ro = _rescrape_submit_outcome(page, retries=15, interval_ms=8000)
-                if ro.get('ist') is not None and (ro.get('verdict') in ('reject', 'success', 'success_implied')):
-                    results[fi]['is_status'] = ro['ist']
-                scv = (ro.get('self_corr') or '').strip()
-                if ro.get('verdict') == 'reject' and ro.get('is_selfcorr') and scv:
-                    # 늦게 확정된 진짜 self-corr 거절 (구체 수치 있음) → 미제출.
-                    results[fi]['submitted'] = False
-                    results[fi]['submit_status'] = f'rejected:Self-correlation {scv} > 0.7'
-                    log(f'idx{_ix(fi)} rescrape: 진짜 self-corr 거절 확정 ({scv}) — 미제출')
-                else:
-                    # success / success_implied / 수치 없는 reject / none → 제출 간주.
-                    results[fi]['submitted'] = True
-                    if ro.get('verdict') in ('success', 'success_implied'):
-                        results[fi]['submit_status'] = 'submitted'
-                    log(f'idx{_ix(fi)} rescrape verdict={ro.get("verdict")} '
-                        f'self_corr={scv or "—"} — 제출 간주')
+            sc = _read_self_correlation(page)
+            results[fi]['self_corr'] = sc
+            all_pass = (f_n == 0 and e_n == 0)
+            sc_s = f'{sc:.4f}' if isinstance(sc, float) else '—'
+            log(f'idx{_ix(fi)} corr-check: self_corr={sc_s} all_pass={all_pass} (P{p_n}/F{f_n}/E{e_n})')
+            # '시도'(submit_attempt) 는 진짜 후보(=IS 전체 PASS)에 대해서만 기록한다.
+            # all-pass 아닌 6+PASS 알파는 corr 를 로그로만 노출하고, 시도/카운트에는 넣지 않는다
+            # (submit_status 를 비워두면 worker _on_partial 이 record_submit_attempt 를 건너뜀).
+            if not all_pass:
+                results[fi]['submitted'] = False
+                results[fi]['submit_status'] = ''
+                log(f'idx{_ix(fi)} Submit 후보 아님(all-pass 아님 F{f_n}/E{e_n}) — self-corr {sc_s}, 시도 미기록')
+                return
+            if sc is not None and sc <= 0.7:
+                ok = _add_alpha_to_list(page)
+                results[fi]['submitted'] = ok
+                results[fi]['submit_status'] = (f'starred (self-corr {sc_s})' if ok
+                                                else f'star_fail (self-corr {sc_s})')
+                log(f'idx{_ix(fi)} {"⭐ Submit 리스트 추가 완료" if ok else "Submit 리스트 추가 실패"} (self_corr={sc_s})')
+            else:
+                why = 'self-corr 미수집' if sc is None else f'self-corr {sc_s}>0.7'
+                results[fi]['submitted'] = False
+                results[fi]['submit_status'] = f'skip_star: {why}'
+                log(f'idx{_ix(fi)} Submit 리스트 추가 스킵 — {why}')
 
         def _emit_done(fi):
             err = results[fi].get('error_text') or ''
@@ -3211,7 +3420,7 @@ try:
                 if not done and not results[fi].get('error_text'):
                     log(f'step: SEQ idx{_ix(fi)} FAIL sim wait timeout ({SIM_MAX_WAIT_SEC}s)')
                     results[fi]['error_text'] = f'sim wait timeout ({SIM_MAX_WAIT_SEC}s)'
-                _submit_if_pass(seq_label, fi)
+                _corr_check_and_star(seq_label, fi)
                 _emit_done(fi)
         else:
             # ── 병렬 rolling window ──────────────────────────────────────────
@@ -3284,7 +3493,7 @@ try:
                     if is_done_after(before_m, state) and (sim_age >= MIN_SIM_SEC or state.get('error_text')):
                         _collect_done(fi, state)
                         log(f'parallel: slot{w} idx{_ix(fi)} done (age {sim_age:.0f}s)')
-                        _submit_if_pass(tabs[w]['label'], fi)
+                        _corr_check_and_star(tabs[w]['label'], fi)
                         _emit_done(fi)
                         _fill_slot(w)
                         continue

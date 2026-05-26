@@ -198,10 +198,11 @@ def api_login():
     """WQB 자격증명 + Gemini API 키 검증.
 
     기존 사용자 fast-path: DB 에 같은 username 이 있고 비밀번호가 일치하면 WQB 브라우저
-    검증을 건너뛰고 Gemini 키만 검증한다. 이래야 (a) 다른 기기에서 동시에 로그인할 때
-    chromium subprocess 충돌이 없고, (b) 워커가 돌고 있는 와중에도 새 디바이스가 즉시
-    합류 가능. (worker 는 user_id 기준으로 in-process 공유 — 두 기기가 같은 워커의
-    상태/로그를 같이 본다.)
+    검증을 건너뛴다. Gemini 키는 입력값 우선, 무효/미입력이면 저장된 유효 키로 폴백
+    하므로 새 기기에서는 ID+비밀번호만으로 로그인 가능 (둘 다 무효일 때만 거부). 이래야
+    (a) 다른 기기에서 동시에 로그인할 때 chromium subprocess 충돌이 없고, (b) 워커가
+    돌고 있는 와중에도 새 디바이스가 즉시 합류 가능. (worker 는 user_id 기준으로
+    in-process 공유 — 두 기기가 같은 워커의 상태/로그를 같이 본다.)
     """
     body = request.get_json(silent=True) or {}
     wqb_username = (body.get('wqb_username') or '').strip()
@@ -209,25 +210,47 @@ def api_login():
     gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
 
-    if not (wqb_username and wqb_password and gemini_api_key):
-        return _err('missing_fields',
-                    '아이디 / 비밀번호 / Gemini API 키가 모두 필요합니다', 400)
+    if not (wqb_username and wqb_password):
+        return _err('missing_fields', '아이디 / 비밀번호가 필요합니다', 400)
 
     # ── 기존 사용자 fast-path ──
+    # 비밀번호만 맞으면 통과시키되, Gemini 키는 다음 우선순위로 확정:
+    #   1) 입력한 키가 유효 → 그 키 채택(변경 시 DB 갱신)
+    #   2) 입력 키가 없거나 무효지만 저장된 키가 유효 → 저장 키로 폴백
+    #      → 새 기기에서 ID+비밀번호만으로 로그인 가능 (모바일 m_login 과 동일 철학)
+    #   3) 입력·저장 둘 다 무효 → 새 키 발급 요구 (워커가 유효 키 없이는 못 돌기 때문)
     existing = _db.find_user_by_username(wqb_username)
     if existing and existing.get('wqb_password') == wqb_password:
-        LOG.info('login fast-path (existing user, password match): %s', wqb_username)
-        # Gemini 키만 가벼운 검증 (1회 generate_content, ~1s).
-        g = _auth.validate_gemini_key(gemini_api_key)
-        if not g.get('ok'):
-            return jsonify(g), 401
         uid = int(existing['id'])
-        # Gemini 키가 변경됐다면 갱신.
-        if existing.get('gemini_api_key') != gemini_api_key:
-            _db.update_user_secrets(uid, gemini_api_key=gemini_api_key)
-        else:
-            _db.update_user_secrets(uid)  # last_login_at touch 만.
-        return _issue_session(uid, wqb_username, remember)
+        stored_key = existing.get('gemini_api_key') or ''
+
+        # 1) 입력한 키가 유효하면 채택 (변경됐으면 갱신).
+        if gemini_api_key:
+            g = _auth.validate_gemini_key(gemini_api_key)
+            if g.get('ok'):
+                LOG.info('login fast-path (existing, 입력 키 OK): %s', wqb_username)
+                if gemini_api_key != stored_key:
+                    _db.update_user_secrets(uid, gemini_api_key=gemini_api_key)
+                else:
+                    _db.update_user_secrets(uid)  # last_login_at touch
+                return _issue_session(uid, wqb_username, remember)
+            LOG.info('login fast-path (existing, 입력 키 무효:%s) — 저장 키로 폴백: %s',
+                     g.get('reason'), wqb_username)
+
+        # 2) 저장된 키로 폴백 (입력 키와 다를 때만 재검증 가치 있음).
+        if stored_key and stored_key != gemini_api_key:
+            gs = _auth.validate_gemini_key(stored_key)
+            if gs.get('ok'):
+                LOG.info('login fast-path (existing, 저장 키 폴백 OK): %s', wqb_username)
+                _db.update_user_secrets(uid)  # last_login_at touch
+                return _issue_session(uid, wqb_username, remember)
+
+        # 3) 입력 키도 저장 키도 무효 → 새 키 필요.
+        LOG.info('login fail (existing, 유효 Gemini 키 없음 — 입력·저장 모두 무효): %s',
+                 wqb_username)
+        return _err('gemini_invalid',
+                    'Gemini API 키가 만료/무효합니다. 새 키를 발급받아 입력해 주세요 '
+                    '(https://aistudio.google.com/app/api-keys).', 401)
 
     # ── 신규 사용자 (또는 비밀번호 mismatch) — 풀 검증 ──
     # 비밀번호 mismatch 인데 username 은 존재하는 케이스: 의도적으로 기존 record 를
@@ -239,6 +262,12 @@ def api_login():
         return _err('wqb_credentials',
                     '저장된 자격증명과 일치하지 않습니다. WQB 비밀번호를 변경했다면 '
                     '관리자에게 record 초기화를 요청하세요.', 401)
+
+    # 여기 도달 = existing is None (신규 사용자). 신규 가입에는 Gemini 키 필수
+    # (저장된 키가 없으니 폴백 대상이 없고, 워커가 유효 키 없이는 못 돈다).
+    if not gemini_api_key:
+        return _err('missing_fields',
+                    '신규 가입에는 Gemini API 키가 필요합니다.', 400)
 
     # 신규 가입 — chromium subprocess 보호용 in-flight 락 (같은 username 이 동시에
     # 두 번 풀 검증을 트리거하지 않도록).

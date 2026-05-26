@@ -27,9 +27,9 @@
         <label>WQB 비밀번호
           <input type="password" id="wqb_password" required placeholder="••••••••" />
         </label>
-        <label>Gemini API 키
-          <input type="text" id="gemini_api_key" required placeholder="AIzaSy..." />
-          <small>Google AI Studio (<a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a>) 에서 발급한 키.</small>
+        <label>Gemini API 키 <span class="opt">(기존 계정은 비워두면 저장된 키 사용)</span>
+          <input type="text" id="gemini_api_key" placeholder="AIzaSy... (신규 가입 시 필수)" />
+          <small>Google AI Studio (<a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a>) 에서 발급한 키. 새 키를 입력하면 저장된 키를 교체합니다.</small>
         </label>
         <label class="toggle inline-toggle">
           <span>기기에서 자동 로그인 (7일)</span>
@@ -70,14 +70,14 @@
 
     <section class="best-section">
       <div class="best-header">
-        <h2>🚀 알파 제출 시도</h2>
+        <h2>✅ Submit 리스트 추가</h2>
         <button id="btn-clear-submits" class="btn-link">화면 비우기</button>
       </div>
       <table id="best-table">
         <thead><tr><th>R</th><th>#</th><th>PASS</th><th>FAIL</th><th>상태</th><th>시각</th><th>코드</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty-msg" id="best-empty">아직 제출 시도된 알파가 없습니다.</div>
+      <div class="empty-msg" id="best-empty">아직 Submit 리스트에 추가된 알파가 없습니다.</div>
     </section>
   </main>
 

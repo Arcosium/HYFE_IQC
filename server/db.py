@@ -1030,34 +1030,32 @@ def list_recent_alpha_summaries(user_id: int, limit: int = 30) -> list[dict[str,
 
 
 def submitted_count(user_id: int) -> int:
-    """'제출 성공으로 간주' 시도 수 — 비우기 지점(last_cleared_submit_id)
-    이후 submit_attempts 만 집계하므로 "화면 비우기" 시 함께 0 으로 리셋된다.
-    정책: 빈 submit_status 면 submitted 플래그, 아니면 '구체 수치 self-corr
-    거절'(=_GENUINE_SELFCORR_SQL) 이 아닌 것 (effectively_submitted 의 SQL 미러)."""
+    """별표 '저장' 성공 시도 수 — submitted=1 인 시도만 (별표 클릭 성공).
+    비우기 지점(last_cleared_submit_id) 이후 submit_attempts 만 집계하므로
+    "화면 비우기" 시 함께 0 으로 리셋된다.
+    (별표 정책: all-pass & self-corr<=0.7 인 후보만 시도로 기록되며, 그중
+    별표 클릭 성공 시에만 submitted=1. corr>0.7·별표실패·구버전 거절은 submitted=0.)"""
     init()
     cleared = get_last_cleared_submit_id(user_id)
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
             'SELECT COUNT(*) AS n FROM submit_attempts '
-            'WHERE user_id=? AND id>? AND ('
-            "  (TRIM(submit_status)='' AND submitted=1) OR "
-            f' (TRIM(submit_status)<>\'\' AND NOT ({_GENUINE_SELFCORR_SQL}))'
-            ')',
+            'WHERE user_id=? AND id>? AND submitted=1',
             (user_id, cleared),
         ).fetchone()
     return int(row['n'] or 0)
 
 
 def unsubmitted_count(user_id: int) -> int:
-    """'제출 안 됨' 시도 수 — 구체 수치 동반 Self-correlation 거절만.
-    submitted_count 과 동일하게 비우기 지점 이후 submit_attempts 만 집계 →
-    "화면 비우기" 시 함께 0 으로 리셋된다 ('Cannot submit'·무응답 제외)."""
+    """별표 '미저장' 시도 수 — 시도됐으나 submitted=0 (self-corr>0.7, 별표 실패,
+    또는 구버전 self-corr 거절). submitted_count 과 동일하게 비우기 지점 이후만
+    집계 → "화면 비우기" 시 함께 0 으로 리셋된다."""
     init()
     cleared = get_last_cleared_submit_id(user_id)
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
             'SELECT COUNT(*) AS n FROM submit_attempts '
-            f'WHERE user_id=? AND id>? AND ({_GENUINE_SELFCORR_SQL})',
+            'WHERE user_id=? AND id>? AND submitted=0',
             (user_id, cleared),
         ).fetchone()
     return int(row['n'] or 0)

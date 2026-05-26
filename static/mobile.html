@@ -256,21 +256,21 @@
           <div class="value" id="completed-round">0</div>
         </div>
         <div class="stat submitted">
-          <div class="label">Submitted</div>
+          <div class="label">Added</div>
           <div class="value" id="submitted-count">0</div>
-          <div class="sub">제출 성공</div>
+          <div class="sub">리스트 추가</div>
         </div>
         <div class="stat unsubmitted">
-          <div class="label">Unsubmitted</div>
+          <div class="label">Not added</div>
           <div class="value" id="unsubmitted-count">0</div>
-          <div class="sub">제출 거절됨</div>
+          <div class="sub">미추가</div>
         </div>
       </div>
       <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
 
       <section class="recent-section">
         <div class="recent-head">
-          <h3>최근 제출 시도</h3>
+          <h3>최근 리스트 추가 시도</h3>
           <button type="button" id="btn-clear-submits" class="btn-clear-submits">화면 비우기</button>
         </div>
         <table id="recent-table">
@@ -285,7 +285,7 @@
           </thead>
           <tbody></tbody>
         </table>
-        <div id="recent-empty" class="recent-empty" hidden>제출 시도가 아직 없습니다.</div>
+        <div id="recent-empty" class="recent-empty" hidden>리스트 추가 시도가 아직 없습니다.</div>
       </section>
 
       <div class="desktop-btn-row">
@@ -395,18 +395,26 @@
     }
     function mkBadge(submitted, ss) {
       const span = document.createElement('span');
-      let extra = 'dot', label = '—', title = ss || '제출 시도';
-      if (submitted) { extra = 'sub'; label = '✓ 제출'; title = '제출 성공'; }
-      else if (ss.startsWith('rejected:')) {
+      let extra = 'dot', label = '—', title = ss || '리스트 추가 시도';
+      if (submitted) {                                  // 'Submit' 리스트 추가 성공
+        extra = 'sub'; label = '✅ 추가'; title = ss || 'Submit 리스트 추가';
+        const m = ss.match(/0?\.\d+/);
+        if (m && /corr/i.test(ss)) label = '✅ 추가 · corr ' + m[0];
+      } else if (ss.startsWith('skip_star')) {          // all-pass 아님 / corr>0.7 → 미추가
+        extra = 'dot'; label = '— 미추가';
+        const m = ss.match(/0?\.\d+/);
+        if (m && /corr/i.test(ss)) label = '— 미추가 · corr ' + m[0];
+        title = ss.slice(0, 90);
+      } else if (ss.startsWith('star_fail')) { extra = 'errt'; label = '⚠ 추가실패'; title = ss; }
+      else if (ss.startsWith('rejected:')) {            // (구버전 제출 기록 호환)
         extra = 'rej'; label = '✗ 거절';
         const body = ss.slice('rejected:'.length);
         const m = body.match(/\d+\.\d+/);
-        // 구체 self-correlation 수치를 받았으면 미제출 배지에 직접 노출.
         if (m && /correlation/i.test(body)) label = '✗ 거절 · corr ' + m[0];
         title = body.slice(0, 80);
       } else if (ss.startsWith('fail:')) { extra = 'errt'; label = '⚠ 실패'; title = ss; }
-      else if (ss === 'disabled') { extra = 'dot'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
-      else if (ss === 'not_found') { extra = 'errt'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }
+      else if (ss === 'disabled') { extra = 'dot'; label = '⛔ 비활성'; title = ss; }
+      else if (ss === 'not_found') { extra = 'errt'; label = '⚠ 못찾음'; title = ss; }
       span.className = 'badge-mini ' + extra;
       span.textContent = label;
       span.title = title;

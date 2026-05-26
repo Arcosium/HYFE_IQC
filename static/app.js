@@ -354,18 +354,27 @@
   }
   function bestBadge(submitted, ss) {
     const span = document.createElement('span');
-    let cls = 'unsubmitted', label = '— 미제출', title = ss || '제출 시도';
-    if (submitted) { cls = 'submitted'; label = '✓ 제출'; title = '제출 성공'; }
-    else if (ss.startsWith('rejected:')) {
+    let cls = 'unsubmitted', label = '— 미추가', title = ss || '리스트 추가 시도';
+    if (submitted) {                                   // 'Submit' 리스트 추가 성공
+      cls = 'submitted'; label = '✅ 추가'; title = ss || 'Submit 리스트 추가';
+      const m = ss.match(/0?\.\d+/);
+      if (m && /corr/i.test(ss)) label = '✅ 추가 · corr ' + m[0];
+    } else if (ss.startsWith('skip_star')) {           // all-pass 아님 / corr>0.7 → 미추가
+      cls = 'unsubmitted'; label = '— 미추가';
+      const m = ss.match(/0?\.\d+/);
+      if (m && /corr/i.test(ss)) label = '— 미추가 · corr ' + m[0];
+      title = ss.slice(0, 90);
+    } else if (ss.startsWith('star_fail')) {           // 리스트 추가 실패
+      cls = 'unsubmitted'; label = '⚠ 추가실패'; title = ss;
+    } else if (ss.startsWith('rejected:')) {           // (구버전 제출 기록 호환)
       cls = 'unsubmitted'; label = '✗ 거절';
       const body = ss.slice('rejected:'.length).trim();
       const m = body.match(/\d+\.\d+/);
-      // 구체 self-correlation 수치를 받았으면 미제출 배지에 직접 노출.
       if (m && /correlation/i.test(body)) label = '✗ 거절 · corr ' + m[0];
       title = body.slice(0, 80);
     } else if (ss.startsWith('fail:')) { cls = 'unsubmitted'; label = '⚠ 실패'; title = ss; }
-    else if (ss === 'disabled') { cls = 'unsubmitted'; label = '⛔ 비활성'; title = 'Submit 버튼 비활성 (제출 조건 미충족)'; }
-    else if (ss === 'not_found') { cls = 'unsubmitted'; label = '⚠ 못찾음'; title = 'Submit 버튼 못 찾음'; }
+    else if (ss === 'disabled') { cls = 'unsubmitted'; label = '⛔ 비활성'; title = ss; }
+    else if (ss === 'not_found') { cls = 'unsubmitted'; label = '⚠ 못찾음'; title = ss; }
     span.className = 'status-badge ' + cls;
     span.textContent = label;
     span.title = title;

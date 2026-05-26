@@ -2,12 +2,15 @@
 
 검증 항목:
   1. 과학적 표기법 (1e-6, 2E+5 등) → WQB 컴파일러 거부.
-  2. 식별자 화이트리스트 — operators.csv ∪ datafields.csv 에 있는 이름만 허용.
-     단, 산술/비교/논리 연산자(`+ - * / ^ ?:` 등) 와 숫자 리터럴, sector/industry 같은
-     group 키워드는 예외.
-  3. 괄호 균형 — `(` 와 `)` 짝.
-  4. 한 줄 강제 — 줄바꿈/탭 없음.
-  5. 길이 sanity — 5 자 미만/3000 자 초과는 거부.
+  2. 괄호 균형 — `(` 와 `)` 짝.
+  3. 한 줄 강제 — 줄바꿈/탭 없음 (`;` 다중문장은 허용).
+  4. 길이 sanity — 5 자 미만/3000 자 초과는 거부.
+  5. raw vector 필드 — vec_* 래퍼 없이 쓴 vector 타입 필드만 차단.
+
+식별자 '화이트리스트'(CSV 미수록=거부) 정책은 폐기했다. CSV 는 일부 목록일 뿐이라
+ts_backfill·add·operating_income 같은 실재 이름까지 막아 알파를 획일화시켰다. 새 이름은
+시뮬에 보내 그 에러를 학습 캐시에 쌓는 편이 다양성에 유리하다 (확정 불능 연산자는
+gemini_strategist._FORBIDDEN_SUBSTRINGS 에서 이미 차단).
 
 검증은 빠르게 (수 ms) 끝나야 한다. 정규식 토큰화 + 집합 lookup 기반.
 
@@ -19,100 +22,22 @@ from __future__ import annotations
 import csv
 import os
 import re
-from typing import Iterable
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-OPERATORS_CSV = os.path.join(_THIS_DIR, 'brain_operators.csv')
 DATAFIELDS_CSV = os.path.join(_THIS_DIR, 'IQC_brain_datafields.csv')
-
-# group_neutralize 의 두 번째 인자, group_rank 등에 쓰이는 그룹 키워드 — 식별자처럼 보이지만 합법.
-_GROUP_KEYWORDS = {
-    'sector', 'industry', 'subindustry', 'market',
-    'country', 'exchange', 'pv13_h_min2_3000_sector',  # 알려진 group expression
-}
-
-# 자주 등장하는 숫자형/코드형 키워드 (시간 윈도우 등 인자) — 기본 예외.
-# 식별자처럼 보이지만 사실 키워드성. 안전하게 통과시킨다.
-_BUILTIN_TOKENS = {
-    'true', 'false', 'nan', 'null',
-}
-
-# WQB 가 모든 알파에 기본 노출하는 의사 datafield (CSV 에는 없을 수 있음).
-# 이들은 각 종목의 일별 시계열로 항상 사용 가능한 'OHLCV+' 표준 필드.
-_WQB_BUILTIN_FIELDS = {
-    'returns',          # 일간 수익률 (close[t]/close[t-1] - 1)
-    'open', 'high', 'low', 'close', 'volume', 'vwap',
-    'adv5', 'adv10', 'adv20', 'adv30', 'adv60', 'adv120', 'adv180',
-    'cap',              # 시가총액
-    'shares_outstanding', 'shares_outstanding_basic',
-    'mdv',              # median daily volume
-}
 
 # 정규식: 식별자 (영문자/언더스코어 시작, 영숫자/언더스코어 연속).
 _IDENT_RX = re.compile(r'\b[A-Za-z_][A-Za-z0-9_]*\b')
 # 과학적 표기법: 1e-6, 2.5E+3, 1e6 등.
 _SCI_RX = re.compile(r'\b\d+\.?\d*[eE][+-]?\d+\b')
 
-# 운영 환경에서 ts_* / 산술 연산자가 거부하는 datafield 들 — CSV 의 type 컬럼이
-# 'vector' 인 항목들이 여기 해당. 라운드별 1~3개 알파가 "Operator X does not support
-# event inputs" 에러로 떨어지는 주범 (예: anl4_adxqfv110_pu, anl4_basicconafv110_*).
-# CSV 의 두 번째 컬럼에서 동적으로 읽어들인다.
-
-
-# CSV mtime 기반 캐시 — 파일이 바뀌지 않으면 재파싱하지 않는다.
-_OPS_CACHE: tuple[float, set[str]] | None = None
-_FIELDS_CACHE: tuple[float, set[str]] | None = None
-
-
-def _read_first_column(path: str) -> set[str]:
-    out: set[str] = set()
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            header = next(reader, None)
-            for row in reader:
-                if row and row[0]:
-                    out.add(row[0].strip())
-    except Exception:
-        pass
-    return out
-
-
-def known_operators() -> set[str]:
-    global _OPS_CACHE
-    try:
-        mt = os.path.getmtime(OPERATORS_CSV)
-    except OSError:
-        return set()
-    if _OPS_CACHE and _OPS_CACHE[0] == mt:
-        return _OPS_CACHE[1]
-    raw = _read_first_column(OPERATORS_CSV)
-    # 기호류 (`+`, `-`, `*`, `/`, `<=` 등) 는 식별자 정규식에 안 잡히므로 별도 처리 불필요.
-    # 영숫자형 operator 만 필터.
-    ops = {x for x in raw if _IDENT_RX.fullmatch(x or '')}
-    _OPS_CACHE = (mt, ops)
-    return ops
-
-
+# type 컬럼이 'vector' 인 datafield 집합의 mtime 캐시 (파일 안 바뀌면 재파싱 안 함).
 _VECTOR_FIELDS_CACHE: tuple[float, set[str]] | None = None
 
 
-def known_datafields() -> set[str]:
-    global _FIELDS_CACHE
-    try:
-        mt = os.path.getmtime(DATAFIELDS_CSV)
-    except OSError:
-        return set()
-    if _FIELDS_CACHE and _FIELDS_CACHE[0] == mt:
-        return _FIELDS_CACHE[1]
-    fields = _read_first_column(DATAFIELDS_CSV)
-    _FIELDS_CACHE = (mt, fields)
-    return fields
-
-
 def vector_datafields() -> set[str]:
-    """type 컬럼이 'vector' 인 datafield 의 집합. 이들은 ts_* / 산술 연산자에서
-    'does not support event inputs' 에러를 낸다 — 알파에서 사용 금지."""
+    """type 컬럼이 'vector' 인 datafield 의 집합. raw 로 쓰면 ts_*/산술 연산자에서
+    'does not support event inputs' 에러 → vec_avg/vec_sum 등 vec_* 로 감싸야 한다."""
     global _VECTOR_FIELDS_CACHE
     try:
         mt = os.path.getmtime(DATAFIELDS_CSV)
@@ -152,11 +77,8 @@ def _balanced_parens(code: str) -> bool:
     return depth == 0
 
 
-def validate_alpha(code: str, *, allowed_extra: Iterable[str] = ()) -> list[str]:
-    """알파 코드 한 줄을 검증. 위반 사항 목록 반환 (비어 있으면 통과).
-
-    `allowed_extra`: 호출자가 추가로 허용하고 싶은 식별자. 보통 비어 있음.
-    """
+def validate_alpha(code: str) -> list[str]:
+    """알파 코드 한 줄을 검증. 위반 사항 목록 반환 (비어 있으면 통과)."""
     issues: list[str] = []
     if not isinstance(code, str):
         return ['code is not a string']
@@ -179,37 +101,15 @@ def validate_alpha(code: str, *, allowed_extra: Iterable[str] = ()) -> list[str]
     if not _balanced_parens(code):
         issues.append('unbalanced parentheses')
 
-    # 식별자 화이트리스트 검사
-    ops = known_operators()
-    fields = known_datafields()
+    # 식별자 검사: 화이트리스트 거부는 폐기 (위 docstring 참고). raw vector 필드만 차단 —
+    # vector 타입은 vec_avg/vec_sum 등 vec_* 로 감싸야 행렬 연산이 되며, raw 로 쓰면
+    # 'does not support event inputs' 에러가 확실하다. 코드에 vec_ 래퍼가 전혀 없을 때만 차단.
     vec_fields = vector_datafields()
-    vec_hits: list[str] = []
-    if ops or fields:  # CSV 가 비어 있으면 검사 스킵 (잘못된 거부 방지)
-        idents = set(_IDENT_RX.findall(code))
-        unknown: list[str] = []
-        for ident in idents:
-            if ident in _BUILTIN_TOKENS or ident in _GROUP_KEYWORDS:
-                continue
-            if ident in _WQB_BUILTIN_FIELDS:
-                continue
-            if ident in vec_fields:
-                vec_hits.append(ident)
-                continue
-            if ident in ops or ident in fields:
-                continue
-            if ident in allowed_extra:
-                continue
-            # 숫자처럼 시작하는 게 아니라 _ 또는 알파로 시작하는데, 둘 다에 없으면 unknown.
-            unknown.append(ident)
-        if unknown:
-            # 가장 흔히 잘못 쓰는 것들을 먼저 보여준다.
-            unknown_sorted = sorted(set(unknown))[:8]
-            issues.append(f'unknown identifiers: {", ".join(unknown_sorted)}')
-    if vec_hits:
-        issues.append(
-            'vector-type datafield (ts_*/산술 연산자에서 event-input 에러): '
-            + ', '.join(sorted(set(vec_hits))[:6])
-        )
+    if vec_fields and 'vec_' not in code.lower():
+        raw_vec = sorted(i for i in set(_IDENT_RX.findall(code)) if i in vec_fields)
+        if raw_vec:
+            issues.append('raw vector-type datafield (vec_* 로 감싸야 함): '
+                          + ', '.join(raw_vec[:6]))
 
     return issues
 

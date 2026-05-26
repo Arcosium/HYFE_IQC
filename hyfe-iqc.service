@@ -5,6 +5,9 @@
 Description=HYFE IQC — WQB Alpha Auto-Discovery Web App
 After=network-online.target
 Wants=network-online.target
+# 재시작 횟수 제한 해제: 빠른 크래시-루프(기본 10초 내 5회)에 systemd 가
+# 영구 포기하면 502 가 고착된다. 죽으면 무조건 다시 띄운다.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,7 +15,7 @@ User=opc
 Group=opc
 WorkingDirectory=/home/opc/projects/HYFE_IQC
 ExecStart=/usr/bin/python3 -m server.app
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=20
 # 외부 접근 정책 — Cloudflare Tunnel 만 사용하면 127.0.0.1 (가장 안전).
@@ -25,8 +28,10 @@ Environment=IQC_PY=/usr/bin/python3.11
 # Environment=HYFE_IQC_COOKIE_SAMESITE=Lax
 # 자격증명 암호화 키. 미설정 시 data/.fernet.key 자동 생성.
 # Environment=HYFE_IQC_FERNET_KEY=...
-StandardOutput=append:/home/opc/projects/HYFE_IQC/logs/server.log
-StandardError=append:/home/opc/projects/HYFE_IQC/logs/server.log
+# /home 아래 로그파일 append 는 SELinux 가 systemd 를 막는다(209/STDOUT).
+# 앱이 자체적으로 logs/server.log 를 쓰므로 stdout/stderr 는 journal 로 보낸다.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
