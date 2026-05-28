@@ -1702,12 +1702,35 @@ def _sanitize_settings(settings):
     if uni in ('TOP500', 'TOP200') and neut in ('SUBINDUSTRY', 'INDUSTRY'):
         out['neutralization'] = 'SECTOR'
         log(f'apply_settings: sanitize {uni}+{neut} -> SECTOR (그룹 종목 수 부족 회피)')
-    # decay / truncation 의 input 자동화는 React state 업데이트 못 받아 WQB 가
-    # 'Wrong value for parameter decay' 에러로 sim 거부 → key 자체 제거 (default 사용).
-    for k in ('decay', 'truncation'):
+    # decay 는 사장 요청(2026-05-27)으로 재활성화 — _set_setting_field 의 React 호환
+    # native value setter 로 number input 적용을 시도한다. 과거 'Wrong value for
+    # parameter decay' 로 막혔으나 현 setter 로 동작 가능성 높음(미검증 → 다음 라운드
+    # 로그로 확인, 실패 시 다시 제거). 알파별 적용이라 실패해도 해당 알파만 영향.
+    # truncation 은 요청 범위 밖이라 계속 제거(default 사용).
+    for k in ('truncation',):
         if k in out:
             log(f'apply_settings: sanitize remove {k}={out[k]!r} (input 자동화 호환 안 됨, default 사용)')
             out.pop(k, None)
+    return out
+
+
+# 알파별 settings 적용 시 미지정 키를 default 로 명시 → 직전 알파 설정이 패널에 끈끈하게
+# 남는 것(sticky panel) 방지. region 은 USA 고정이라 제외, truncation 은 sanitize 가 제거.
+_SETTING_DEFAULTS = {
+    'universe': 'TOP3000',
+    'delay': '1',
+    'neutralization': 'INDUSTRY',
+    'decay': '0',
+    'pasteurization': 'ON',
+    'nan_handling': 'OFF',
+}
+
+
+def _with_setting_defaults(cfg):
+    out = dict(_SETTING_DEFAULTS)
+    for k, v in (cfg or {}).items():
+        if v not in (None, '', []):
+            out[str(k).strip().lower()] = str(v).strip()
     return out
 
 
@@ -3162,6 +3185,7 @@ try:
             return indices[fi] if fi < len(indices) else fi + 1
 
         _settings_done = {'v': False}
+        _last_applied = {}  # SEQUENTIAL 알파별 적용 시 패널의 현재 알려진 상태 (diff 계산용)
         _disable_settings = os.environ.get('IQC_DISABLE_SETTINGS', '0') == '1'
 
         def _setup_slot(tab_label, fi):
@@ -3208,20 +3232,37 @@ try:
                 results[fi]['error_text'] = f'text verify fail: editor has {cur[:200]!r}'
                 return False
             log(f'step: setup[idx{_ix(fi)}] text_verified')
-            # Settings 는 라운드 전체에서 1회만 적용 (WQB Settings 패널이 전역 — 매번 적용 시
-            # 진행 중 sim 이 invalidate). 모든 알파가 동일 settings 사용.
-            if not _settings_done['v'] and not _disable_settings:
+            # 설정 적용 정책:
+            #  - SEQUENTIAL: 동시 sim 이 없으므로 알파마다 자기 settings 를 적용한다.
+            #    각 알파의 목표 = settings + 미지정 키의 default (sticky panel 방지).
+            #    직전 적용 상태(_last_applied)와 다른 키만(diff) 건드려 자동화 횟수를 줄이고,
+            #    decay 등 입력 실패가 라운드 전체로 번지지 않고 해당 알파에만 격리되게 한다.
+            #  - PARALLEL: 전역 패널을 매번 바꾸면 진행 중 sim 이 invalidate → 라운드 1회만.
+            if _disable_settings:
+                if not _settings_done['v']:
+                    log('step: settings_DISABLED (IQC_DISABLE_SETTINGS=1)')
+                    _settings_done['v'] = True
+            elif SEQUENTIAL or not _settings_done['v']:
                 try:
                     s_cfg = settings_list[fi] if fi < len(settings_list) else {}
-                    if s_cfg:
+                    if SEQUENTIAL:
+                        # full set 을 먼저 sanitize (universe+neut 문맥이 있어야 SECTOR
+                        # 보정·truncation 제거가 제대로 됨) → 그 결과로 diff 계산.
+                        desired = _sanitize_settings(_with_setting_defaults(s_cfg))
+                        diff = {k: v for k, v in desired.items()
+                                if str(_last_applied.get(k)) != str(v)}
+                        if diff:
+                            log(f'step: setup[idx{_ix(fi)}] apply per-alpha settings diff={diff}')
+                            apply_settings(page, diff)
+                            _last_applied.update(desired)
+                            page.wait_for_timeout(1500)
+                            wait_editor_ready(page, timeout_ms=8000)
+                    elif s_cfg:
                         apply_settings(page, s_cfg)
                         page.wait_for_timeout(1500)
                         wait_editor_ready(page, timeout_ms=8000)
                 except Exception as e:
                     log(f'apply_settings exception: {e}')
-                _settings_done['v'] = True
-            elif _disable_settings and not _settings_done['v']:
-                log('step: settings_DISABLED (IQC_DISABLE_SETTINGS=1)')
                 _settings_done['v'] = True
             return True
 

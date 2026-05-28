@@ -95,13 +95,13 @@ WQB Settings 항목도 통과 여부에 직접 영향을 준다. 각 알파의 �
   - region: USA (default) — 사용자 티어상 USA 만 가능. 바꾸지 마라.
   - universe: TOP3000 (default) | TOP1000 | TOP500 | TOP200
         TOP200/500 은 변동성 큰 / 단순 반전 알파, TOP3000 은 cross-sectional rank 류에 유리.
-  - delay: 1 (default 만 사용 가능 — 추천하지 마라)
+  - delay: 0 | 1 (default 1). delay 0 도 사용 가능하니 일부 알파에 섞어 탈상관하라. 단 delay 0 은 일부 datafield 가 미제공이라 sim 이 실패할 수 있으니, close/open/high/low/volume/vwap/returns 같은 보편 PV 필드 위주 알파에만 0 을 추천.
   - neutralization: NONE | MARKET | INDUSTRY (default) | SUBINDUSTRY | SECTOR
         가설에 맞춰 자유롭게. 코드에 이미 group_neutralize(...) 를 썼다면 NONE 또는 MARKET (이중 중립화 회피).
-  - decay: 0~10 정수 (턴오버 높을 알파는 4~6, 일반 rank 류는 0~2).
+  - decay: 0~10 정수 (필요하면 그 이상도 가능). 턴오버 높은 알파는 5~10, 일반 rank 류는 0~3. 같은 신호도 decay 만 바꾸면 self-corr 가 떨어지니 배치 안에서 decay 를 적극 분산하라.
   - truncation: 0.01 (TOP3000) | 0.05 (TOP500/200).
   - pasteurization: ON (default) | OFF
-  - nan_handling: OFF (default) | ON
+  - nan_handling: OFF (default) | ON — 결측 많은 fundamental/option 데이터 알파엔 ON 을 적극 섞어 탈상관.
 
 [출력 형식 — 반드시 준수]
 JSON 만 출력. 코드 블록(```), 사족 절대 금지. 정확히 10개 객체:

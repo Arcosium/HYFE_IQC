@@ -756,7 +756,7 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
     elif sub_st.startswith('skip_star'):
         star_note = f'  ☆ 미저장 — {sub_st[len("skip_star:"):].strip()}'
     elif sub_st.startswith('star_fail'):
-        star_note = f'  ⚠ 별표 실패 ({sub_st[len("star_fail"):].strip().strip("()")})'
+        star_note = f'  ⚠ 리스트 제출 실패 ({sub_st[len("star_fail"):].strip().strip("()")})'
     elif sub_st.startswith('rejected') or sub_st.startswith('fail:'):  # 구버전 제출 기록 호환
         star_note = f'  📝 {sub_st.split(":", 1)[-1].strip()[:80]}'
 
