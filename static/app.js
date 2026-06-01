@@ -150,6 +150,7 @@
     // 폴링/스트림은 각각 독립적으로 try — 하나가 실패해도 나머지는 살린다.
     try { startStreaming(); } catch (e) { console.error('startStreaming init', e); }
     try { refreshBest(); } catch (e) { console.error('refreshBest init', e); }
+    try { initDelayMode(); } catch (e) { console.error('initDelayMode', e); }
     if (statusTimer) clearInterval(statusTimer);
     if (bestTimer) clearInterval(bestTimer);
     statusTimer = setInterval(refreshStatus, 5000);
@@ -189,6 +190,31 @@
       alert('일시정지 실패: ' + JSON.stringify(r.data));
     }
   });
+
+  // ── Delay 테스트 모드 ────────────────────────────────────
+  const delaySel = $('#delay-mode');
+  const delayStatus = $('#delay-mode-status');
+  const DELAY_LABELS = { '0': 'Delay=0 만', '1': 'Delay=1 만', 'mix': '혼합(랜덤)' };
+  async function initDelayMode() {
+    if (!delaySel) return;
+    const r = await api('/api/delay_mode');
+    if (r.ok && r.data && r.data.ok) {
+      delaySel.value = r.data.mode;
+      if (delayStatus) delayStatus.textContent = '현재: ' + (DELAY_LABELS[r.data.mode] || r.data.mode);
+    }
+    delaySel.addEventListener('change', async () => {
+      const mode = delaySel.value;
+      if (delayStatus) delayStatus.textContent = '저장 중…';
+      const res = await api('/api/delay_mode', {
+        method: 'POST', body: JSON.stringify({ mode }),
+      });
+      if (res.ok && res.data && res.data.ok) {
+        if (delayStatus) delayStatus.textContent = '저장됨: ' + (DELAY_LABELS[res.data.mode] || res.data.mode) + ' (다음 라운드부터)';
+      } else {
+        if (delayStatus) delayStatus.textContent = '저장 실패';
+      }
+    });
+  }
 
   // ── 상태 폴링 ────────────────────────────────────────────
   async function refreshStatus() {

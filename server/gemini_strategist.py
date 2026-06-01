@@ -670,6 +670,26 @@ def _filter_by_lint(strategies: list[dict], log_fn: Callable | None = None) -> l
     return clean
 
 
+def _delay_directive(forced_delay: str | None) -> str:
+    """이 라운드에 강제된 delay 를 user prompt 에 알린다(동적 섹션 — 캐시된
+    SYSTEM_INSTRUCTION 을 건드리지 않아 context cache 무효화 없음).
+    delay=0 은 보편 PV 필드만 제공하므로 그 쪽으로 필드 선택을 유도해 sim 실패를 줄인다.
+    """
+    if forced_delay is None:
+        return ''
+    if str(forced_delay) == '0':
+        return ('\n\n[DELAY 강제 = 0 — 이번 라운드 전 알파]\n'
+                'settings.delay 는 시스템이 0 으로 덮어쓴다(적지 마라). delay=0 에서는 '
+                'close/open/high/low/volume/vwap/returns/cap 같은 보편 Price-Volume·기본 '
+                '필드만 제공되고 fundamental/analyst/institutional/option 등 상당수 datafield 는 '
+                '미제공이라 sim 이 ERROR 로 죽는다. 따라서 delay=0 에서 동작하는 PV 위주 필드로만 '
+                '10개 알파를 구성하라(필드 선택을 PV 로 좁히되 신호구조·시간스케일·universe·'
+                'neutralization 분산으로 다양성을 확보).\n')
+    return ('\n\n[DELAY 강제 = 1 — 이번 라운드 전 알파]\n'
+            'settings.delay 는 시스템이 1 로 덮어쓴다(적지 마라). delay=1 전용 '
+            'fundamental/analyst 등 모든 datafield 를 자유롭게 사용해도 된다.\n')
+
+
 def generate_strategies(
     *,
     api_key: str,
@@ -683,6 +703,7 @@ def generate_strategies(
     cache_hit_ratio_hint: float = 0.0,
     max_retries: int | None = 3,
     retry_wait_sec: int = 60,
+    forced_delay: str | None = None,
     log_fn: Callable | None = None,
 ) -> list[dict]:
     """10개 알파 생성. user_id 별 API 키 받음.
@@ -741,6 +762,7 @@ def generate_strategies(
                         temperature=temperature,
                         max_output_tokens=8192,
                     )
+                user_prompt += _delay_directive(forced_delay)
                 resp = client.models.generate_content(
                     model=m, contents=user_prompt, config=cfg,
                 )
@@ -880,6 +902,7 @@ def generate_focused_strategies(
     submitted_codes: list[str] | None = None,
     max_retries: int | None = 3,
     retry_wait_sec: int = 60,
+    forced_delay: str | None = None,
     log_fn: Callable | None = None,
 ) -> list[dict]:
     """focused sub-round 12 변형 생성.
@@ -905,6 +928,7 @@ def generate_focused_strategies(
         self_corr_value=self_corr_value,
         submitted_codes=list(submitted_codes or []),
     )
+    user_prompt += _delay_directive(forced_delay)
     # correlation 모드는 다양성 극대화 필요 → temperature 상향.
     _focused_temp = 1.10 if focus_kind == 'correlation' else 0.95
 

@@ -283,6 +283,7 @@ def simulate_batch(
     log_fn: Callable[[str], None] | None = None,
     proc_holder: dict[str, Any] | None = None,
     partial_fn: Callable[[dict], None] | None = None,
+    forced_delay: str | None = None,
 ) -> list[dict]:
     """한 라운드의 알파들을 Playwright 직접 자동화로 시뮬 (1탭 순차 진행).
 
@@ -315,6 +316,10 @@ def simulate_batch(
         if cand:
             batch_settings = cand
             break
+    # delay 테스트 모드 (UI/run_config) — 지정 시 이 라운드 모든 알파의 delay 를 강제.
+    # 라운드 단위 단일 delay 라 batch_settings 에 한 번만 덮어쓰면 충분(전 알파 공유).
+    if forced_delay is not None:
+        batch_settings = {**batch_settings, 'delay': str(forced_delay)}
     payload_in = [{'idx': int(s.get('idx') or (i + 1)),
                    'code': s.get('code', ''),
                    'settings': batch_settings}

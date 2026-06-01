@@ -31,6 +31,7 @@ from flask import Flask, jsonify, make_response, request, Response, send_from_di
 from . import auth as _auth
 from . import db as _db
 from . import worker as _worker
+from . import run_config as _run_config
 
 LOG = logging.getLogger('hyfe.app')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
@@ -409,6 +410,23 @@ def api_status():
     if err:
         return err
     return jsonify({'ok': True, **_status_payload(uid)})
+
+
+@app.route('/api/delay_mode', methods=['GET', 'POST'])
+def api_delay_mode():
+    """delay 테스트 모드 조회/변경. '0' | '1' | 'mix'. 워커가 매 라운드 새로 읽어
+    재시작 없이 다음 라운드부터 반영된다."""
+    uid, err = _require_user()
+    if err:
+        return err
+    if request.method == 'GET':
+        return jsonify({'ok': True, 'mode': _run_config.get_delay_mode()})
+    mode = str((request.get_json(silent=True) or {}).get('mode', '')).strip().lower()
+    try:
+        saved = _run_config.set_delay_mode(mode)
+    except ValueError:
+        return _err('bad_mode', "mode 는 '0' | '1' | 'mix' 중 하나여야 합니다.", 400)
+    return jsonify({'ok': True, 'mode': saved})
 
 
 @app.route('/api/m_recent', methods=['GET'])

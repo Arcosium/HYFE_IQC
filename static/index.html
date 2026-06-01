@@ -55,6 +55,15 @@
         <button id="btn-start" class="btn-primary">실행</button>
         <button id="btn-pause" class="btn-secondary" disabled>일시정지</button>
       </div>
+      <div class="delay-block">
+        <label for="delay-mode">Delay 테스트:</label>
+        <select id="delay-mode">
+          <option value="0">Delay=0</option>
+          <option value="1">Delay=1</option>
+          <option value="mix">혼합(랜덤)</option>
+        </select>
+        <span id="delay-mode-status" class="delay-status" aria-live="polite"></span>
+      </div>
     </section>
 
     <section class="log-section">

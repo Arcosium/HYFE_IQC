@@ -161,6 +161,16 @@
     .btn-start:active:not(:disabled) { background: #2563b3; }
     .btn-pause { background: #2a3142; color: #c8d2e3; border: 1px solid #394157; }
     .btn-pause:active:not(:disabled) { background: #20263a; }
+    .delay-row {
+      max-width: 540px; margin: 0 auto 14px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: #9fb0c9;
+    }
+    .delay-row select {
+      background: #2a3142; color: #e6edf6; border: 1px solid #394157;
+      border-radius: 8px; padding: 8px 10px; font-size: 14px;
+    }
+    .delay-row #delay-mode-status { font-size: 12px; color: #6f7e96; }
 
     /* 최근 알파 테이블 */
     .recent-section {
@@ -244,6 +254,15 @@
       <div class="control-row">
         <button id="btn-start" class="btn-ctrl btn-start">▶ 실행</button>
         <button id="btn-pause" class="btn-ctrl btn-pause" disabled>⏸ 일시정지</button>
+      </div>
+      <div class="delay-row">
+        <label for="delay-mode">Delay 테스트</label>
+        <select id="delay-mode">
+          <option value="0">Delay=0</option>
+          <option value="1">Delay=1</option>
+          <option value="mix">혼합(랜덤)</option>
+        </select>
+        <span id="delay-mode-status"></span>
       </div>
       <div class="status-grid">
         <div class="stat current">
@@ -467,8 +486,31 @@
       stopPolling();
       refresh();
       pollTimer = setInterval(refresh, 5000);
+      try { initDelayMode(); } catch (e) { console.error('initDelayMode', e); }
     }
     function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    // ── Delay 테스트 모드 ──
+    let _delayInit = false;
+    const DELAY_LABELS = { '0': 'Delay=0 만', '1': 'Delay=1 만', 'mix': '혼합(랜덤)' };
+    async function initDelayMode() {
+      const sel = $('#delay-mode'), st = $('#delay-mode-status');
+      if (!sel) return;
+      const r = await api('/api/delay_mode');
+      if (r.ok && r.data && r.data.ok) {
+        sel.value = r.data.mode;
+        if (st) st.textContent = '현재: ' + (DELAY_LABELS[r.data.mode] || r.data.mode);
+      }
+      if (_delayInit) return;        // change 리스너는 한 번만 등록
+      _delayInit = true;
+      sel.addEventListener('change', async () => {
+        if (st) st.textContent = '저장 중…';
+        const res = await api('/api/delay_mode', { method: 'POST', body: { mode: sel.value } });
+        if (res.ok && res.data && res.data.ok) {
+          if (st) st.textContent = '저장됨: ' + (DELAY_LABELS[res.data.mode] || res.data.mode) + ' (다음 라운드)';
+        } else if (st) { st.textContent = '저장 실패'; }
+      });
+    }
 
     $('#form-login').addEventListener('submit', async (e) => {
       e.preventDefault();

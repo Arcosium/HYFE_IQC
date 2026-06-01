@@ -106,6 +106,9 @@ html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); fon
 .kv .k { color: var(--fg-dim); margin-right: 6px; }
 .kv .v { color: var(--fg); font-weight: 600; font-family: var(--mono); }
 .buttons { display: flex; gap: 10px; }
+.delay-block { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim, #9fb0c9); }
+.delay-block select { background: var(--bg-card); color: var(--text, #e6edf6); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 14px; cursor: pointer; }
+.delay-block .delay-status { font-size: 12px; color: var(--text-dim, #6f7e96); }
 .btn-primary, .btn-secondary { padding: 10px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
 .btn-primary { background: var(--ok); color: #06122a; }
 .btn-primary:hover:not(:disabled) { background: #8effd0; }

@@ -21,6 +21,7 @@ from . import db as _db
 from . import result_cache
 from . import gemini_strategist
 from . import wqb_browser
+from . import run_config
 
 LOG = logging.getLogger('hyfe.worker')
 
@@ -217,6 +218,15 @@ class Worker(threading.Thread):
         err_total = 0
         cache_hit_total = 0
 
+        # delay 테스트 모드 (UI/run_config) — 생성 전에 이번 라운드의 강제 delay 를 확정해
+        # Gemini 프롬프트(필드 선택 유도)와 시뮬 settings 양쪽에 동일 값을 넘긴다.
+        delay_mode = run_config.get_delay_mode()
+        forced_delay = run_config.resolve_round_delay(delay_mode)
+        if delay_mode == 'mix':
+            self._log(round_num, f'  Delay 모드=혼합(랜덤) → 이번 라운드 delay={forced_delay}')
+        else:
+            self._log(round_num, f'  Delay 모드=고정 → delay={forced_delay}')
+
         try:
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
@@ -237,6 +247,7 @@ class Worker(threading.Thread):
                     focus_kind=focus_kind,
                     self_corr_value=self_corr_value,
                     submitted_codes=_submitted_for_corr,
+                    forced_delay=forced_delay,
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
             else:
@@ -251,6 +262,7 @@ class Worker(threading.Thread):
                     seeds=seeds,
                     pref_stats=pref_stats,
                     cache_hit_ratio_hint=prev_cache_ratio,
+                    forced_delay=forced_delay,
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
 
@@ -308,6 +320,10 @@ class Worker(threading.Thread):
                     continue
                 seen.add(h)
                 cached = result_cache.lookup(self.user_id, s['code'])
+                # delay-aware: 다른 delay 로 시뮬된 캐시는 재사용 금지 (결과가 delay 의존).
+                # 캐시 행의 metrics._delay 와 이번 라운드 강제 delay 가 다르면 캐시 미스 처리.
+                if cached and str((cached.get('metrics') or {}).get('_delay', '')) != str(forced_delay):
+                    cached = None
                 if cached:
                     cached_results.append(result_cache.materialize(s, cached, round_num))
                 else:
@@ -380,6 +396,7 @@ class Worker(threading.Thread):
                         log_fn=None,  # [pw]/[playwright] 로그가 UI 로 흘러들어오지 않도록 끔
                         proc_holder=self._batch_proc_holder,
                         partial_fn=_on_partial,
+                        forced_delay=forced_delay,
                     )
                 except Exception as e:
                     results = [{
@@ -461,6 +478,11 @@ class Worker(threading.Thread):
 
             # 결과 저장 + feedback / errors 누적 (UI 로그는 PASS 만 노출).
             for r in all_results:
+                # delay-aware 캐시용 stamp — 갓 시뮬한 결과엔 이번 라운드 강제 delay 를,
+                # 캐시 재사용 결과(cached)엔 원본 _delay 를 그대로 보존한다.
+                _metrics = dict(r.get('metrics') or {})
+                if not r.get('cached'):
+                    _metrics['_delay'] = str(forced_delay)
                 alpha_entry = {
                     'idx': r['idx'],
                     'code': r['code'],
@@ -474,7 +496,7 @@ class Worker(threading.Thread):
                     'submitted': r.get('submitted', False),
                     'submit_status': r.get('submit_status', ''),
                     'error_text': r.get('error_text', ''),
-                    'metrics': r.get('metrics') or {},
+                    'metrics': _metrics,
                     'is_status': r.get('is_status') or {},
                     'mode': r.get('mode', ''),
                     'cached': bool(r.get('cached')),
