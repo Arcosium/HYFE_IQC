@@ -61,6 +61,31 @@ def set_delay_mode(mode: str) -> str:
     return mode
 
 
+def is_bandit_enabled() -> bool:
+    """True if the bandit learning-loop is enabled (default: True).
+
+    Reads 'bandit_enabled' from data/run_config.json — live-editable without
+    a server restart, exactly like get_delay_mode().
+    Absent / non-bool values default to True so the loop ships ON.
+    """
+    with _LOCK:
+        val = _read().get('bandit_enabled', None)
+    if val is None:
+        return True
+    # Accept both JSON bool (True/False) and string representations.
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def set_bandit_enabled(enabled: bool) -> None:
+    """Persist the bandit_enabled flag.  No restart required."""
+    with _LOCK:
+        data = _read()
+        data['bandit_enabled'] = bool(enabled)
+        _write(data)
+
+
 def resolve_round_delay(mode: str | None = None) -> str:
     """이 라운드에 강제할 delay 값('0'|'1') 을 산출.
     '0'/'1' 은 그대로, 'mix' 는 라운드 단위로 0/1 랜덤.

@@ -103,13 +103,16 @@ def validate_alpha(code: str) -> list[str]:
 
     # 식별자 검사: 화이트리스트 거부는 폐기 (위 docstring 참고). raw vector 필드만 차단 —
     # vector 타입은 vec_avg/vec_sum 등 vec_* 로 감싸야 행렬 연산이 되며, raw 로 쓰면
-    # 'does not support event inputs' 에러가 확실하다. 코드에 vec_ 래퍼가 전혀 없을 때만 차단.
-    vec_fields = vector_datafields()
-    if vec_fields and 'vec_' not in code.lower():
-        raw_vec = sorted(i for i in set(_IDENT_RX.findall(code)) if i in vec_fields)
-        if raw_vec:
-            issues.append('raw vector-type datafield (vec_* 로 감싸야 함): '
-                          + ', '.join(raw_vec[:6]))
+    # 'does not support event inputs' 에러가 확실하다.
+    # AST 스코프 기반 검사: 각 vector 필드가 vec_* 로 직접 감싸졌는지 per-occurrence 확인.
+    # alpha_ast 임포트/파싱 실패 시 조용히 무시 (allow-on-failure 정책).
+    try:
+        from . import alpha_ast as _ast
+        for iss in _ast.validate(code):
+            if iss not in issues:
+                issues.append(iss)
+    except Exception:
+        pass   # AST 실패 시 기존 lint 결과만 (allow-on-failure)
 
     return issues
 

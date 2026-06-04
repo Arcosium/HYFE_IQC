@@ -2968,6 +2968,91 @@ def is_done_after(before_metrics, state_obj):
         return True
     return False
 
+
+def _api_sim_status(page, url):
+    # WQB sim progress 엔드포인트(/simulations/{id}) 를 페이지 세션으로 직접 조회.
+    # backend 가 sim 을 실제로 처리/완료했는지(progress 0~1, status:COMPLETE, alpha id)를
+    # DOM 추정 없이 알 수 있어, "panel 안 떴다=실패" 오판을 막는다.
+    # 반환: {http, progress|None, status|None, alpha|None, message|None} 또는 {'error':..} 또는 None.
+    if not url:
+        return None
+    try:
+        return page.evaluate(r'''async (u) => {
+            try {
+                const r = await fetch(u, {credentials:'include'});
+                const t = await r.text();
+                let b; try { b = JSON.parse(t); } catch(e) { b = {}; }
+                return {http: r.status,
+                        progress: (b && b.progress !== undefined) ? b.progress : null,
+                        status: (b && b.status) ? b.status : null,
+                        alpha: (b && b.alpha) ? b.alpha : null,
+                        message: (b && b.message) ? b.message : null};
+            } catch(e) { return {error: String(e)}; }
+        }''', url)
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _api_cancel_sim(page, url):
+    # 아직 RUNNING 인 sim 을 DELETE 로 취소해 동시-시뮬 슬롯을 즉시 반환한다.
+    # 워커가 포기(timeout/stall)한 sim 을 그냥 두면 backend 에서 계속 돌며 슬롯을 점유
+    # → 다음 알파들이 progress 0.1 에 큐 대기(슬롯 고갈 악순환). 포기 시 반드시 호출.
+    # (COMPLETE 된 sim 은 400 'Can not delete complete simulations' → 무해하게 무시.)
+    if not url:
+        return None
+    try:
+        return page.evaluate(r'''async (u) => {
+            try {
+                const r = await fetch(u, {method:'DELETE', credentials:'include'});
+                return {http: r.status};
+            } catch(e) { return {error: String(e)}; }
+        }''', url)
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _api_harvest_alpha(page, alpha_id):
+    # sim COMPLETE 후 DOM 패널이 안 떠도 결과를 잃지 않도록, /alphas/{id}.is.checks 를
+    # 직접 받아 다운스트림 포맷(is_status + summary_metrics)으로 변환한다.
+    # check.result(PASS/FAIL/PENDING/ERROR) 가 곧 IS Tests 판정이라 DOM 스크랩과 동등.
+    if not alpha_id:
+        return None
+    try:
+        data = page.evaluate(r'''async (aid) => {
+            try {
+                const r = await fetch('https://api.worldquantbrain.com/alphas/'+aid, {credentials:'include'});
+                if (!r.ok) return null;
+                return await r.json();
+            } catch(e) { return null; }
+        }''', alpha_id)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    isf = data.get('is') or {}
+    checks = isf.get('checks') or []
+    out = {'pass': [], 'fail': [], 'error': [], 'pending': []}
+    for ch in checks:
+        res = str(ch.get('result') or '').upper()
+        nm = ch.get('name')
+        item = {'name': nm, 'value': ch.get('value'), 'cutoff': ch.get('limit'),
+                'result': res,
+                'desc': f"{nm}: {ch.get('result')} (value={ch.get('value')}, limit={ch.get('limit')})"}
+        if res == 'PASS':
+            out['pass'].append(item)
+        elif res == 'FAIL':
+            out['fail'].append(item)
+        elif res == 'PENDING':
+            out['pending'].append(item)
+        elif res == 'ERROR':
+            out['error'].append(item)
+    metrics = {}
+    for k in ('sharpe', 'fitness', 'returns', 'turnover', 'drawdown', 'margin'):
+        if isf.get(k) is not None:
+            metrics[k] = str(isf[k])
+    return {'metrics': metrics, 'is_status': out}
+
+
 results = [{'slot': i+1, 'code': formulas[i], 'summary_metrics': {},
             'pass_count': 0, 'pass_items': [], 'fail_count': 0, 'fail_items': [],
             'error_text': '', 'before_metrics': {},
@@ -2993,6 +3078,24 @@ try:
             pass
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(20000)
+
+        # ── sim 진행/완료를 backend 기준으로 추적 ──────────────────────────────
+        # Simulate 클릭 시 프런트가 POST /simulations 하면 201 + Location 헤더로
+        # progress URL(/simulations/{id})을 받는다. 이 URL 을 잡아두면 poll 루프가
+        # progress(0~1)/status(COMPLETE)/alpha id 를 직접 읽어 "panel 안 떴다=실패"
+        # 오판 없이 backend 가 실제로 처리 중인지/끝났는지 판단할 수 있다.
+        _sim_net = {'url': None}
+        def _on_sim_response(resp):
+            try:
+                rq = resp.request
+                u = resp.url.rstrip('/')
+                if rq.method == 'POST' and u.endswith('/simulations') and resp.status in (200, 201):
+                    loc = resp.headers.get('location') or resp.headers.get('Location')
+                    if loc:
+                        _sim_net['url'] = loc
+            except Exception:
+                pass
+        page.on('response', _on_sim_response)
 
         # 모든 navigation 직전에 intro.js 를 중성화 — WQB 가 onboarding 띄울 때
         # introJs() 객체의 메서드들이 다 no-op 이라 tutorial DOM 자체가 안 그려진다.
@@ -3273,6 +3376,8 @@ try:
             #   곧장 True → 직전 결과를 새 알파 결과로 오인한다. 그래서 "running 표시가
             #   떴다(= 새 sim 이 실제로 돌기 시작)" 를 확인한 뒤에야 시작 시각/before_metrics
             #   를 찍는다. 그 전 화면은 전부 옛 패널로 간주.
+            # 직전 알파의 sim URL 캡처를 비워 이번 클릭의 POST /simulations 만 잡히게 한다.
+            _sim_net['url'] = None
             started = False
             click_ok_any = False
             for attempt in range(2):
@@ -3417,8 +3522,36 @@ try:
 
         if SEQUENTIAL:
             # 한 탭에서 한 알파씩: setup → simulate → poll until done → 다음.
+            # API 기반 대기: backend 가 sim 을 처리/완료하는 한 포기하지 않고 끝까지 받아낸다.
+            #  - status:COMPLETE → 즉시 수확(DOM 패널 우선, 안 뜨면 /alphas API 로).
+            #  - progress 전진/대기 중 → deadline 까지 계속 대기(옛 720s trivial_quit 폐지).
+            #  - progress URL 캡처 실패(=API 신호 전무) 시에만 옛 DOM 720s 휴리스틱 폴백(무회귀).
             SEQ_TRIVIAL_QUIT_SEC = 720
             SHOW_PANEL_EVERY_N_POLLS = 3
+
+            def _harvest_complete(fi, alpha_id, state, panel_seen):
+                # COMPLETE 확정 후 결과 수확. DOM 패널 우선(3회 시도), 실패 시 /alphas API.
+                for _ in range(3):
+                    if panel_seen:
+                        break
+                    try: _click_show_test_results(page)
+                    except Exception: pass
+                    page.wait_for_timeout(1500)
+                    state = extract_state(page)
+                    panel_seen = bool(state.get('is_tests_visible'))
+                if panel_seen:
+                    _collect_done(fi, state)
+                    return
+                h = _api_harvest_alpha(page, alpha_id)
+                if h and any(h['is_status'][k] for k in ('pass', 'fail', 'error', 'pending')):
+                    results[fi]['summary_metrics'] = h['metrics']
+                    results[fi]['is_status'] = h['is_status']
+                    log(f'step: SEQ idx{_ix(fi)} COMPLETE via API (panel 미출현) — '
+                        f"P{len(h['is_status']['pass'])}/F{len(h['is_status']['fail'])}/"
+                        f"E{len(h['is_status']['error'])}/Pn{len(h['is_status']['pending'])}")
+                else:
+                    _collect_done(fi, state)   # 패널·API 모두 실패 → error 마감
+
             for fi in queue:
                 log(f'step: SEQ idx{_ix(fi)} start')
                 if not _setup_slot(seq_label, fi):
@@ -3432,6 +3565,8 @@ try:
                 t_start = time.time()
                 poll_n = 0
                 done = False
+                api_seen = False        # progress API 가 유효응답을 한 번이라도 줬는가
+                last_prog = None
                 while time.time() < deadline:
                     page.wait_for_timeout(POLL_INTERVAL_SEC * 1000)
                     poll_n += 1
@@ -3439,28 +3574,75 @@ try:
                     cur_metrics = state.get('metrics') or {}
                     panel_seen = bool(state.get('is_tests_visible'))
                     age = int(time.time() - t_start)
-                    log(f'step: SEQ idx{_ix(fi)} poll#{poll_n} age={age}s panel={panel_seen} metrics_keys={len(cur_metrics)}')
+
+                    # ── backend 기준 상태(progress 0~1 / COMPLETE / alpha id) ──
+                    cur_url = _sim_net.get('url')
+                    api = _api_sim_status(page, cur_url) if cur_url else None
+                    api_info = ''
+                    if api and not api.get('error'):
+                        api_seen = True
+                        st = api.get('status'); pr = api.get('progress')
+                        api_info = f' api={st if st else pr}'
+                        if pr is not None:
+                            last_prog = pr
+                        if st == 'COMPLETE' or api.get('alpha'):
+                            log(f'step: SEQ idx{_ix(fi)} backend COMPLETE (age={age}s) — 결과 수확')
+                            _harvest_complete(fi, api.get('alpha'), state, panel_seen)
+                            done = True
+                            break
+                        if st in ('ERROR', 'FAILED'):
+                            # 알파 자체가 backend 에서 실패(컴파일/데이터 등). message 에 사유가
+                            # 담겨오니 그대로 기록하고 즉시 마감 — 1080s 낭비 방지 + 전략이 학습.
+                            msg = re.sub(r'<[^>]+>', '', str(api.get('message') or st)).strip()[:500]
+                            log(f'step: SEQ idx{_ix(fi)} backend {st} (age={age}s) → fail-fast: {msg[:120]}')
+                            results[fi]['error_text'] = f'sim {st}: {msg}'
+                            results[fi]['summary_metrics'] = {}
+                            results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': []}
+                            done = True
+                            break
+
+                    log(f'step: SEQ idx{_ix(fi)} poll#{poll_n} age={age}s panel={panel_seen} '
+                        f'metrics_keys={len(cur_metrics)}{api_info}')
+
                     if poll_n % SHOW_PANEL_EVERY_N_POLLS == 0 and not panel_seen:
                         try: _click_show_test_results(page)
                         except Exception: pass
+
+                    # DOM 패널 자연 출현(또는 compile error) → 즉시 수확.
                     if is_done_after(results[fi].get('before_metrics') or {}, state) and (
                             age >= MIN_SIM_SEC or state.get('error_text')):
                         _collect_done(fi, state)
                         done = True
                         break
-                    if (age > SEQ_TRIVIAL_QUIT_SEC and not panel_seen
+
+                    # 포기는 API 신호가 전무할 때만(=캡처 실패) 옛 720s 휴리스틱으로. API 가
+                    # 잡히면 backend 가 처리 중이라는 뜻 → deadline 까지 기다린다(포기 안 함).
+                    if (not api_seen and age > SEQ_TRIVIAL_QUIT_SEC and not panel_seen
                             and cur_metrics == (results[fi].get('before_metrics') or {})):
-                        log(f'step: SEQ idx{_ix(fi)} trivial_quit → error (no panel {age}s, metrics unchanged)')
+                        log(f'step: SEQ idx{_ix(fi)} trivial_quit → error (no panel {age}s, API 신호 없음)')
+                        _api_cancel_sim(page, cur_url)   # 혹시 backend 에서 도는 중이면 슬롯 반환
                         results[fi]['error_text'] = (
-                            f'panel never showed after {age}s (metrics unchanged) — '
+                            f'panel never showed after {age}s (no API signal) — '
                             'sim likely produced no result')
                         results[fi]['summary_metrics'] = {}
                         results[fi]['is_status'] = {'pass': [], 'fail': [], 'error': [], 'pending': []}
                         done = True
                         break
                 if not done and not results[fi].get('error_text'):
-                    log(f'step: SEQ idx{_ix(fi)} FAIL sim wait timeout ({SIM_MAX_WAIT_SEC}s)')
-                    results[fi]['error_text'] = f'sim wait timeout ({SIM_MAX_WAIT_SEC}s)'
+                    # deadline 도달 — backend 완료 여부 마지막 확인 후 수확 시도.
+                    cur_url = _sim_net.get('url')
+                    fin = _api_sim_status(page, cur_url) if cur_url else None
+                    if fin and not fin.get('error') and (fin.get('status') == 'COMPLETE' or fin.get('alpha')):
+                        log(f'step: SEQ idx{_ix(fi)} deadline 도달했으나 backend COMPLETE — 수확')
+                        _harvest_complete(fi, fin.get('alpha'), extract_state(page),
+                                          bool(extract_state(page).get('is_tests_visible')))
+                    if not results[fi].get('is_status') and not results[fi].get('error_text'):
+                        # 아직 RUNNING 이면 취소해 동시-시뮬 슬롯 반환(다음 알파 0.1 큐대기 방지).
+                        cxl = _api_cancel_sim(page, cur_url)
+                        prog_s = last_prog if last_prog is not None else 'unknown'
+                        log(f'step: SEQ idx{_ix(fi)} FAIL sim wait timeout '
+                            f'({SIM_MAX_WAIT_SEC}s, last progress={prog_s}) — sim 취소 {cxl}')
+                        results[fi]['error_text'] = f'sim wait timeout ({SIM_MAX_WAIT_SEC}s, progress={prog_s})'
                 _corr_check_and_star(seq_label, fi)
                 _emit_done(fi)
         else:

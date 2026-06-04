@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -29,6 +30,9 @@ import time
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from . import operator_catalog as _operator_catalog
+from . import settings_fp as _settings_fp
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.abspath(os.path.join(_THIS_DIR, '..', 'data', 'hyfe_iqc.db'))
@@ -41,12 +45,26 @@ _INITIALIZED = False
 # 스키마/데이터 마이그레이션 버전. ALTER·백필을 프로세스마다 재실행하지 않도록
 # PRAGMA user_version 게이트의 기준값. 향후 스키마/데이터 마이그레이션을
 # 추가하면 반드시 이 값을 올려야 새 마이그레이션이 1회 적용된다.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 _FERNET: Fernet | None = None
 
 FEEDBACK_CAP = 30
 SESSION_TTL_SEC = 7 * 24 * 3600  # 7일
 SPACE_RX = re.compile(r'\s+')
+
+
+def _coerce_float_or_none(v):
+    """metrics 값(숫자/숫자문자열)을 float 로, 그 외(None/bool/비숫자문자열)는 None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v.strip():
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
 
 
 def _connect() -> sqlite3.Connection:
@@ -255,6 +273,21 @@ def init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_submit_attempts_user
                 ON submit_attempts(user_id, id);
+
+            CREATE TABLE IF NOT EXISTS bandit_arms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                arm_key TEXT NOT NULL,
+                dimension TEXT NOT NULL DEFAULT '',
+                reward_sum REAL NOT NULL DEFAULT 0,
+                reward_sq_sum REAL NOT NULL DEFAULT 0,
+                visits INTEGER NOT NULL DEFAULT 0,
+                last_round INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL DEFAULT 0,
+                UNIQUE(user_id, arm_key),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_bandit_user_dim ON bandit_arms(user_id, dimension);
             ''')
 
             # ── 스키마/데이터 마이그레이션 (PRAGMA user_version 게이트) ──
@@ -311,10 +344,31 @@ def init() -> None:
                         'ALTER TABLE alphas ADD COLUMN phase '
                         'INTEGER NOT NULL DEFAULT 0'
                     )
+                # Phase 0: settings 타입 컬럼 + 캐시 fingerprint + self_corr (전부 nullable;
+                # 기존 행은 universe/neut 미저장이라 NULL 유지가 정확 — 백필 없음).
+                for _c, _decl in (
+                    ('region', 'TEXT'), ('universe', 'TEXT'), ('delay', 'INTEGER'),
+                    ('neutralization', 'TEXT'), ('decay', 'INTEGER'),
+                    ('truncation', 'REAL'), ('settings_fp', 'TEXT'), ('self_corr', 'REAL'),
+                ):
+                    if _c not in alpha_cols:
+                        conn.execute(f'ALTER TABLE alphas ADD COLUMN {_c} {_decl}')
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_alphas_hash_fp '
+                    'ON alphas(code_hash, settings_fp)'
+                )
                 conn.execute(
                     'CREATE INDEX IF NOT EXISTS idx_alphas_submitted '
                     'ON alphas(user_id, submitted)'
                 )
+                # Phase 1: 지표 컬럼(reward/통계 쿼리용) + 진화 lineage. 전부 nullable.
+                for _c, _decl in (
+                    ('sharpe', 'REAL'), ('fitness', 'REAL'), ('turnover', 'REAL'),
+                    ('drawdown', 'REAL'), ('margin', 'REAL'), ('returns', 'REAL'),
+                    ('generation', 'INTEGER'), ('parent_alpha_id', 'INTEGER'),
+                ):
+                    if _c not in alpha_cols:
+                        conn.execute(f'ALTER TABLE alphas ADD COLUMN {_c} {_decl}')
 
                 # 데이터 마이그레이션 (idempotent) — Submit 클릭이 발생했으나
                 # '구체 수치 동반 self-corr 거절' 이 아닌 모든 알파를 제출 성공으로 정정.
@@ -343,6 +397,13 @@ def init() -> None:
                     conn.execute(
                         "ALTER TABLE rounds ADD COLUMN focus_fail TEXT NOT NULL DEFAULT ''"
                     )
+                # Phase 1: rounds 설정 스냅샷 컬럼 (Phase 2 evolution에서 채움; nullable).
+                for _c, _decl in (
+                    ('delay_mode', 'TEXT'), ('gen_temperature', 'REAL'),
+                    ('explore_exploit', 'TEXT'), ('injected_arms', 'TEXT'),
+                ):
+                    if _c not in round_cols:
+                        conn.execute(f'ALTER TABLE rounds ADD COLUMN {_c} {_decl}')
 
                 # users 테이블 — 다음 라운드에서 처리할 focused sub-round 큐.
                 user_cols = {r['name'] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
@@ -756,6 +817,28 @@ def update_round_status(conn, round_id: int, status: str) -> None:
     conn.execute('UPDATE rounds SET status=? WHERE id=?', (status, round_id))
 
 
+def update_round_config(round_id: int, **fields) -> None:
+    """Write bandit / generation config-snapshot columns to a rounds row.
+
+    Only the keys provided are SET; absent keys are left unchanged.
+    Tolerated column names (Phase 1 rounds schema): delay_mode, gen_temperature,
+    explore_exploit, injected_arms.  Unknown keys are silently dropped so callers
+    do not need to guard against schema drift.
+    """
+    _ALLOWED = frozenset({'delay_mode', 'gen_temperature', 'explore_exploit', 'injected_arms'})
+    to_set = {k: v for k, v in fields.items() if k in _ALLOWED}
+    if not to_set:
+        return
+    init()
+    set_clause = ', '.join(f'{k}=?' for k in to_set)
+    values = list(to_set.values()) + [round_id]
+    try:
+        with _DB_LOCK, _connect() as conn:
+            conn.execute(f'UPDATE rounds SET {set_clause} WHERE id=?', values)
+    except Exception:
+        pass  # tolerate missing columns on older schemas
+
+
 def finish_round(round_id: int, user_id: int, round_num: int, *,
                   status: str, pass_count: int, err_count: int,
                   cache_hits: int, summary: str) -> None:
@@ -795,12 +878,35 @@ def insert_alpha(user_id: int, round_id: int, round_num: int, alpha: dict[str, A
         pending_count = int(alpha.get('pending_count') or 0)
         pass_items = list(alpha.get('pass_items') or [])
         fail_items = list(alpha.get('fail_items') or [])
+    if 'settings' in alpha or 'delay' in alpha:
+        eff = _settings_fp.effective_settings(alpha.get('settings') or {}, alpha.get('delay', ''))
+        fp = _settings_fp.settings_fingerprint(eff)
+    else:
+        eff, fp = {}, None
+    # self_corr: 최상위 키 우선, 없으면 metrics 안에서 폴백
+    metrics = dict(alpha.get('metrics') or {})
+    _sc = alpha.get('self_corr')
+    if _sc is None:
+        _sc = metrics.get('self_corr')
+    # 지표 컬럼 (sharpe/fitness/turnover/drawdown/margin/returns)
+    _sharpe   = _coerce_float_or_none(metrics.get('sharpe'))
+    _fitness  = _coerce_float_or_none(metrics.get('fitness'))
+    _turnover = _coerce_float_or_none(metrics.get('turnover'))
+    _drawdown = _coerce_float_or_none(metrics.get('drawdown'))
+    _margin   = _coerce_float_or_none(metrics.get('margin'))
+    _returns  = _coerce_float_or_none(metrics.get('returns'))
+    # lineage
+    _generation      = int(alpha.get('generation') or 0)
+    _parent_alpha_id = alpha.get('parent_alpha_id')
+
     with _DB_LOCK, _connect() as conn:
         conn.execute(
             'INSERT INTO alphas (user_id, round_id, round_num, idx, code, code_hash, desc, '
             'pass_count, pass_items, fail_count, fail_items, error_text, metrics, mode, '
-            'cached, submitted, submit_status, error_count, pending_count, phase, ts) '
-            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            'cached, submitted, submit_status, error_count, pending_count, phase, ts, '
+            'region, universe, delay, neutralization, decay, truncation, settings_fp, self_corr, '
+            'sharpe, fitness, turnover, drawdown, margin, returns, generation, parent_alpha_id) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (
                 user_id, round_id, round_num, int(alpha.get('idx') or 0),
                 code, code_hash(code), alpha.get('desc', ''),
@@ -821,28 +927,44 @@ def insert_alpha(user_id: int, round_id: int, round_num: int, alpha: dict[str, A
                 pending_count,
                 int(alpha.get('phase') or 0),
                 time.time(),
+                eff.get('region'), eff.get('universe'),
+                int(eff['delay']) if str(eff.get('delay', '')).lstrip('-').isdigit() else None,
+                eff.get('neutralization'),
+                int(float(eff['decay'])) if eff.get('decay') not in (None, '') else None,
+                float(eff['truncation']) if eff.get('truncation') not in (None, '') else None,
+                fp,
+                _coerce_float_or_none(_sc),
+                _sharpe, _fitness, _turnover, _drawdown, _margin, _returns,
+                _generation, _parent_alpha_id,
             ),
         )
 
 
-def lookup_alpha_by_hash(user_id: int, h: str) -> dict[str, Any] | None:
-    """동일 알파 코드의 가장 최근 시뮬 결과 — 사용자 전체에서 검색.
+def lookup_alpha_by_hash(user_id: int, h: str,
+                         settings_fp: str | None = None) -> dict[str, Any] | None:
+    """동일 알파 코드의 가장 최근 시뮬 결과 — 사용자 전체에서 검색 (cross-user).
 
-    user_id 인자는 호환성을 위해 받지만 필터에 쓰지 않는다 (다른 사용자가 이미 시뮬한
-    결과를 본인 캐시히트처럼 재사용 — 시뮬 결과는 환경-비의존적이라 안전). 단,
-    'submitted' 같은 사용자-스코프 필드는 cache 적용 시 caller 가 무시해야 함.
+    settings_fp 가 주어지면 같은 settings 로 시뮬된 행만 매칭한다 (정확성). None 이면
+    기존 동작(코드만). user_id 는 호환을 위해 받지만 필터에 쓰지 않는다.
+    cross-user 공유는 의도된 효율 설계 — 단, WQB 티어별 데이터 접근 차이로 동일
+    code+settings 가 사용자별 다른 결과를 낼 수 있다(알려진 한계).
     """
     if not h:
         return None
     init()
     with _DB_LOCK, _connect() as conn:
-        row = conn.execute(
-            'SELECT * FROM alphas WHERE code_hash=? ORDER BY id DESC LIMIT 1',
-            (h,),
-        ).fetchone()
-    if not row:
-        return None
-    return _alpha_view(row)
+        if settings_fp is not None:
+            row = conn.execute(
+                'SELECT * FROM alphas WHERE code_hash=? AND settings_fp=? '
+                'ORDER BY id DESC LIMIT 1',
+                (h, settings_fp),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                'SELECT * FROM alphas WHERE code_hash=? ORDER BY id DESC LIMIT 1',
+                (h,),
+            ).fetchone()
+    return _alpha_view(row) if row else None
 
 
 def list_recent_distinct_codes(limit: int = 80) -> list[str]:
@@ -968,29 +1090,18 @@ def operator_preference_stats(user_id: int, lookback_alphas: int = 200,
     # 알파 코드에서 operator name + datafield identifier 추출.
     op_pat = re.compile(r'\b([a-z_][a-z0-9_]*)\s*\(', re.IGNORECASE)
     tok_pat = re.compile(r'\b([a-z][a-z0-9_]{2,})\b', re.IGNORECASE)
-    KNOWN_OPS = {
-        'rank', 'ts_rank', 'ts_delta', 'ts_mean', 'ts_std_dev', 'ts_sum', 'ts_min',
-        'ts_max', 'ts_zscore', 'ts_corr', 'ts_decay_linear', 'ts_arg_min', 'ts_arg_max',
-        'winsorize', 'zscore', 'delta', 'add', 'subtract', 'multiply', 'divide',
-        'power', 'signed_power', 'abs', 'log', 'sqrt', 'inverse', 'min', 'max',
-        'sign', 'reverse', 'group_rank', 'group_neutralize', 'group_sum', 'group_mean',
-        'sum', 'mean', 'std_dev', 'scale', 'normalize', 'fraction', 'quantile',
-        'if_else', 'trade_when', 'pasteurize', 'truncate', 'last_diff_value',
-        'and', 'or', 'not', 'filter',
-    }
-
     op_used: dict[str, list[int]] = {}   # name -> [pass_count_list]
     field_used: dict[str, list[int]] = {}
     for r in rows:
         code = r['code'] or ''
         pc = int(r['pass_count'] or 0)
         ops_in_code = {m.group(1).lower() for m in op_pat.finditer(code)
-                       if m.group(1).lower() in KNOWN_OPS}
+                       if _operator_catalog.is_operator(m.group(1))}
         for op in ops_in_code:
             op_used.setdefault(op, []).append(pc)
         for m in tok_pat.finditer(code):
             tok = m.group(1).lower()
-            if tok in KNOWN_OPS or len(tok) < 4:
+            if _operator_catalog.is_operator(tok) or len(tok) < 4:
                 continue
             field_used.setdefault(tok, []).append(pc)
 
@@ -1245,3 +1356,336 @@ def list_rounds(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
             (user_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# bandit_arms — per-user 다중 armed bandit arm 보상 통계 (라운드/재시작 영속)
+#
+# 설계 선택:
+#   - decay 는 reward_sum/reward_sq_sum 에만 적용, visits 는 원시 카운트 유지.
+#     visits 를 decay 하면 UCB 탐험 항(√(ln N / n)) 계산이 불안정해지므로
+#     visits 는 실제 시도 횟수를 그대로 누적한다.
+#   - upsert 는 _DB_LOCK 아래 SELECT-then-INSERT/UPDATE 로 처리 — 원자성 보장.
+#   - 알파 완료마다 즉시 호출 (per-update flush); 배치 없음.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def bandit_update(user_id: int, arm_key: str, reward: float, round_num: int,
+                  *, dimension: str = '', decay_k: float = 0.0) -> None:
+    """arm 의 보상 통계를 갱신(upsert). 알파 완료마다 즉시 flush.
+
+    decay_k>0 이면 기존 통계에 exp(-decay_k*(round_num-last_round)) 시간감쇠를 적용한 뒤
+    새 reward 를 더한다 (오래된 보상의 가중치를 줄임). visits 는 감쇠하지 않는다
+    (UCB 탐험 항 분모를 안정적으로 유지하기 위해 원시 카운트 보존).
+    """
+    r = _coerce_float_or_none(reward)
+    if r is None:
+        r = 0.0
+    now = time.time()
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            'SELECT reward_sum, reward_sq_sum, visits, last_round, dimension '
+            'FROM bandit_arms WHERE user_id=? AND arm_key=?',
+            (user_id, arm_key),
+        ).fetchone()
+        if row:
+            rs = float(row['reward_sum'])
+            rss = float(row['reward_sq_sum'])
+            vis = int(row['visits'])
+            lr = int(row['last_round'])
+            new_last_round = max(lr, int(round_num))
+            new_dim = dimension or row['dimension']
+            if decay_k > 0:
+                f = math.exp(-decay_k * max(0, round_num - lr))
+                rs *= f
+                rss *= f
+            rs += r
+            rss += r * r
+            vis += 1
+            conn.execute(
+                'UPDATE bandit_arms SET reward_sum=?, reward_sq_sum=?, visits=?, '
+                'last_round=?, updated_at=?, dimension=? WHERE user_id=? AND arm_key=?',
+                (rs, rss, vis, new_last_round, now, new_dim, user_id, arm_key),
+            )
+        else:
+            conn.execute(
+                'INSERT INTO bandit_arms (user_id, arm_key, dimension, '
+                'reward_sum, reward_sq_sum, visits, last_round, updated_at) '
+                'VALUES (?,?,?,?,?,?,?,?)',
+                (user_id, arm_key, dimension or '', r, r * r, 1, round_num, now),
+            )
+
+
+def bandit_stats(user_id: int, dimension: str | None = None) -> list[dict[str, Any]]:
+    """arm 별 통계 리스트. 각: {arm_key, dimension, visits, mean, var, reward_sum, reward_sq_sum, last_round}.
+
+    mean = reward_sum/visits (visits=0 → 0). var = reward_sq_sum/visits - mean^2 (clamp >=0).
+    reward_sq_sum 은 호출자가 2차 모멘트를 병합할 때 사용.
+    dimension 이 주어지면 해당 dimension 인 arm 만 반환.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        if dimension is not None:
+            rows = conn.execute(
+                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+                'FROM bandit_arms WHERE user_id=? AND dimension=? ORDER BY id ASC',
+                (user_id, dimension),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+                'FROM bandit_arms WHERE user_id=? ORDER BY id ASC',
+                (user_id,),
+            ).fetchall()
+    out = []
+    for row in rows:
+        vis = int(row['visits'])
+        rs = float(row['reward_sum'])
+        rss = float(row['reward_sq_sum'])
+        mean = rs / vis if vis > 0 else 0.0
+        var = max(0.0, rss / vis - mean * mean) if vis > 0 else 0.0
+        out.append({
+            'arm_key': row['arm_key'],
+            'dimension': row['dimension'],
+            'visits': vis,
+            'mean': mean,
+            'var': var,
+            'reward_sum': rs,
+            'reward_sq_sum': rss,
+            'last_round': int(row['last_round']),
+        })
+    return out
+
+
+def bandit_arm(user_id: int, arm_key: str) -> dict[str, Any] | None:
+    """단일 arm dict 또는 None. 반환 키: arm_key, dimension, visits, mean, var, reward_sum, reward_sq_sum, last_round."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+            'FROM bandit_arms WHERE user_id=? AND arm_key=?',
+            (user_id, arm_key),
+        ).fetchone()
+    if row is None:
+        return None
+    vis = int(row['visits'])
+    rs = float(row['reward_sum'])
+    rss = float(row['reward_sq_sum'])
+    mean = rs / vis if vis > 0 else 0.0
+    var = max(0.0, rss / vis - mean * mean) if vis > 0 else 0.0
+    return {
+        'arm_key': row['arm_key'],
+        'dimension': row['dimension'],
+        'visits': vis,
+        'mean': mean,
+        'var': var,
+        'reward_sum': rs,
+        'reward_sq_sum': rss,
+        'last_round': int(row['last_round']),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adaptive-exploration leaderboard queries (Part A)
+#
+# all_pass 정의: fail_count=0 AND error_count=0 AND pass_count>=7.
+# NULL axis 컬럼 행은 무시 (legacy rows without settings).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AXIS_COLUMNS = frozenset({'universe', 'neutralization', 'region'})
+# 'decay' 는 버킷으로 그룹화 (bandit.decay_to_bucket 재사용).
+
+
+def axis_effectiveness(user_id: int, axis: str,
+                        lookback_rounds: int = 20) -> list[dict[str, Any]]:
+    """최근 lookback_rounds 라운드의 알파를 axis 컬럼 값별로 집계.
+
+    axis in {'universe', 'neutralization', 'decay', 'region'}.
+    'decay' 는 raw 정수 대신 버킷 ('low'|'mid'|'high') 으로 그룹화 — bandit.decay_to_bucket 기준.
+
+    반환: [{'value':str, 'count':int, 'all_pass_rate':float,
+             'avg_pass_count':float, 'avg_sharpe':float|None,
+             'avg_self_corr':float|None}]
+          all_pass_rate 내림차순 정렬. 빈 리스트 가능.
+    NULL axis 값인 행, count<1 인 버킷은 제외.
+    """
+    if axis not in {'universe', 'neutralization', 'decay', 'region'}:
+        return []
+    init()
+    # max round_num 로 lookback window 계산
+    with _DB_LOCK, _connect() as conn:
+        max_row = conn.execute(
+            'SELECT MAX(round_num) AS m FROM alphas WHERE user_id=?',
+            (user_id,),
+        ).fetchone()
+        max_rn = int(max_row['m'] or 0) if max_row else 0
+        min_rn = max(1, max_rn - lookback_rounds + 1)
+
+        if axis == 'decay':
+            # decay 는 Python 측 버킷 그룹화
+            rows = conn.execute(
+                'SELECT decay, pass_count, fail_count, error_count, sharpe, self_corr '
+                'FROM alphas WHERE user_id=? AND round_num>=? AND decay IS NOT NULL',
+                (user_id, min_rn),
+            ).fetchall()
+    if axis == 'decay':
+        # Python-side bucketing
+        from . import bandit as _bandit
+        bucket_data: dict[str, list[dict]] = {}
+        for r in rows:
+            bkt = _bandit.decay_to_bucket(r['decay'])
+            bucket_data.setdefault(bkt, []).append(dict(r))
+        out = []
+        for bkt, items in bucket_data.items():
+            n = len(items)
+            n_all_pass = sum(
+                1 for x in items
+                if int(x['fail_count'] or 0) == 0
+                and int(x['error_count'] or 0) == 0
+                and int(x['pass_count'] or 0) >= 7
+            )
+            avg_pc = sum(int(x['pass_count'] or 0) for x in items) / n
+            sharpes = [float(x['sharpe']) for x in items if x['sharpe'] is not None]
+            corrs = [float(x['self_corr']) for x in items if x['self_corr'] is not None]
+            out.append({
+                'value': bkt,
+                'count': n,
+                'all_pass_rate': n_all_pass / n,
+                'avg_pass_count': avg_pc,
+                'avg_sharpe': sum(sharpes) / len(sharpes) if sharpes else None,
+                'avg_self_corr': sum(corrs) / len(corrs) if corrs else None,
+            })
+        out.sort(key=lambda d: d['all_pass_rate'], reverse=True)
+        return out
+
+    # SQL-side grouping for string axes
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            f'SELECT {axis} AS axis_val, '
+            '  COUNT(*) AS n, '
+            '  SUM(CASE WHEN fail_count=0 AND error_count=0 AND pass_count>=7 THEN 1 ELSE 0 END) AS n_all_pass, '
+            '  AVG(pass_count) AS avg_pc, '
+            '  AVG(sharpe) AS avg_sharpe, '
+            '  AVG(self_corr) AS avg_self_corr '
+            f'FROM alphas WHERE user_id=? AND round_num>=? AND {axis} IS NOT NULL '
+            f'GROUP BY {axis}',
+            (user_id, min_rn),
+        ).fetchall()
+    out = []
+    for r in rows:
+        n = int(r['n'] or 0)
+        if n < 1:
+            continue
+        n_ap = int(r['n_all_pass'] or 0)
+        out.append({
+            'value': str(r['axis_val']),
+            'count': n,
+            'all_pass_rate': n_ap / n,
+            'avg_pass_count': float(r['avg_pc'] or 0),
+            'avg_sharpe': float(r['avg_sharpe']) if r['avg_sharpe'] is not None else None,
+            'avg_self_corr': float(r['avg_self_corr']) if r['avg_self_corr'] is not None else None,
+        })
+    out.sort(key=lambda d: d['all_pass_rate'], reverse=True)
+    return out
+
+
+def operator_effectiveness(user_id: int, lookback_alphas: int = 200,
+                            top_n: int = 8) -> list[dict[str, Any]]:
+    """최근 lookback_alphas 개 알파를 outermost_operator 별로 집계.
+
+    Python 측 그룹화 (alpha_ast.outermost_operator lazy import).
+    min count>=2 필터, all_pass_rate 내림차순 → avg_pass_count 내림차순 정렬, top_n 반환.
+
+    반환: [{'operator':str, 'count':int, 'all_pass_rate':float, 'avg_pass_count':float}]
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT code, pass_count, fail_count, error_count '
+            'FROM alphas WHERE user_id=? ORDER BY id DESC LIMIT ?',
+            (user_id, int(lookback_alphas)),
+        ).fetchall()
+    if not rows:
+        return []
+
+    from . import alpha_ast as _alpha_ast
+
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        op = _alpha_ast.outermost_operator(r['code'] or '')
+        if op is None:
+            continue
+        groups.setdefault(op, []).append({
+            'pass_count': int(r['pass_count'] or 0),
+            'fail_count': int(r['fail_count'] or 0),
+            'error_count': int(r['error_count'] or 0),
+        })
+
+    out = []
+    for op, items in groups.items():
+        n = len(items)
+        if n < 2:
+            continue
+        n_ap = sum(
+            1 for x in items
+            if x['fail_count'] == 0 and x['error_count'] == 0 and x['pass_count'] >= 7
+        )
+        avg_pc = sum(x['pass_count'] for x in items) / n
+        out.append({
+            'operator': op,
+            'count': n,
+            'all_pass_rate': n_ap / n,
+            'avg_pass_count': avg_pc,
+        })
+
+    # Sort: all_pass_rate DESC, then avg_pass_count DESC
+    out.sort(key=lambda d: (d['all_pass_rate'], d['avg_pass_count']), reverse=True)
+    return out[:top_n]
+
+
+def round_reward_trend(user_id: int, window: int = 10) -> float:
+    """최근 window 라운드의 round-level 평균 pass_count 를 시계열로 OLS degree-1 slope 산출.
+
+    각 라운드의 '품질 proxy' = 해당 라운드 알파들의 평균 pass_count (cached 포함).
+    slope > 0 → 개선 중, slope < 0 → 악화, 0.0 → <2 라운드 또는 flat.
+    numpy 없이 직접 OLS 구현.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        # 최근 window 라운드 번호 목록 (DESC)
+        rn_rows = conn.execute(
+            'SELECT DISTINCT round_num FROM alphas WHERE user_id=? '
+            'ORDER BY round_num DESC LIMIT ?',
+            (user_id, int(window)),
+        ).fetchall()
+    if len(rn_rows) < 2:
+        return 0.0
+
+    # 오래된 것부터 정렬
+    round_nums = sorted(int(r['round_num']) for r in rn_rows)
+
+    # 각 라운드의 평균 pass_count 계산
+    with _DB_LOCK, _connect() as conn:
+        placeholders = ','.join('?' * len(round_nums))
+        avg_rows = conn.execute(
+            f'SELECT round_num, AVG(pass_count) AS avg_pc FROM alphas '
+            f'WHERE user_id=? AND round_num IN ({placeholders}) '
+            f'GROUP BY round_num ORDER BY round_num ASC',
+            (user_id, *round_nums),
+        ).fetchall()
+    if len(avg_rows) < 2:
+        return 0.0
+
+    # OLS: slope = (n*Σxy - Σx·Σy) / (n*Σx² - (Σx)²)
+    # x = sequential index (0, 1, 2, ...), y = avg_pc
+    xs = list(range(len(avg_rows)))
+    ys = [float(r['avg_pc'] or 0) for r in avg_rows]
+    n = len(xs)
+    sum_x  = sum(xs)
+    sum_y  = sum(ys)
+    sum_xy = sum(xs[i] * ys[i] for i in range(n))
+    sum_x2 = sum(x * x for x in xs)
+    denom = n * sum_x2 - sum_x * sum_x
+    if denom == 0:
+        return 0.0
+    return (n * sum_xy - sum_x * sum_y) / denom

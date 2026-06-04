@@ -13,17 +13,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-# 알파 lint / WQB 공통 operator 와 흔한 키워드. field 추출 시 제외.
-_KNOWN_OPS = frozenset({
-    'rank', 'ts_rank', 'ts_delta', 'ts_mean', 'ts_std_dev', 'ts_sum', 'ts_min', 'ts_max',
-    'ts_zscore', 'ts_corr', 'ts_decay_linear', 'ts_arg_min', 'ts_arg_max',
-    'winsorize', 'zscore', 'delta', 'correlation', 'add', 'subtract', 'multiply',
-    'divide', 'power', 'signed_power', 'abs', 'log', 'sqrt', 'inverse', 'min', 'max',
-    'sign', 'reverse', 'group_rank', 'group_neutralize', 'group_sum', 'group_mean',
-    'sum', 'mean', 'std_dev', 'scale', 'normalize', 'fraction', 'quantile',
-    'if_else', 'trade_when', 'pasteurize', 'truncate', 'last_diff_value',
-    'and', 'or', 'not', 'true', 'false', 'filter',
-})
+from . import operator_catalog
 
 _OP_PAT = re.compile(r'\b([a-z_][a-z0-9_]*)\s*\(', re.IGNORECASE)
 _TOKEN_PAT = re.compile(r'\b([a-z][a-z0-9_]{2,})\b', re.IGNORECASE)
@@ -37,7 +27,7 @@ def _normalize(code: str) -> str:
 def extract_operators(code: str) -> set[str]:
     """식에서 operator 이름 추출."""
     return {m.group(1).lower() for m in _OP_PAT.finditer(code or '')
-            if m.group(1).lower() in _KNOWN_OPS}
+            if operator_catalog.is_operator(m.group(1))}
 
 
 def extract_fields(code: str) -> set[str]:
@@ -45,10 +35,7 @@ def extract_fields(code: str) -> set[str]:
     fields: set[str] = set()
     for m in _TOKEN_PAT.finditer(code or ''):
         tok = m.group(1).lower()
-        if tok in _KNOWN_OPS:
-            continue
-        # 숫자만 또는 매우 짧은 토큰 제외
-        if len(tok) < 4:
+        if operator_catalog.is_operator(tok) or len(tok) < 4:
             continue
         fields.add(tok)
     return fields

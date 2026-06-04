@@ -19,6 +19,8 @@ from typing import Any, Callable
 from google import genai
 from google.genai import types as genai_types
 
+from . import datafield_palette
+
 LOG = logging.getLogger('hyfe.gemini')
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,12 +68,13 @@ brain_operators.csv / IQC_brain_datafields.csv 는 **참고용 일부 목록일 
 [핵심 구조 관용구 — 적극 활용 (지금까지 안 써서 알파가 빈약했다)]
 - ts_backfill(field, N): 펀더멘털·애널리스트·옵션 등 희소/분기 필드의 결측을 과거값으로 채움. 이런 필드엔 **거의 필수** (N=20~250).
 - add(a, b, c, ..., filter=True): 여러 표준화 신호를 NaN-안전하게 합성. 다신호 결합의 기본기.
-- group_zscore(x, group) / group_rank(x, group) / group_neutralize(x, group): group ∈ sector|industry|subindustry|market.
+- group_zscore(x, group) / group_rank(x, group) / group_neutralize(x, group): group ∈ sector|industry|subindustry|market. ⚠ group 은 따옴표 없는 bare 식별자다 — group_neutralize(x, sector) (O), group_neutralize(x, 'SECTOR') (X, "Got invalid input at index 1" 에러).
 - 커스텀 그룹: bucket(rank(x), range="0,1,0.1") 로 10분위 그룹 생성 → group_neutralize. 이중중립화는 final = g1*10 + g2 한 번에 (group_neutralize 중첩 금지).
 - trade_when(entry, alpha, exit): 조건부 진입/유지, exit=-1 이면 청산 없이 모멘텀 유지.
 - 삼항 레짐: condition ? signal_if_true : signal_if_false. (returns>0 ? 1 : 0 식 카운팅도 가능)
 - vec_avg / vec_sum: 벡터 타입 필드(뉴스 등)를 행렬로 집계해야 다른 연산자에 넣을 수 있음.
 - 비선형/직교화: signed_power, winsorize, sign, scale, ts_av_diff, ts_decay_linear, regression_neut(y,x), ts_regression(y,x,d).
+- 턴오버 억제: hump(x, hump=0.03) 로 작은 포지션 변화를 무시 → 턴오버 직접 감소(특히 delay=0/고회전 알파에 효과적). ⚠ hump 임계값은 반드시 named(hump=)로! positional hump(x, 0.03) 은 입력 2개로 해석돼 에러. 그 외 ts_decay_linear/ts_mean 평활, trade_when(entry, alpha, -1) 로 포지션 유지.
 
 [검증된 데이터필드 팔레트 — 실제 통과 알파/공식 커리큘럼에서 확인됨 (CSV 미수록도 있음)]
 - 가격/거래량: close, open, high, low, returns, volume, adv20, vwap, cap.
@@ -169,7 +172,13 @@ def _get_or_create_prompt_cache(client, model: str, api_key: str,
         return cached[1]
 
     operators = _read_csv_text(OPERATORS_CSV)
-    datafields = _read_csv_text(DATAFIELDS_CSV)
+    datafields = datafield_palette.build_palette(
+        region='USA',
+        delay=None,
+        seed=datafield_palette._next_rotation(),
+    )
+    if not datafields:
+        datafields = _read_csv_text(DATAFIELDS_CSV)
     csv_block = (
         '===== brain_operators.csv =====\n' + operators +
         '\n\n===== IQC_brain_datafields.csv =====\n' + datafields
@@ -488,9 +497,17 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
                              avoid_codes: list[str] | None = None,
                              submitted_codes: list[str] | None = None,
                              seeds: list[dict] | None = None,
-                             pref_stats: dict | None = None) -> str:
+                             pref_stats: dict | None = None,
+                             forced_delay: 'str | None' = None,
+                             slot_settings: list | None = None) -> str:
     operators = _read_csv_text(OPERATORS_CSV)
-    datafields = _read_csv_text(DATAFIELDS_CSV)
+    datafields = datafield_palette.build_palette(
+        region='USA',
+        delay=forced_delay,
+        seed=round_num,
+    )
+    if not datafields:
+        datafields = _read_csv_text(DATAFIELDS_CSV)
     parts = [
         f"라운드 #{round_num} — 10개 알파를 새로 생성하라.",
         "",
@@ -502,6 +519,7 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
         "",
         *_common_sections(round_num, feedback, errors, avoid_codes,
                           submitted_codes, seeds, pref_stats),
+        _format_slot_settings(slot_settings),
     ]
     return '\n'.join(parts)
 
@@ -511,11 +529,16 @@ def _build_user_prompt_cached(round_num: int, feedback: list[dict],
                                avoid_codes: list[str] | None = None,
                                submitted_codes: list[str] | None = None,
                                seeds: list[dict] | None = None,
-                               pref_stats: dict | None = None) -> str:
+                               pref_stats: dict | None = None,
+                               slot_settings: list | None = None) -> str:
     # 원본과 byte-동일: 기존 `A + '\n' + B + ...` == `'\n'.join([A,B,...])`.
-    return f"라운드 #{round_num} — 10개 알파를 새로 생성하라.\n\n" + '\n'.join(
+    base = f"라운드 #{round_num} — 10개 알파를 새로 생성하라.\n\n" + '\n'.join(
         _common_sections(round_num, feedback, errors, avoid_codes,
                          submitted_codes, seeds, pref_stats))
+    slot_block = _format_slot_settings(slot_settings)
+    if slot_block:
+        base += '\n' + slot_block
+    return base
 
 
 def _build_challenging_section() -> str:
@@ -538,6 +561,29 @@ def _build_challenging_section() -> str:
         '안전하고 보편적인 변형 (price/return 단일 datafield + 표준 window 변경) 반복 금지.',
         '각 알파마다 다른 가설/다른 데이터 소스/다른 시간 스케일을 시도하라.',
     ])
+
+
+def _format_slot_settings(slot_settings: list) -> str:
+    """Format a bandit slot_settings list into a soft-nudge directive block.
+
+    Returns an empty string when slot_settings is None or empty.
+    This is a pure function — tested independently.
+    """
+    if not slot_settings:
+        return ''
+    lines = [
+        '',
+        '[이번 라운드 settings 분산 가이드 — 학습된 성과 기반 권장값이다. '
+        '가설에 더 맞는 settings가 있으면 그걸 우선하되, '
+        '특별한 이유가 없으면 아래 분포를 따라 배치 전반에 settings를 분산하라:]',
+    ]
+    for i, slot in enumerate(slot_settings, start=1):
+        uni  = slot.get('universe', 'TOP3000')
+        neut = slot.get('neutralization', 'INDUSTRY')
+        dcy  = slot.get('decay', 4)
+        lines.append(f'  알파{i}: universe={uni}, neutralization={neut}, decay≈{dcy}')
+    lines.append('')
+    return '\n'.join(lines)
 
 
 def _build_avoid_codes_section(codes: list[str]) -> str:
@@ -649,14 +695,22 @@ def _parse_strategies(raw: str) -> list[dict]:
     return out
 
 
-def _filter_by_lint(strategies: list[dict], log_fn: Callable | None = None) -> list[dict]:
+def _filter_by_lint(strategies: list[dict], log_fn: Callable | None = None,
+                    forced_delay: str | None = None) -> list[dict]:
     try:
         from . import alpha_lint
     except Exception:
         return strategies
+    from . import alpha_repair
     clean: list[dict] = []
     rejected: list[tuple[int, str, list[str]]] = []
     for s in strategies:
+        fixed, applied = alpha_repair.repair(s['code'], delay=forced_delay)
+        if applied:
+            s = dict(s)                      # 입력 dict 변형 방지 — 수정본은 사본에만 반영
+            s['code'] = fixed
+            if log_fn:
+                log_fn(f"  #{s['idx']} 자동수정({', '.join(applied)}): {s['code'][:100]}")
         bads = _alpha_violations(s['code'])
         if not bads:
             bads = alpha_lint.validate_alpha(s['code'])
@@ -678,13 +732,29 @@ def _delay_directive(forced_delay: str | None) -> str:
     if forced_delay is None:
         return ''
     if str(forced_delay) == '0':
-        return ('\n\n[DELAY 강제 = 0 — 이번 라운드 전 알파]\n'
+        return ('\n\n[DELAY 강제 = 0 — 이번 라운드 전 알파 / delay=0 전용 통과 플레이북]\n'
                 'settings.delay 는 시스템이 0 으로 덮어쓴다(적지 마라). delay=0 에서는 '
-                'close/open/high/low/volume/vwap/returns/cap 같은 보편 Price-Volume·기본 '
-                '필드만 제공되고 fundamental/analyst/institutional/option 등 상당수 datafield 는 '
-                '미제공이라 sim 이 ERROR 로 죽는다. 따라서 delay=0 에서 동작하는 PV 위주 필드로만 '
-                '10개 알파를 구성하라(필드 선택을 PV 로 좁히되 신호구조·시간스케일·universe·'
-                'neutralization 분산으로 다양성을 확보).\n')
+                'close/open/high/low/volume/vwap/returns/cap/adv20 같은 보편 Price-Volume 필드만 '
+                '제공되고 fundamental/analyst/institutional/option 등 상당수 datafield 는 미제공이라 '
+                'sim 이 ERROR 로 죽는다. 필드는 PV 로 좁혀라.\n'
+                '★ delay=0 은 오늘 데이터로 오늘 포지션을 잡아 신호가 빠르고 노이즈가 커서 '
+                '**턴오버 폭증 → Fitness·Turnover·Sub-universe Sharpe 항목이 한꺼번에 FAIL** 하는 것이 '
+                '6/7pass 를 못 넘는 주원인이다. 따라서 delay=0 알파는 반드시 강하게 스무딩하라:\n'
+                '  1) decay 를 크게 — delay=0 은 decay 15~40 권장(배치 안에서 분산). 일반 PV rank 도 최소 8 이상.\n'
+                '  2) 코드 안에서 hump 로 작은 리밸런싱을 무시해 턴오버를 직접 깎아라 (delay=0 의 핵심 도구). '
+                '⚠ hump 은 입력이 정확히 1개뿐이다 — 임계값은 반드시 named 파라미터로 써라: hump(signal, hump=0.03). '
+                '절대 positional 로 쓰지 마라: hump(signal, 0.03) 은 "Invalid number of inputs" 에러로 무조건 실패한다. '
+                '또는 ts_decay_linear(signal, 5~20) 로 신호 자체를 평활.\n'
+                '  3) ts_mean(sig, 5~20) 으로 raw PV 의 일중 노이즈를 미리 눌러라. 1~2일 초단기 반전 raw 신호는 '
+                '턴오버만 터지고 거의 FAIL 이니 피하라.\n'
+                '  4) trade_when(entry, alpha, -1) 로 포지션을 유지(exit=-1)해 불필요한 회전을 줄여라.\n'
+                '  5) neutralization(SECTOR/INDUSTRY/SUBINDUSTRY)으로 시장노이즈를 제거해 Sharpe·Sub-universe '
+                'Sharpe 를 끌어올려라(delay=0 에서 거의 필수).\n'
+                '★ 탈상관(self-corr<0.7) — delay=0 은 필드가 PV 로 묶여 데이터셋 다양성이 없으니 남은 레버는 '
+                'settings·구조뿐이다. 10개 알파를 **(universe × neutralization) 서로 다른 칸**에 강제 분산하라 '
+                '(TOP200/500/1000/3000 × MARKET/SECTOR/INDUSTRY/SUBINDUSTRY). 또한 기존 제출풀은 delay=1 '
+                '신호라, "어제 반전을 오늘 실행" 류는 그 풀과 겹친다 — delay=1 이 물리적으로 못 잡는 **당일 '
+                '인트라데이 반응**(오늘 open→현재가/vwap, 당일 volume 급증→당일 포지션)을 노려야 진짜 직교한다.\n')
     return ('\n\n[DELAY 강제 = 1 — 이번 라운드 전 알파]\n'
             'settings.delay 는 시스템이 1 로 덮어쓴다(적지 마라). delay=1 전용 '
             'fundamental/analyst 등 모든 datafield 를 자유롭게 사용해도 된다.\n')
@@ -704,6 +774,8 @@ def generate_strategies(
     max_retries: int | None = 3,
     retry_wait_sec: int = 60,
     forced_delay: str | None = None,
+    slot_settings: list | None = None,
+    effectiveness_priors: str | None = None,
     log_fn: Callable | None = None,
 ) -> list[dict]:
     """10개 알파 생성. user_id 별 API 키 받음.
@@ -745,7 +817,7 @@ def generate_strategies(
             try:
                 cache_name = _get_or_create_prompt_cache(client, m, api_key, log_fn=log_fn)
                 if cache_name:
-                    user_prompt = _build_user_prompt_cached(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {})
+                    user_prompt = _build_user_prompt_cached(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, slot_settings=slot_settings)
                     cfg = genai_types.GenerateContentConfig(
                         cached_content=cache_name,
                         response_mime_type='application/json',
@@ -754,7 +826,7 @@ def generate_strategies(
                         max_output_tokens=8192,
                     )
                 else:
-                    user_prompt = _build_user_prompt_full(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {})
+                    user_prompt = _build_user_prompt_full(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, forced_delay=forced_delay, slot_settings=slot_settings)
                     cfg = genai_types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
                         response_mime_type='application/json',
@@ -762,6 +834,8 @@ def generate_strategies(
                         temperature=temperature,
                         max_output_tokens=8192,
                     )
+                if effectiveness_priors:
+                    user_prompt += effectiveness_priors
                 user_prompt += _delay_directive(forced_delay)
                 resp = client.models.generate_content(
                     model=m, contents=user_prompt, config=cfg,
@@ -773,7 +847,7 @@ def generate_strategies(
                 strategies = _parse_strategies(text)
                 if log_fn and m != MODEL:
                     log_fn(f'   (모델 폴백 사용: {m})')
-                clean = _filter_by_lint(strategies, log_fn=log_fn)
+                clean = _filter_by_lint(strategies, log_fn=log_fn, forced_delay=forced_delay)
                 for new_idx, s in enumerate(clean, start=1):
                     s['idx'] = new_idx
                 if len(clean) < 10 and log_fn:
@@ -953,7 +1027,7 @@ def generate_focused_strategies(
                 strategies = _parse_strategies(text)
                 if log_fn and m != MODEL:
                     log_fn(f'   (focused 모델 폴백 사용: {m})')
-                clean = _filter_by_lint(strategies, log_fn=log_fn)
+                clean = _filter_by_lint(strategies, log_fn=log_fn, forced_delay=forced_delay)
                 for new_idx, s in enumerate(clean, start=1):
                     s['idx'] = new_idx
                 if not clean:

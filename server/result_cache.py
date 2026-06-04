@@ -10,8 +10,8 @@ from typing import Any
 from . import db as _db
 
 
-def lookup(user_id: int, code: str) -> dict[str, Any] | None:
-    return _db.lookup_alpha_by_hash(user_id, _db.code_hash(code))
+def lookup(user_id: int, code: str, settings_fp: str | None = None) -> dict[str, Any] | None:
+    return _db.lookup_alpha_by_hash(user_id, _db.code_hash(code), settings_fp)
 
 
 def materialize(strategy: dict, cached: dict, current_round: int) -> dict:

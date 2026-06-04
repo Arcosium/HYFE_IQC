@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import os
 import signal
 import threading
@@ -22,6 +23,8 @@ from . import result_cache
 from . import gemini_strategist
 from . import wqb_browser
 from . import run_config
+from . import settings_fp as _settings_fp
+from .focus_priority import closeness_score as _closeness_score
 
 LOG = logging.getLogger('hyfe.worker')
 
@@ -147,6 +150,18 @@ class Worker(threading.Thread):
         u = _db.get_user(self.user_id)
         # focus 큐 우선 — PASS=6 알파에 대한 sub-round 가 대기중이면 그것을 먼저 실행.
         focus_queue = _db.get_focus_queue(self.user_id)
+        # Near-miss priority: sort by closeness_score (near-pass first).
+        # Safe: entries with unparseable fail_items fall to neutral (0.0);
+        # a sort error will be caught by the outer try/except and the round
+        # will continue with whatever ordering was in place.
+        try:
+            focus_queue = sorted(
+                focus_queue,
+                key=lambda e: _closeness_score(e.get('parent_fail_items') or []),
+                reverse=True,
+            )
+        except Exception:
+            pass  # fallback to original FIFO order
         focus_entry = focus_queue[0] if focus_queue else None
         is_focus = bool(focus_entry)
 
@@ -207,7 +222,10 @@ class Worker(threading.Thread):
         # 않는다. 오류 캐시만 학습해 archetype 틀에 갇히지 않고 최대한 다양한 알파를 생성한다.
         # (제출 자체를 하지 않으므로 submitted 기반 사전 유사도 필터도 자동 비활성화된다.
         #  avoid_codes 만 유지해 '글자까지 동일한' 중복 생성=cache-hit 낭비를 막는다.)
-        if not is_focus:
+        # 단, 밴딧이 활성화된 경우에는 feedback/seeds/pref_stats/submitted_codes 를 유지해
+        # 학습 신호가 생성 단계로 흘러들어갈 수 있도록 한다.
+        _bandit_on = run_config.is_bandit_enabled()
+        if not is_focus and not _bandit_on:
             feedback = []
             seeds = []
             pref_stats = {}
@@ -226,6 +244,43 @@ class Worker(threading.Thread):
             self._log(round_num, f'  Delay 모드=혼합(랜덤) → 이번 라운드 delay={forced_delay}')
         else:
             self._log(round_num, f'  Delay 모드=고정 → delay={forced_delay}')
+
+        # 밴딧 arm 선택 — 비-focus 라운드에서만 실행, 밴딧 ON 시에만.
+        # select_slots 결과를 generate_strategies 에 전달해 settings 분산을 소프트 가이드.
+        if _bandit_on and not is_focus:
+            import random as _random
+            from . import bandit as _bandit
+            from . import retrospect as _retrospect
+            # 적응형 epsilon: 최근 라운드 보상 트렌드로 탐색/착취 비율 자동 조정.
+            try:
+                _trend = _db.round_reward_trend(self.user_id)
+                _epsilon = _retrospect.adaptive_epsilon(_trend)
+            except Exception:
+                _epsilon = 0.2
+            _stats = {a['arm_key']: a['mean'] for a in _db.bandit_stats(self.user_id)}
+            _slot_settings = _bandit.select_slots(
+                _stats, n_slots=10, epsilon=_epsilon, explore_slots=3,
+                rng=_random.Random(round_num),
+            )
+            # 데이터 기반 prior 생성 — 생성 프롬프트에 소프트 가이드로 주입.
+            try:
+                _axis_res = {
+                    a: _db.axis_effectiveness(self.user_id, a)
+                    for a in ('universe', 'neutralization', 'decay')
+                }
+                _op_res = _db.operator_effectiveness(self.user_id)
+                _priors = _retrospect.format_effectiveness_priors(_axis_res, _op_res)
+            except Exception:
+                _priors = ''
+            try:
+                _db.update_round_config(round_id, delay_mode=delay_mode,
+                                        explore_exploit='3/7',
+                                        injected_arms=_json.dumps(_slot_settings))
+            except Exception:
+                pass
+        else:
+            _slot_settings = None
+            _priors = ''
 
         try:
             if is_focus:
@@ -263,6 +318,8 @@ class Worker(threading.Thread):
                     pref_stats=pref_stats,
                     cache_hit_ratio_hint=prev_cache_ratio,
                     forced_delay=forced_delay,
+                    slot_settings=_slot_settings,
+                    effectiveness_priors=_priors,
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
 
@@ -310,20 +367,22 @@ class Worker(threading.Thread):
 
             _db.update_round_status(round_id, 'simulating')
 
-            # 캐시 hit 분리.
+            # 캐시 hit 분리 (settings-aware 키: code_hash + settings_fingerprint).
             cached_results: list[dict] = []
             to_simulate: list[dict] = []
             seen: set[str] = set()
+            settings_by_idx: dict[int, dict] = {
+                int(s['idx']): (s.get('settings') or {}) for s in strategies
+            }
             for s in strategies:
+                eff = _settings_fp.effective_settings(s.get('settings') or {}, forced_delay)
+                fp = _settings_fp.settings_fingerprint(eff)
                 h = _db.code_hash(s['code'])
-                if h in seen:
+                key = f'{h}:{fp}'
+                if key in seen:
                     continue
-                seen.add(h)
-                cached = result_cache.lookup(self.user_id, s['code'])
-                # delay-aware: 다른 delay 로 시뮬된 캐시는 재사용 금지 (결과가 delay 의존).
-                # 캐시 행의 metrics._delay 와 이번 라운드 강제 delay 가 다르면 캐시 미스 처리.
-                if cached and str((cached.get('metrics') or {}).get('_delay', '')) != str(forced_delay):
-                    cached = None
+                seen.add(key)
+                cached = result_cache.lookup(self.user_id, s['code'], fp)
                 if cached:
                     cached_results.append(result_cache.materialize(s, cached, round_num))
                 else:
@@ -501,8 +560,37 @@ class Worker(threading.Thread):
                     'mode': r.get('mode', ''),
                     'cached': bool(r.get('cached')),
                     'phase': phase,
+                    'settings': settings_by_idx.get(int(r['idx']), {}),
+                    'delay': forced_delay,
+                    'self_corr': r.get('self_corr'),
+                    'generation': r.get('generation', 0),
+                    'parent_alpha_id': r.get('parent_alpha_id'),
                 }
                 _db.insert_alpha(self.user_id, round_id, round_num, alpha_entry)
+
+                # 밴딧 보상 업데이트 — 비-focus 라운드, 밴딧 ON 시에만. per-alpha flush.
+                if _bandit_on and not is_focus:
+                    try:
+                        from . import reward as _reward, bandit as _bandit
+                        _m = dict(r.get('metrics') or {})
+                        _rwd = _reward.compute_reward(
+                            _m,
+                            pass_count=int(r.get('pass_count') or 0),
+                            fail_count=int(r.get('fail_count') or 0),
+                            error_count=int(r.get('error_count') or 0),
+                            self_corr=r.get('self_corr'))
+                        _set = settings_by_idx.get(int(r['idx']), {}) or {}
+                        _assign = {
+                            'universe': (_set.get('universe') or 'TOP3000'),
+                            'neutralization': (_set.get('neutralization') or 'INDUSTRY'),
+                            'decay_bucket': _bandit.decay_to_bucket(_set.get('decay', 0)),
+                        }
+                        for _ak in _bandit.arm_keys_for_assignment(_assign):
+                            _dim = _ak.split(':', 1)[0]
+                            _db.bandit_update(self.user_id, _ak, _rwd, round_num,
+                                              dimension=_dim)
+                    except Exception as _e:
+                        self._log_quiet(round_num, f'⚠ bandit update 실패: {_e}')
 
                 if r.get('error_text'):
                     err_total += 1
