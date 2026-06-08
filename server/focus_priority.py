@@ -100,3 +100,71 @@ def closeness_score(fail_items: object) -> float:
         return NEUTRAL_SCORE
 
     return -total_gap  # higher (less negative) => closer to pass
+
+
+def advance_focus_queue(
+    queue: object,
+    round_num: int,
+    phase: int,
+    parent_idx: int,
+    status: str,
+    max_attempts: int = 5,
+) -> tuple[list, str]:
+    """Remove the just-processed focus entry from the queue.
+
+    Why this is not a plain ``queue[1:]`` (the round-560 infinite-loop bug)
+    ---------------------------------------------------------------------
+    The focus queue is *selected* by sorting on ``closeness_score`` (near-miss
+    first), so the entry the worker actually processed is **not** necessarily
+    ``queue[0]`` (the FIFO front).  Removing by FIFO front therefore fails to
+    remove the processed entry whenever the highest-closeness entry sits behind
+    another in the queue — and the same entry is re-selected every round forever
+    (round 560 stuck on phase 1 / parent_idx 8 for two days).  The fix: match the
+    processed entry by ``(round_num, phase, parent_idx)`` wherever it sits and
+    remove that one.
+
+    Semantics by ``status``:
+      - ``'done'``      : the sub-round for this (parent, phase) is consumed →
+                          remove the entry (one phase == one attempt, the
+                          original PHASES_PER_PARENT intent).
+      - anything else   : treated as a failed attempt (e.g. ``'error'``).
+                          Increment the entry's ``attempts`` and remove it only
+                          once ``attempts >= max_attempts`` — defense-in-depth so
+                          a persistently-erroring entry (it never reaches
+                          ``done``, so it would otherwise never be popped) cannot
+                          loop forever either.  Callers should NOT pass paused /
+                          interrupted rounds here.
+
+    Returns ``(new_queue, action)`` where ``action`` is one of
+    ``'removed' | 'giveup' | 'retry' | 'nomatch'``.
+
+    Pure and defensive: never mutates ``queue`` and never raises.
+    """
+    try:
+        q = [dict(e) for e in (queue or [])]
+    except Exception:
+        return [], 'nomatch'
+
+    def _matches(e: dict) -> bool:
+        try:
+            return (int(e.get('parent_round_num') or 0) == int(round_num)
+                    and int(e.get('phase') or 0) == int(phase)
+                    and int(e.get('parent_idx') or 0) == int(parent_idx))
+        except Exception:
+            return False
+
+    i = next((k for k, e in enumerate(q) if _matches(e)), None)
+    if i is None:
+        return q, 'nomatch'
+
+    if status == 'done':
+        q.pop(i)
+        return q, 'removed'
+
+    # Non-done (error/etc.): count an attempt; give up after max_attempts.
+    attempts = int(q[i].get('attempts') or 0) + 1
+    if attempts >= max(1, int(max_attempts)):
+        q.pop(i)
+        return q, 'giveup'
+    q[i]['attempts'] = attempts
+    return q, 'retry'

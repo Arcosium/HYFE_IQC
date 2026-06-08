@@ -86,6 +86,31 @@ def set_bandit_enabled(enabled: bool) -> None:
         _write(data)
 
 
+def is_grounding_enabled() -> bool:
+    """True if per-round Google grounding is enabled (default: True).
+
+    Reads 'grounding_enabled' from data/run_config.json — live-editable without
+    a server restart, exactly like is_bandit_enabled().
+    Absent / non-bool values default to True so grounding ships ON.
+    """
+    with _LOCK:
+        val = _read().get('grounding_enabled', None)
+    if val is None:
+        return True
+    # Accept both JSON bool (True/False) and string representations.
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def set_grounding_enabled(enabled: bool) -> None:
+    """Persist the grounding_enabled flag.  No restart required."""
+    with _LOCK:
+        data = _read()
+        data['grounding_enabled'] = bool(enabled)
+        _write(data)
+
+
 def resolve_round_delay(mode: str | None = None) -> str:
     """이 라운드에 강제할 delay 값('0'|'1') 을 산출.
     '0'/'1' 은 그대로, 'mix' 는 라운드 단위로 0/1 랜덤.

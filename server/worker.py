@@ -25,6 +25,7 @@ from . import wqb_browser
 from . import run_config
 from . import settings_fp as _settings_fp
 from .focus_priority import closeness_score as _closeness_score
+from .focus_priority import advance_focus_queue as _advance_focus_queue
 
 LOG = logging.getLogger('hyfe.worker')
 
@@ -32,6 +33,13 @@ LOG = logging.getLogger('hyfe.worker')
 # 사용자 tier 에 따라 다름 (보통 6-11). 우리가 추출 가능한 metric 은 6개 (Sharpe/
 # Fitness/Returns/Turnover/Drawdown/Margin) 라 실 max 는 6. 환경변수로 override.
 PASS_THRESHOLD = int(os.environ.get('HYFE_IQC_PASS_THRESHOLD', '7'))
+
+# FOCUS_MIN_PASS — 한 알파가 focus(directed-mutation) 정제 대상이 되는 최소 PASS 수.
+# 6 이었으나 라이브 검증상 새 생성기가 pass-5 에서 정체 → focus 가 0 건 enqueue 되어
+# P3 directed-mutation 이 영영 안 돌았다. 5 로 낮춰 pass-5 near-miss 를 지표기반 정제한다.
+# (라운드당 후보는 FOCUS_MAX_PER_ROUND 로 캡해 큐 폭주 방지.)
+FOCUS_MIN_PASS = int(os.environ.get('HYFE_IQC_FOCUS_MIN_PASS', '5'))
+FOCUS_MAX_PER_ROUND = int(os.environ.get('HYFE_IQC_FOCUS_MAX_PER_ROUND', '2'))
 
 # 서킷 브레이커 — _run_one_round 가 연속 이만큼 예외나면 워커를 자동 중단.
 # (기존엔 무한 재시도라 같은 버그로 영원히 spin 했음.)
@@ -282,6 +290,19 @@ class Worker(threading.Thread):
             _slot_settings = None
             _priors = ''
 
+        # P5 SC-포화: 제출풀이 과다 사용한 신호 연산자를 생성 프롬프트에 경고로 주입,
+        # 비슷한 알파의 self-corr>0.7 벽을 회피하도록 다른 연산자 패밀리로 유도. fail-open.
+        try:
+            from . import knowledge_base
+            _sub_for_sat = [a.get('code', '') for a in _db.list_submitted_alphas(self.user_id, limit=50)]
+            _sat_warn = knowledge_base.render_saturation_warning(
+                knowledge_base.saturated_operators(_sub_for_sat))
+            if _sat_warn:
+                _priors = (_priors or '') + '\n\n' + _sat_warn
+                self._log_quiet(round_num, f'   (SC-포화 경고 주입: {len(_sat_warn)}자)')
+        except Exception as _e:
+            self._log_quiet(round_num, f'⚠ SC-포화 계산 예외(무시): {_e}')
+
         try:
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
@@ -306,22 +327,48 @@ class Worker(threading.Thread):
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
             else:
-                self._log(round_num, '1) Gemini 10 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
-                strategies = gemini_strategist.generate_strategies(
-                    api_key=api_key,
-                    round_num=round_num,
-                    feedback=feedback,
-                    errors=errors,
-                    avoid_codes=avoid_codes,
-                    submitted_codes=submitted_codes,
-                    seeds=seeds,
-                    pref_stats=pref_stats,
-                    cache_hit_ratio_hint=prev_cache_ratio,
-                    forced_delay=forced_delay,
-                    slot_settings=_slot_settings,
-                    effectiveness_priors=_priors,
-                    log_fn=lambda line: self._log_quiet(round_num, line),
-                )
+                # P4 메타전략: 정체(연속 하락) + survivor>=2 이면 RECOMBINE(두 survivor 융합),
+                # 아니면 기존 EXPLORE. 어떤 예외든 EXPLORE 로 폴백(fail-open).
+                strategies = None
+                try:
+                    from . import alpha_search
+                    _scores = _db.recent_round_scores(self.user_id, n=8)
+                    _survivors = _db.survivor_alphas(self.user_id, n=6, min_pass=5)
+                    _mode = alpha_search.pick_mode(
+                        _scores, has_near_miss=False, survivor_count=len(_survivors))
+                    if _mode == 'RECOMBINE' and len(_survivors) >= 2:
+                        _p1 = _survivors[0]
+                        _p2 = max(
+                            _survivors[1:],
+                            key=lambda s: len(set(_p1.get('operators') or [])
+                                              ^ set(s.get('operators') or [])))
+                        self._log(round_num,
+                                  f'1) 🧬 RECOMBINE — survivor 2개 융합 '
+                                  f'(PASS {_p1.get("pass_count")} × {_p2.get("pass_count")})')
+                        strategies = gemini_strategist.generate_crossover_strategies(
+                            api_key=api_key, round_num=round_num, parents=[_p1, _p2],
+                            submitted_codes=submitted_codes, forced_delay=forced_delay,
+                            log_fn=lambda line: self._log_quiet(round_num, line))
+                except Exception as _e:
+                    self._log_quiet(round_num, f'⚠ RECOMBINE 경로 예외, EXPLORE 폴백: {_e}')
+                    strategies = None
+                if not strategies:
+                    self._log(round_num, '1) Gemini 10 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
+                    strategies = gemini_strategist.generate_strategies(
+                        api_key=api_key,
+                        round_num=round_num,
+                        feedback=feedback,
+                        errors=errors,
+                        avoid_codes=avoid_codes,
+                        submitted_codes=submitted_codes,
+                        seeds=seeds,
+                        pref_stats=pref_stats,
+                        cache_hit_ratio_hint=prev_cache_ratio,
+                        forced_delay=forced_delay,
+                        slot_settings=_slot_settings,
+                        effectiveness_priors=_priors,
+                        log_fn=lambda line: self._log_quiet(round_num, line),
+                    )
 
             if self._stop_event.is_set():
                 _db.finish_round(round_id, self.user_id, round_num,
@@ -364,6 +411,24 @@ class Worker(threading.Thread):
                         except Exception:
                             pass
                     return
+
+            # 구조적 탈상관 + 복잡도 사전게이트 (Jaccard 유사도 필터 다음 단계).
+            # 기제출/거절 알파와 AST 서브트리가 겹치는 near-dup, 과복잡 알파를 시뮬 전에 제거.
+            try:
+                from . import presim_gate
+                _kept, _dropped = presim_gate.screen(
+                    strategies, existing_codes=(submitted_codes or [])[:60])
+                for _d in _dropped:
+                    self._log(round_num,
+                              f'  ⊘ #{_d.get("idx")} 사전게이트 드롭: {_d.get("reason")}')
+                if _kept:
+                    strategies = _kept
+                elif _dropped:
+                    # 전부 드롭되면 시뮬 0개가 되므로 전량 통과시키고 경고(임계값 점검).
+                    self._log(round_num,
+                              '  ⚠ 사전게이트가 전부 드롭 — 전량 통과(threshold 점검 필요)')
+            except Exception as _e:
+                self._log_quiet(round_num, f'⚠ 사전게이트 예외(무시하고 진행): {_e}')
 
             _db.update_round_status(round_id, 'simulating')
 
@@ -652,66 +717,96 @@ class Worker(threading.Thread):
                               cache_hits=cache_hit_total, summary=summary)
 
             # focus 큐 관리.
-            if status == 'done':
-                if is_focus:
-                    # 처리 완료한 entry pop.
-                    try:
-                        new_q = _db.get_focus_queue(self.user_id)
-                        # 한 부모가 phase 1·2·3 을 가지므로 (round_num, phase) 만으로는 모호.
-                        # 방금 처리한 front entry 를 parent_idx 까지 맞춰 정확히 pop.
-                        if new_q and new_q[0].get('parent_round_num') == round_num \
-                                and int(new_q[0].get('phase') or 0) == phase \
-                                and int(new_q[0].get('parent_idx') or 0) == parent_idx:
-                            new_q = new_q[1:]
-                            _db.set_focus_queue(self.user_id, new_q)
-                            self._log(round_num,
-                                      f'  focus 큐 #{parent_idx} (phase {phase}) 처리 완료 (남은 항목 {len(new_q)})')
-                    except Exception as e:
-                        self._log_quiet(round_num, f'⚠ focus 큐 pop 실패: {e}')
-                else:
-                    # 메인 라운드 종료 — PASS>=6 이고 미통과 항목(FAIL/ERROR)이 남은 알파마다
-                    # FAIL 사유를 넣어 3 라운드(phase 1·2·3)씩 개선 변형을 큐에 추가한다.
-                    focus_candidates: list[dict] = []
-                    for r in all_results:
-                        _kind, _ = _classify_focus(r)
-                        if _kind:
-                            focus_candidates.append(r)
-
-                    if focus_candidates:
-                        new_q = _db.get_focus_queue(self.user_id)
-                        PHASES_PER_PARENT = 3
-                        for a in focus_candidates:
-                            ist_r = a.get('is_status') or {}
-                            f_list = list(ist_r.get('fail') or []) + list(ist_r.get('error') or [])
-                            p_list = list(ist_r.get('pass') or [])
-                            fail_descs = [
-                                str(it.get('desc') or it.get('name') or '').strip()
-                                for it in f_list
-                            ]
-                            pass_descs = [
-                                str(it.get('desc') or it.get('name') or '').strip()
-                                for it in p_list
-                            ]
-                            fd = ' / '.join([d for d in fail_descs if d])[:200]
-                            for ph in range(1, PHASES_PER_PARENT + 1):
-                                new_q.append({
-                                    'parent_round_num': round_num,
-                                    'phase': ph,
-                                    'parent_idx': int(a.get('idx') or 0),
-                                    'parent_code': str(a.get('code') or ''),
-                                    'parent_desc': str(a.get('desc') or ''),
-                                    'fail_desc': fd,
-                                    'parent_pass_items': pass_descs[:8],
-                                    'parent_fail_items': fail_descs[:4],
-                                    'focus_kind': 'fail',
-                                    'self_corr_value': '',
-                                })
+            # paused/인터럽트 라운드는 큐를 건드리지 않는다 (재개 시 같은 항목 이어서 처리).
+            if status == 'paused' or self._stop_event.is_set():
+                pass
+            elif is_focus:
+                # 방금 처리한 entry 를 (round_num, phase, parent_idx) 로 매칭 제거한다.
+                # ⚠ 선택은 closeness 정렬 기준(near-miss 우선)이라 FIFO 맨 앞과 다를 수 있으므로
+                #    'FIFO 맨 앞'이 아니라 '실제 처리한' 항목을 제거해야 한다.
+                #    (이 불일치가 round-560 무한루프의 원인이었다 — selection=idx8, pop=idx1.)
+                #    status!='done' 인 실패 라운드는 attempts 를 세고 N회 연속 시 강제 포기한다.
+                try:
+                    cur_q = _db.get_focus_queue(self.user_id)
+                    new_q, action = _advance_focus_queue(
+                        cur_q, round_num, phase, parent_idx, status,
+                        max_attempts=_MAX_CONSEC_FAILS,
+                    )
+                    if action == 'removed':
                         _db.set_focus_queue(self.user_id, new_q)
                         self._log(round_num,
-                                  f'  🎯 PASS≥6 focus 후보 {len(focus_candidates)}개 — '
-                                  f'각 {PHASES_PER_PARENT} 라운드씩 FAIL 개선 변형 생성 예정 '
-                                  f'(총 {len(focus_candidates) * PHASES_PER_PARENT} sub-round)',
+                                  f'  focus 큐 #{parent_idx} (phase {phase}) 처리 완료 (남은 항목 {len(new_q)})')
+                    elif action == 'giveup':
+                        _db.set_focus_queue(self.user_id, new_q)
+                        self._log(round_num,
+                                  f'  ⚠ focus 큐 #{parent_idx} (phase {phase}) '
+                                  f'{_MAX_CONSEC_FAILS}회 연속 실패 → 강제 포기 (남은 항목 {len(new_q)})',
                                   level='pass')
+                    elif action == 'retry':
+                        # attempts 카운트만 영속화 — 다음 라운드 재시도.
+                        _db.set_focus_queue(self.user_id, new_q)
+                    # action == 'nomatch': 큐가 외부에서 바뀐 경우 — 그대로 둔다.
+                except Exception as e:
+                    self._log_quiet(round_num, f'⚠ focus 큐 갱신 실패: {e}')
+            elif status == 'done':
+                # 메인 라운드 종료 — PASS>=6 이고 미통과 항목(FAIL/ERROR)이 남은 알파마다
+                # FAIL 사유를 넣어 3 라운드(phase 1·2·3)씩 개선 변형을 큐에 추가한다.
+                focus_candidates: list[dict] = []
+                for r in all_results:
+                    _kind, _ = _classify_focus(r)
+                    if _kind:
+                        focus_candidates.append(r)
+
+                # 라운드당 focus 후보 폭주 방지(pass-5 는 흔함) — closeness(통과 근접) 상위 N개만.
+                if len(focus_candidates) > FOCUS_MAX_PER_ROUND:
+                    try:
+                        focus_candidates.sort(
+                            key=lambda r: _closeness_score([
+                                str(it.get('desc') or it.get('name') or '')
+                                for it in (list((r.get('is_status') or {}).get('fail') or [])
+                                           + list((r.get('is_status') or {}).get('error') or []))
+                            ]),
+                            reverse=True,
+                        )
+                    except Exception:
+                        pass
+                    focus_candidates = focus_candidates[:FOCUS_MAX_PER_ROUND]
+
+                if focus_candidates:
+                    new_q = _db.get_focus_queue(self.user_id)
+                    PHASES_PER_PARENT = 3
+                    for a in focus_candidates:
+                        ist_r = a.get('is_status') or {}
+                        f_list = list(ist_r.get('fail') or []) + list(ist_r.get('error') or [])
+                        p_list = list(ist_r.get('pass') or [])
+                        fail_descs = [
+                            str(it.get('desc') or it.get('name') or '').strip()
+                            for it in f_list
+                        ]
+                        pass_descs = [
+                            str(it.get('desc') or it.get('name') or '').strip()
+                            for it in p_list
+                        ]
+                        fd = ' / '.join([d for d in fail_descs if d])[:200]
+                        for ph in range(1, PHASES_PER_PARENT + 1):
+                            new_q.append({
+                                'parent_round_num': round_num,
+                                'phase': ph,
+                                'parent_idx': int(a.get('idx') or 0),
+                                'parent_code': str(a.get('code') or ''),
+                                'parent_desc': str(a.get('desc') or ''),
+                                'fail_desc': fd,
+                                'parent_pass_items': pass_descs[:8],
+                                'parent_fail_items': fail_descs[:4],
+                                'focus_kind': 'fail',
+                                'self_corr_value': '',
+                            })
+                    _db.set_focus_queue(self.user_id, new_q)
+                    self._log(round_num,
+                              f'  🎯 PASS≥{FOCUS_MIN_PASS} focus 후보 {len(focus_candidates)}개 — '
+                              f'각 {PHASES_PER_PARENT} 라운드씩 FAIL 개선 변형 생성 예정 '
+                              f'(총 {len(focus_candidates) * PHASES_PER_PARENT} sub-round)',
+                              level='pass')
         except Exception as e:
             self._log(round_num, f'⚠ 라운드 예외: {e}')
             _db.finish_round(round_id, self.user_id, round_num,
@@ -821,7 +916,7 @@ def _classify_focus(r: dict) -> tuple[str | None, str]:
         pc = int(r.get('pass_count') or 0)
         fc = int(r.get('fail_count') or 0)
         ec = int(r.get('error_count') or 0)
-    if pc >= 6 and (fc + ec) >= 1:
+    if pc >= FOCUS_MIN_PASS and (fc + ec) >= 1:
         return ('fail', '')
     return (None, '')
 

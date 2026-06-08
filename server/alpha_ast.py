@@ -20,6 +20,7 @@ name:   {'type':'name', 'value':<lower_str>}
 num:    {'type':'num',  'value':<str>}
 str:    {'type':'str'}
 group:  {'type':'group', 'children':[Node,...]}
+unary:  {'type':'unary', 'op':'-', 'operand':Node}
 """
 from __future__ import annotations
 
@@ -175,6 +176,16 @@ class _Parser:
             # plain identifier
             return {'type': 'name', 'value': name_lower}
 
+        # unary +/- : consume the sign, parse the following atom
+        if t['kind'] == 'OP' and t['value'] in ('-', '+'):
+            self._consume()
+            operand = self._parse_atom()
+            if operand is None:
+                return None
+            if t['value'] == '+':
+                return operand
+            return {'type': 'unary', 'op': '-', 'operand': operand}
+
         # anything else (stray OP, COMMA, RPAREN at wrong level) — skip
         self._consume()
         return None
@@ -232,6 +243,9 @@ def _children_of(node: dict) -> list:
         return node.get('args', [])
     if node.get('type') == 'group':
         return node.get('children', [])
+    if node.get('type') == 'unary':
+        op = node.get('operand')
+        return [op] if isinstance(op, dict) else []
     return []
 
 
@@ -353,6 +367,9 @@ def _collect_field_enclosing_op(node, parent_call_name: str | None, result: list
         for child in node.get('children', []):
             _collect_field_enclosing_op(child, parent_call_name, result)
         return
+    if ntype == 'unary':
+        _collect_field_enclosing_op(node.get('operand'), parent_call_name, result)
+        return
     # num, str — no names inside
 
 
@@ -432,3 +449,104 @@ def validate(code: str) -> list[str]:
             pass  # parse failure → allow
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Complexity metrics  (Task 1)
+# ---------------------------------------------------------------------------
+
+def symbol_length(code) -> int:
+    """Character length of the expression (complexity proxy). 0 on non-str."""
+    return len(code) if isinstance(code, str) else 0
+
+
+def base_feature_count(code) -> int:
+    """Number of DISTINCT base datafields used (== len(fields_used)). 0 on failure."""
+    try:
+        return len(fields_used(code))
+    except Exception:
+        return 0
+
+
+def free_const_ratio(code) -> float:
+    """Fraction of tree nodes that are numeric literals — over-parameterisation
+    proxy. 0.0 on failure / empty tree."""
+    try:
+        tree = parse(code)
+        if tree is None:
+            return 0.0
+        nodes = list(_walk(tree))
+        if not nodes:
+            return 0.0
+        nums = sum(1 for n in nodes if n.get('type') == 'num')
+        return nums / len(nodes)
+    except Exception:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Structural overlap / largest-common-subtree  (Task 2)
+# ---------------------------------------------------------------------------
+
+def _shape_key(node) -> tuple:
+    """Structural signature ignoring leaf values, keeping type+name+arity. Leaves
+    (name/num/str) collapse to ('LEAF',) so different fields/windows match."""
+    if not isinstance(node, dict):
+        return ('LEAF',)
+    t = node.get('type')
+    if t == 'call':
+        return ('call', node.get('name'), len(node.get('args', [])))
+    if t == 'unary':
+        return ('unary', node.get('op'))
+    if t == 'group':
+        return ('group', len(node.get('children', [])))
+    return ('LEAF',)
+
+
+def _subtree_size(node) -> int:
+    return sum(1 for _ in _walk(node))
+
+
+def _identical(a, b) -> bool:
+    """Recursive structural equality (type+name+arity, children compared in order)."""
+    if _shape_key(a) != _shape_key(b):
+        return False
+    ca, cb = _children_of(a), _children_of(b)
+    if len(ca) != len(cb):
+        return False
+    return all(_identical(x, y) for x, y in zip(ca, cb))
+
+
+def largest_common_subtree(code_a, code_b) -> int:
+    """Size (node count) of the largest structurally-identical subtree shared by the
+    two expressions. 0 on parse failure. Pre-sim decorrelation signal. O(Na*Nb)."""
+    try:
+        ta, tb = parse(code_a), parse(code_b)
+        if ta is None or tb is None:
+            return 0
+        nodes_b = list(_walk(tb))
+        best = 0
+        for na in _walk(ta):
+            sk = _shape_key(na)
+            for nb in nodes_b:
+                if sk == _shape_key(nb) and _identical(na, nb):
+                    sz = _subtree_size(na)
+                    if sz > best:
+                        best = sz
+        return best
+    except Exception:
+        return 0
+
+
+def structural_overlap(code, others):
+    """Return (max_overlap_size, index_of_worst) vs a list of existing code strings.
+    (0, -1) if others empty or on failure."""
+    try:
+        best, best_i = 0, -1
+        for i, o in enumerate(others or []):
+            s = largest_common_subtree(code, o)
+            if s > best:
+                best, best_i = s, i
+        return best, best_i
+    except Exception:
+        return 0, -1

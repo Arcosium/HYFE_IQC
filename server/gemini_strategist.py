@@ -20,6 +20,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from . import datafield_palette
+from . import alpha_seeds
 
 LOG = logging.getLogger('hyfe.gemini')
 
@@ -43,7 +44,7 @@ def _model_chain() -> tuple[str, ...]:
 
 
 SYSTEM_INSTRUCTION = """[역할]
-너는 WorldQuant Brain(USA, Delay1) 에서 Sharpe ≥ 1.25, Fitness ≥ 1.0, 그리고 **기존 제출 알파들과의 Self-Correlation < 0.7** 을 동시에 노리는 시니어 퀀트 연구원이다.
+너는 WorldQuant Brain(USA) 에서 **Sharpe ≥ 2.0, Fitness ≥ 1.3**, Turnover 1~70%, Weight 잘 분산(>10% 집중 금지), Sub-universe Sharpe 컷 통과, 그리고 **기존 제출 알파들과의 Self-Correlation ≤ 0.7** 을 동시에 노리는 시니어 퀀트 연구원이다. 이 컷들은 실제 대회 기준이다 — 절대 더 낮게 조준하지 마라.
 brain_operators.csv / IQC_brain_datafields.csv 는 **참고용 일부 목록일 뿐 전체가 아니다**. 거기 없어도 아래 [검증된 팔레트]·[핵심 관용구] 에 있거나 WorldQuant 공식 커리큘럼에서 쓰는 연산자·필드는 실재하니 자유롭게 써라.
 
 [가장 중요 — 상관관계 0.7 벽 깨기]
@@ -53,13 +54,29 @@ brain_operators.csv / IQC_brain_datafields.csv 는 **참고용 일부 목록일 
 - **탈상관 레버 적극 사용**: 같은 신호라도 universe(TOP3000↔TOP500↔TOP200) 나 neutralization(SECTOR↔SUBINDUSTRY↔MARKET) 을 바꾸면 self-corr 가 크게 떨어진다 (공식 커리큘럼 권장). 한 배치 안에서 settings 를 분산하라.
 - 잘 안 쓰는 dataset 을 의도적으로 파라: 애널리스트(anl4_*) · 옵션IV(implied_volatility_*) · 현금흐름/배당(cashflow_*, dividend) · 뉴스/소셜(nws12_*, scl12_*, snt_*) · 모델파생(*_rank_derivative, mdl*).
 
+[Fitness 최적화 — 점수 직접 끌어올리기]
+WorldQuant Fitness = Sharpe × √(|Returns| / max(Turnover, 0.125)). 레버 우선순위:
+  1) 최종 신호를 ts_decay_linear(rank(signal), 5~10) 로 감싸 회전↓·단조성↑ (가장 강력).
+  2) rank() 로 스케일 제거·횡단면 비교성 확보 (가장 중요한 연산자).
+  3) raw 값 대신 ts_zscore/(x-ts_mean)/ts_std_dev 로 '수준'이 아닌 '변화'를 포착.
+  4) 이중 rank: rank(ts_rank(x, 40)) 로 안정성↑.
+  5) ts_av_diff(x, 50) * ts_corr(x, y, 50) 에 -1 곱: 구조적으로 유효할 때만 진입하는 상관 게이트.
+  6) trade_when(저변동 조건, 신호, -1): 최강 회전 억제기.
+측정된 고-Fitness 템플릿(변형해 사용): ts_decay_linear(rank((vwap-close)/close), 5) (~2.86),
+rank(ts_rank(close/ts_delay(close,5)-1, 40)) (~1.5), ts_av_diff(close,50)*ts_corr(close,volume,50) 에 -1곱 (~1.70).
+
+[복잡도 예산 — 과적합 방지]
+서로 다른 base 필드 ≤ 6개, 식 길이 과도 금지, 깊은 중첩 금지(≤6단). 설계 원칙: 비율 > 곱 > 합
+(rank(A/(B+0.000001)) 가 rank(A)*rank(B) 보다 일반화 잘 됨). 엄격한 == 등호 대신 밴드(±0.1*ts_std_dev) 사용.
+단일 연산자 알파(rank(close) 류)는 Sharpe 거의 0 — 최소 2개 차원(가격모멘텀+거래량/변동성)을 결합하라.
+
 [10가지 가설 패밀리 — 배치를 여기에 골고루 분산]
 1) PV 모멘텀/리버전: vwap/close, CLV=((close-low)-(high-close))/(high-low), 장기수익률에 delay 준 모멘텀, trade_when(거래량 급증, 신호, -1).
 2) 펀더멘털 가치: operating_income/cap(OEY), EBITDA/EV, assets·equity·debt·liabilities 비율, fnd6_* — 분기데이터는 거의 항상 ts_backfill 로 감쌈.
 3) 애널리스트 기대: anl4_bvps_mean·anl4_netdebt_mean·anl4_adjusted_netincome_ft·anl4_afv4_eps_mean/high/low, *_rank_derivative, actual_*_value_quarterly 와 애널리스트 추정의 괴리.
 4) 현금흐름/수익성 質: cashflow_op/cap, cashflow_efficiency_rank_derivative, ts_corr(cash, cashflow, 252), dividend 추이.
 5) 옵션 IV 센티멘트: implied_volatility_call_{만기}-implied_volatility_put_{만기}, IV vs historical_volatility, implied_volatility_mean_skew_*, call_breakeven_*-put_breakeven_*, pcr_vol_*.
-6) 뉴스/소셜 센티멘트: scl12_buzz·snt_buzz 대 volume(ts_regression/regression_neut), vec_avg(nws12_*) 로 벡터필드 집계 후 ts_sum/rank.
+6) 뉴스/소셜 센티멘트: scl12_buzz·snt_buzz 대 volume(ts_regression), vec_avg(nws12_*) 로 벡터필드 집계 후 ts_sum/rank.
 7) 이벤트 드리븐: abnormal_return_earnings_release, 실적발표 전후 반응.
 8) 마이크로구조: volume/adv20, ts_mean(volume,N1)/ts_mean(volume,N2), volume*vwap 흐름.
 9) 변동성 레짐 전환(삼항): cap < ts_mean(cap,60) ? 한 신호 : 다른 신호; 고변동성 구간 거래제한 등.
@@ -73,7 +90,7 @@ brain_operators.csv / IQC_brain_datafields.csv 는 **참고용 일부 목록일 
 - trade_when(entry, alpha, exit): 조건부 진입/유지, exit=-1 이면 청산 없이 모멘텀 유지.
 - 삼항 레짐: condition ? signal_if_true : signal_if_false. (returns>0 ? 1 : 0 식 카운팅도 가능)
 - vec_avg / vec_sum: 벡터 타입 필드(뉴스 등)를 행렬로 집계해야 다른 연산자에 넣을 수 있음.
-- 비선형/직교화: signed_power, winsorize, sign, scale, ts_av_diff, ts_decay_linear, regression_neut(y,x), ts_regression(y,x,d).
+- 비선형/직교화: signed_power, winsorize, sign, scale, ts_av_diff, ts_decay_linear, ts_regression(y,x,d).
 - 턴오버 억제: hump(x, hump=0.03) 로 작은 포지션 변화를 무시 → 턴오버 직접 감소(특히 delay=0/고회전 알파에 효과적). ⚠ hump 임계값은 반드시 named(hump=)로! positional hump(x, 0.03) 은 입력 2개로 해석돼 에러. 그 외 ts_decay_linear/ts_mean 평활, trade_when(entry, alpha, -1) 로 포지션 유지.
 
 [검증된 데이터필드 팔레트 — 실제 통과 알파/공식 커리큘럼에서 확인됨 (CSV 미수록도 있음)]
@@ -115,7 +132,10 @@ JSON 만 출력. 코드 블록(```), 사족 절대 금지. 정확히 10개 객�
   ...총 10개...
 ]
 settings 는 일부 키만 적어도 됨 (생략 키는 default).
-10개 알파의 가설 · 데이터소스 · 신호구조 · settings 가 서로 충분히 달라야 한다. 비슷한 알파 반복은 실패다."""
+10개 알파의 가설 · 데이터소스 · 신호구조 · settings 가 서로 충분히 달라야 한다. 비슷한 알파 반복은 실패다.
+🚨 출력 가드(엄수): JSON 배열만. markdown 코드펜스·따옴표 래핑·"분석 결과"/"개선된 알파" 류 사족 절대 금지.
+✅ 올바른 응답 시작: [{"code": "...", ...
+❌ 잘못: 다음은 제안 알파입니다: [{..."""
 
 
 _CSV_CACHE: dict[str, tuple[float, str]] = {}
@@ -492,6 +512,15 @@ def _common_sections(round_num: int, feedback: list[dict], errors: list[dict],
     ]
 
 
+def _append_extra(base: str, research_notes: str, seeds_section: str) -> str:
+    extra = []
+    if research_notes:
+        extra.append('\n\n[이번 라운드 연구노트 — 신선한 가설 시드]\n' + research_notes)
+    if seeds_section:
+        extra.append('\n\n' + seeds_section)
+    return base + ''.join(extra)
+
+
 def _build_user_prompt_full(round_num: int, feedback: list[dict],
                              errors: list[dict],
                              avoid_codes: list[str] | None = None,
@@ -499,7 +528,9 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
                              seeds: list[dict] | None = None,
                              pref_stats: dict | None = None,
                              forced_delay: 'str | None' = None,
-                             slot_settings: list | None = None) -> str:
+                             slot_settings: list | None = None,
+                             seeds_section: str = '',
+                             research_notes: str = '') -> str:
     operators = _read_csv_text(OPERATORS_CSV)
     datafields = datafield_palette.build_palette(
         region='USA',
@@ -521,7 +552,8 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
                           submitted_codes, seeds, pref_stats),
         _format_slot_settings(slot_settings),
     ]
-    return '\n'.join(parts)
+    result = '\n'.join(parts)
+    return _append_extra(result, research_notes, seeds_section)
 
 
 def _build_user_prompt_cached(round_num: int, feedback: list[dict],
@@ -530,7 +562,9 @@ def _build_user_prompt_cached(round_num: int, feedback: list[dict],
                                submitted_codes: list[str] | None = None,
                                seeds: list[dict] | None = None,
                                pref_stats: dict | None = None,
-                               slot_settings: list | None = None) -> str:
+                               slot_settings: list | None = None,
+                               seeds_section: str = '',
+                               research_notes: str = '') -> str:
     # 원본과 byte-동일: 기존 `A + '\n' + B + ...` == `'\n'.join([A,B,...])`.
     base = f"라운드 #{round_num} — 10개 알파를 새로 생성하라.\n\n" + '\n'.join(
         _common_sections(round_num, feedback, errors, avoid_codes,
@@ -538,7 +572,7 @@ def _build_user_prompt_cached(round_num: int, feedback: list[dict],
     slot_block = _format_slot_settings(slot_settings)
     if slot_block:
         base += '\n' + slot_block
-    return base
+    return _append_extra(base, research_notes, seeds_section)
 
 
 def _build_challenging_section() -> str:
@@ -659,6 +693,8 @@ _FORBIDDEN_SUBSTRINGS = (
     'ts_co_kurtosis', 'ts_partial_corr',
     # round1 idx=10 에서 'inaccessible operator log_diff' 에러 발생 → 추가
     'log_diff',
+    # 2026-06-07 라이브: 이 tier 에서 inaccessible ('unknown operator regression_neut')
+    'regression_neut',
 )
 _SCIENTIFIC_NOTATION_RX = re.compile(r'\d+\.?\d*[eE][+-]?\d+')
 
@@ -760,6 +796,62 @@ def _delay_directive(forced_delay: str | None) -> str:
             'fundamental/analyst 등 모든 datafield 를 자유롭게 사용해도 된다.\n')
 
 
+def generate_research_notes(*, api_key: str, round_num: int,
+                            forced_delay: str | None = None,
+                            log_fn: Callable | None = None) -> str:
+    """One short Google-grounded call per round → 3 fresh factor hypotheses as text,
+    injected into the batch-generation prompt. Returns '' when grounding is disabled
+    or on any failure (generation continues ungrounded).
+
+    forced_delay: when '0', restricts to PV-only fields; otherwise allows all
+    datafield types (fundamental/analyst/option/news).
+    """
+    try:
+        from . import run_config
+        if not run_config.is_grounding_enabled():
+            return ''
+    except Exception:
+        return ''
+    if not api_key:
+        return ''
+    if str(forced_delay) == '0':
+        prompt = (
+            '최신 퀀트 팩터 연구/논문/리서치에서 WorldQuant Brain delay=0 (USA, Price-Volume 필드만: '
+            'close/open/high/low/volume/vwap/returns/adv20/cap) 에 적용할 만한 신선한 알파 가설 3개를 '
+            '각 한 줄로. 회전이 낮고 Sharpe 가 높을 만한 구조 위주. 출처/설명 없이 "가설: 식 스케치" 형식만.'
+        )
+    else:
+        prompt = (
+            '최신 퀀트 팩터 연구/논문/리서치에서 WorldQuant Brain (USA) 에 적용할 만한 신선한 알파 가설 3개를 '
+            '각 한 줄로. 가격/거래량뿐 아니라 fundamental/analyst/option/news 데이터도 활용 가능. '
+            '회전이 낮고 Sharpe 가 높을 만한 구조 위주. 출처/설명 없이 "가설: 식 스케치" 형식만.'
+        )
+    # 연산자 위생 — grounded 모델이 비-WQB 연산자를 노트에 흘리면 Gemini 가 베껴 sim ERROR
+    # (관측: indneutralize/IndClass/exp). WQB FASTEXPR 만 쓰도록 명시.
+    prompt += (' 식 스케치는 WorldQuant FASTEXPR 연산자만: ts_std_dev(ts_std 아님), '
+               'group_neutralize(x, sector) 처럼 bare group(IndClass/indneutralize 금지), '
+               'exp/tanh/sigmoid 금지.')
+    try:
+        client = genai.Client(api_key=api_key)
+        tools = [genai_types.Tool(google_search=genai_types.GoogleSearch())]
+        # thinking_budget=0: 2.5-flash 의 thinking 토큰이 출력 예산을 잠식해 grounded
+        # 응답이 ~30자에서 MAX_TOKENS 로 잘리던 문제 수정(라이브 디버깅으로 규명). thinking
+        # 끄고 출력 여유를 주면 가설 3개가 온전히 나온다(thoughts_token=490→0, text 33→600+자).
+        cfg = genai_types.GenerateContentConfig(
+            tools=tools, temperature=0.9, max_output_tokens=2048,
+            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+        )
+        resp = client.models.generate_content(model=_model_chain()[0], contents=prompt, config=cfg)
+        text = (resp.text or '').strip()
+        if text and log_fn:
+            log_fn(f'   (round {round_num} grounding 연구노트 {len(text)}자 수신)')
+        return text[:1500]
+    except Exception as e:
+        if log_fn:
+            log_fn(f'   (grounding 실패, 무근거 생성으로 진행: {str(e)[:80]})')
+        return ''
+
+
 def generate_strategies(
     *,
     api_key: str,
@@ -809,6 +901,12 @@ def generate_strategies(
     if log_fn and temperature > base_temp:
         log_fn(f'   (cache_hit_ratio={cache_hit_ratio_hint:.0%} — temperature={temperature} 로 다양성 부스트)')
 
+    import random as _rnd
+    _seeds_list = alpha_seeds.sample_seeds(5, rng=_rnd.Random(round_num))
+    seeds_section = alpha_seeds.render_seeds_section(_seeds_list)
+    research_notes = generate_research_notes(api_key=api_key, round_num=round_num,
+                                             forced_delay=forced_delay, log_fn=log_fn)
+
     attempt = 0
     while True:
         attempt += 1
@@ -817,7 +915,7 @@ def generate_strategies(
             try:
                 cache_name = _get_or_create_prompt_cache(client, m, api_key, log_fn=log_fn)
                 if cache_name:
-                    user_prompt = _build_user_prompt_cached(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, slot_settings=slot_settings)
+                    user_prompt = _build_user_prompt_cached(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, slot_settings=slot_settings, seeds_section=seeds_section, research_notes=research_notes)
                     cfg = genai_types.GenerateContentConfig(
                         cached_content=cache_name,
                         response_mime_type='application/json',
@@ -826,7 +924,7 @@ def generate_strategies(
                         max_output_tokens=8192,
                     )
                 else:
-                    user_prompt = _build_user_prompt_full(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, forced_delay=forced_delay, slot_settings=slot_settings)
+                    user_prompt = _build_user_prompt_full(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, forced_delay=forced_delay, slot_settings=slot_settings, seeds_section=seeds_section, research_notes=research_notes)
                     cfg = genai_types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
                         response_mime_type='application/json',
@@ -1003,6 +1101,17 @@ def generate_focused_strategies(
         submitted_codes=list(submitted_codes or []),
     )
     user_prompt += _delay_directive(forced_delay)
+    # directed-mutation: 부모의 실패 지표를 정확히 겨냥한 개선 지시 주입 (fail 모드만).
+    if focus_kind == 'fail':
+        try:
+            from . import directed_mutation
+            _md = directed_mutation.route(parent_fail_items or [], parent_code)
+            if _md.get('instruction'):
+                user_prompt += '\n\n' + _md['instruction']
+                if log_fn:
+                    log_fn(f'   (directed-mutation: {_md["strategy"]})')
+        except Exception:
+            pass
     # correlation 모드는 다양성 극대화 필요 → temperature 상향.
     _focused_temp = 1.10 if focus_kind == 'correlation' else 0.95
 
@@ -1049,3 +1158,145 @@ def generate_focused_strategies(
         if max_retries is not None and attempt >= max_retries:
             raise (last_err or GeminiQuotaError('all focused fallbacks failed'))
         time.sleep(retry_wait_sec)
+
+
+def _build_crossover_prompt(parents: list, submitted_codes: list | None = None) -> str:
+    """두 고성과 부모 알파를 창의적으로 융합하는 crossover 프롬프트를 생성한다(순수 함수).
+
+    parents: list of dicts with keys 'code', 'pass_count', 'operators'
+    submitted_codes: 이미 WQB 에 제출 성공한 알파 코드 (self-corr 회피용)
+    """
+    parts = [
+        "===== 🧬 교차(Crossover) 알파 생성 =====",
+        "아래 두 고성과 부모 알파의 성공 요소(연산자 선택·시간창·정규화·신호 방향·중립화)를",
+        "각각 추출한 뒤, 그것들을 **창의적으로 융합**해 새 알파 10개를 만들어라.",
+        "각 알파는 두 부모와도, 서로와도 **구조적으로 달라야** 한다(단순 결합·복붙 금지).",
+        "비율>곱>합 원칙, 회전 억제(ts_decay_linear/hump), group_neutralize 로 안정화.",
+        "delay/settings 도 배치 안에서 분산하라.",
+        "",
+    ]
+
+    for i, p in enumerate(parents, start=1):
+        code = (p.get('code') or '').strip()
+        pc = p.get('pass_count', '?')
+        ops = p.get('operators') or []
+        ops_str = ', '.join(ops[:8]) if ops else '(미지정)'
+        parts.append(f"부모{i} (PASS {pc}): {code}")
+        parts.append(f"  사용 연산자: {ops_str}")
+        parts.append("")
+
+    parts += [
+        "===== 융합 미션 =====",
+        "1. 각 부모의 핵심 신호 구조(필드, 집계, 정규화, 방향)를 별도로 분석하라.",
+        "2. 두 부모의 강점을 결합한 10개의 **새로운** 하이브리드 알파를 생성하라.",
+        "3. 각 알파는 부모들과 서로 **구조적으로 달라야** 한다:",
+        "   - 단순히 코드를 붙여 넣거나(연결 금지), 부모 코드를 그대로 반환 금지.",
+        "   - 새로운 시간창/정규화/연산자 조합으로 동일 경제 가설을 재구현하라.",
+        "   - archetype 전환(모멘텀↔리버전↔펀더멘털↔센티멘트)도 적극 시도.",
+        "4. 비율>곱>합 설계 원칙을 우선 적용.",
+        "5. 회전 억제: ts_decay_linear(signal, 5~10) 또는 hump(x, hump=0.03) 활용.",
+        "6. group_neutralize 로 섹터/산업 편향 제거.",
+        "7. settings(universe/neutralization/decay/delay)를 10개 안에서 골고루 분산.",
+        "",
+        "각 알파의 desc 에는 '부모1/부모2 에서 어떤 요소를 가져왔는지' 와",
+        "'왜 그 조합이 Sharpe/Fitness 를 높일 것이라 보는지' 명시.",
+    ]
+
+    if submitted_codes:
+        parts.append("")
+        parts.append("===== 🚫 이미 제출된 알파 — self-corr < 0.7 유지 =====")
+        parts.append("아래 코드들과 신호 유사도가 0.7 미만이 되도록 archetype/dataset/구조를 충분히 다르게 설계하라.")
+        for c in (submitted_codes or [])[:20]:
+            s = (c or '').strip()
+            if not s:
+                continue
+            if len(s) > 180:
+                s = s[:180] + '…'
+            parts.append(f'- {s}')
+
+    return '\n'.join(parts)
+
+
+def generate_crossover_strategies(
+    *,
+    api_key: str,
+    round_num: int,
+    parents: list,
+    submitted_codes: list | None = None,
+    max_retries: int | None = 3,
+    forced_delay: str | None = None,
+    log_fn: Callable | None = None,
+) -> list[dict]:
+    """두 고성과 '생존자' 알파를 교차(crossover)해 구조적으로 다른 하이브리드 알파 10개를 생성.
+
+    parents: list of dicts with keys 'code' (str), 'pass_count' (int), 'operators' (list).
+             부모가 2개 미만이면 generate_strategies 로 폴백.
+    submitted_codes: 이미 WQB 에 제출 성공한 알파 코드 (self-corr 회피용).
+    """
+    if not api_key:
+        raise RuntimeError('Gemini API key 없음')
+
+    if len(parents) < 2:
+        if log_fn:
+            log_fn('🧬 crossover: 부모 2개 미만 → generate_strategies 폴백')
+        return generate_strategies(
+            api_key=api_key,
+            round_num=round_num,
+            forced_delay=forced_delay,
+            log_fn=log_fn,
+        )
+
+    if log_fn:
+        ids = ' × '.join(f"#{p.get('pass_count', '?')}" for p in parents[:2])
+        log_fn(f'🧬 crossover 생성 (부모 {ids})')
+
+    client = genai.Client(api_key=api_key)
+    chain = _model_chain()
+
+    # crossover 프롬프트는 매 호출마다 고유하므로 prompt cache 미사용.
+    user_prompt = _build_crossover_prompt(parents, submitted_codes=submitted_codes)
+    user_prompt += _delay_directive(forced_delay)
+
+    attempt = 0
+    while True:
+        attempt += 1
+        last_err = None
+        for m in chain:
+            try:
+                cfg = genai_types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type='application/json',
+                    response_schema=_RESPONSE_SCHEMA,
+                    temperature=1.05,
+                    max_output_tokens=8192,
+                )
+                resp = client.models.generate_content(model=m, contents=user_prompt, config=cfg)
+                text = (resp.text or '').strip()
+                if not text:
+                    last_err = GeminiQuotaError(f'{m}: empty response')
+                    continue
+                strategies = _parse_strategies(text)
+                if log_fn and m != MODEL:
+                    log_fn(f'   (crossover 모델 폴백 사용: {m})')
+                clean = _filter_by_lint(strategies, log_fn=log_fn, forced_delay=forced_delay)
+                for new_idx, s in enumerate(clean, start=1):
+                    s['idx'] = new_idx
+                if not clean:
+                    last_err = ValueError('all crossover strategies failed lint')
+                    continue
+                return clean
+            except (json.JSONDecodeError, ValueError) as parse_err:
+                last_err = parse_err
+                if log_fn:
+                    log_fn(f'⚠ crossover {m}: JSON 파싱 실패 — 다음 모델: {parse_err}')
+                continue
+            except Exception as e:
+                last_err = e
+                if log_fn:
+                    log_fn(f'⚠ crossover {m}: 호출 실패 — 다음 모델: {str(e)[:120]}')
+                continue
+        if log_fn:
+            log_fn(f'⚠ crossover 전체 모델 체인 실패 (시도 {attempt}). last={str(last_err)[:120]}')
+        if max_retries is not None and attempt >= max_retries:
+            raise (last_err or GeminiQuotaError('all crossover fallbacks failed'))
+        time.sleep(60)

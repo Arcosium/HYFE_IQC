@@ -1689,3 +1689,80 @@ def round_reward_trend(user_id: int, window: int = 10) -> float:
     if denom == 0:
         return 0.0
     return (n * sum_xy - sum_x * sum_y) / denom
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P4 meta-strategy helpers — read-only SELECTs, no schema change
+# ─────────────────────────────────────────────────────────────────────────────
+
+def recent_round_scores(user_id: int, n: int = 6) -> list[float]:
+    """Last n 'done' rounds for user_id, oldest-first, as list[float].
+
+    The per-round score is the round's BEST alpha quality = MAX(alphas.pass_count)
+    over that round — NOT rounds.pass_count (which counts only PASS>=threshold and
+    is 0 for near-miss focus sub-rounds, giving a useless flat trajectory). Using
+    the per-round max captures near-miss progress (e.g. 6,5,6,4) so the meta-strategy
+    can detect plateaus. Returns [] on any error / no done rounds. Oldest-first.
+    """
+    try:
+        init()
+        with _DB_LOCK, _connect() as conn:
+            rows = conn.execute(
+                'SELECT COALESCE(MAX(a.pass_count), 0) AS best '
+                'FROM rounds r LEFT JOIN alphas a ON a.round_id = r.id '
+                "WHERE r.user_id=? AND r.status='done' "
+                'GROUP BY r.id ORDER BY r.id DESC LIMIT ?',
+                (user_id, int(n)),
+            ).fetchall()
+        # rows are newest-first; reverse to oldest-first
+        return [float(r['best']) for r in reversed(rows)]
+    except Exception:
+        return []
+
+
+def survivor_alphas(user_id: int, n: int = 6, min_pass: int = 5) -> list[dict]:
+    """Up to n recent distinct-code alphas with pass_count >= min_pass, newest first.
+
+    Each dict: {'code': str, 'pass_count': int, 'operators': list[str]}.
+    operators = sorted(alpha_ast.operators_used(code)).
+    Dedup by code (keep newest). Returns [] on any error.
+    """
+    try:
+        init()
+        with _DB_LOCK, _connect() as conn:
+            rows = conn.execute(
+                'SELECT code, pass_count FROM alphas '
+                'WHERE user_id=? AND pass_count>=? '
+                'ORDER BY id DESC LIMIT ?',
+                (user_id, int(min_pass), int(n) * 3),
+            ).fetchall()
+        try:
+            from . import alpha_ast as _alpha_ast
+            _ops_fn = _alpha_ast.operators_used
+        except Exception:
+            _ops_fn = None
+
+        seen: set[str] = set()
+        out: list[dict] = []
+        for r in rows:
+            code = r['code'] or ''
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            if _ops_fn is not None:
+                try:
+                    ops: list[str] = sorted(_ops_fn(code))
+                except Exception:
+                    ops = []
+            else:
+                ops = []
+            out.append({
+                'code': code,
+                'pass_count': int(r['pass_count']),
+                'operators': ops,
+            })
+            if len(out) >= int(n):
+                break
+        return out
+    except Exception:
+        return []
