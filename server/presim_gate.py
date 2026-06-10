@@ -48,7 +48,12 @@ def _drop_reason(code, existing, o):
         fc = alpha_ast.free_const_ratio(code)
         if fc > o['max_free_const_ratio']:
             return f'over-parameterised: const ratio {fc:.2f} > {o["max_free_const_ratio"]}'
-        if existing:
+        # overlap_drop falsy (None/0/negative) → structural decorrelation OFF.
+        # Used by focus rounds, which INTENTIONALLY mutate a parent and so are
+        # *meant* to resemble it; dropping near-dups there fights the objective
+        # and silently starves throughput (live: 50-80% of focus alphas dropped).
+        # Exact duplicates are still collapsed downstream by the code_hash dedup.
+        if existing and o['overlap_drop'] and o['overlap_drop'] > 0:
             size, idx = alpha_ast.structural_overlap(code, existing)
             if size >= o['overlap_drop']:
                 return f'structural near-duplicate (overlap {size}) of existing #{idx}'

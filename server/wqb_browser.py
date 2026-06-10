@@ -307,22 +307,23 @@ def simulate_batch(
     _cleanup_browser_state(profile_dir)
 
     # idx 도 함께 — 서브프로세스가 partial 알릴 때 정확한 idx 매핑.
-    # settings 는 라운드 단위로 통일 — WQB Settings 패널이 전역이라 알파별 다른 settings
-    # 가 효과 없고 마지막으로 적용된 settings 만 살아남음 (진행 중 sim invalidate).
-    # 따라서 한 호출(라운드)의 모든 알파는 첫 알파의 settings 사용.
-    batch_settings: dict = {}
-    for s in strategies:
-        cand = s.get('settings') or {}
-        if cand:
-            batch_settings = cand
-            break
-    # delay 테스트 모드 (UI/run_config) — 지정 시 이 라운드 모든 알파의 delay 를 강제.
-    # 라운드 단위 단일 delay 라 batch_settings 에 한 번만 덮어쓰면 충분(전 알파 공유).
-    if forced_delay is not None:
-        batch_settings = {**batch_settings, 'delay': str(forced_delay)}
+    # settings 는 **알파별로** 그대로 전달한다. 과거엔 라운드 단위로 통일했는데(첫 알파
+    # settings 만 사용), 그건 PARALLEL(다탭 동시 sim) 시절의 제약이었다 — 전역 Settings
+    # 패널을 바꾸면 진행 중 sim 이 invalidate 되기 때문. 그러나 라이브는 SEQUENTIAL(1탭
+    # 순차)이고, 서브프로세스 SEQUENTIAL 경로는 동시 sim 이 없어 알파마다 자기 settings 를
+    # 안전하게 적용한다(_wqb_pw_worker 3348-). 통일 로직이 그 앞단에서 settings 를 뭉개
+    # per-alpha (universe×neutralization) 분산·settings 스윕이 전부 무력화되고 있었다
+    # (라이브: idx1 만 apply, idx2+ 는 idx1 settings 공유 → delay=0 의 유일한 추가 레버 차단).
+    # PARALLEL 모드에서도 서브프로세스가 첫 알파 settings 만 1회 적용하므로(_settings_done
+    # 게이트) 동작 동일 — per-alpha 전달은 SEQUENTIAL 에서만 효과가 나고 안전하다.
+    def _alpha_settings(s: dict) -> dict:
+        cfg = dict(s.get('settings') or {})
+        if forced_delay is not None:
+            cfg['delay'] = str(forced_delay)   # 라운드 강제 delay 는 알파별로 덮어쓴다.
+        return cfg
     payload_in = [{'idx': int(s.get('idx') or (i + 1)),
                    'code': s.get('code', ''),
-                   'settings': batch_settings}
+                   'settings': _alpha_settings(s)}
                   for i, s in enumerate(strategies)]
     formulas = [p['code'] for p in payload_in]  # 후속 _strategy_fail 등에서 사용
 

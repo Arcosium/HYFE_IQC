@@ -26,6 +26,7 @@ from . import run_config
 from . import settings_fp as _settings_fp
 from .focus_priority import closeness_score as _closeness_score
 from .focus_priority import advance_focus_queue as _advance_focus_queue
+from .focus_priority import NEUTRAL_SCORE as _NEUTRAL_SCORE
 
 LOG = logging.getLogger('hyfe.worker')
 
@@ -40,6 +41,25 @@ PASS_THRESHOLD = int(os.environ.get('HYFE_IQC_PASS_THRESHOLD', '7'))
 # (라운드당 후보는 FOCUS_MAX_PER_ROUND 로 캡해 큐 폭주 방지.)
 FOCUS_MIN_PASS = int(os.environ.get('HYFE_IQC_FOCUS_MIN_PASS', '5'))
 FOCUS_MAX_PER_ROUND = int(os.environ.get('HYFE_IQC_FOCUS_MAX_PER_ROUND', '2'))
+
+# focus 라운드의 presim 구조적 overlap 임계값. focus 는 부모를 의도적으로 변형하므로
+# 부모/형제와 닮는 게 정상인데, 전역 presim_gate(임계 5)가 그걸 near-dup 으로 보고
+# 라이브 50~80% 를 드롭해 Gemini 생성을 통째로 낭비했다. 0 = focus 에서 overlap 드롭 OFF
+# (정확 중복은 code_hash dedup 이 이미 잡음, 복잡도 캡은 유지). 탐색 라운드는 영향 없음.
+FOCUS_OVERLAP_DROP = int(os.environ.get('HYFE_IQC_FOCUS_OVERLAP_DROP', '0'))
+
+# focus 진입 절대 하한선 — closeness_score(통과까지의 상대 gap 합의 음수) 가 이 값보다
+# 낮은(=통과에서 너무 먼) 부모는 directed-mutation 으로 정제해도 가망이 없으므로 큐에
+# 넣지 않고 예산을 탐색으로 돌린다. delay=0 은 Sharpe 통과가 본래 어려워 hopeless 부모가
+# 많아 이 게이트가 특히 중요. 예: Sharpe 0.07(gap≈0.97)+Fitness 0.01(gap≈0.99)→약 -1.96 (차단),
+# Sharpe 1.7(gap≈0.15)+Fitness 1.1(gap≈0.15)→약 -0.30 (통과). -1e8 이하는 사실상 OFF.
+FOCUS_CLOSENESS_FLOOR = float(os.environ.get('HYFE_IQC_FOCUS_CLOSENESS_FLOOR', '-0.8'))
+
+# focus 라운드마다 부모의 '정확한 공식'을 (universe × neutralization) 그리드로 재시뮬하는
+# settings 스윕 개수. delay=0 은 필드가 PV 로 묶여 settings 가 사실상 유일한 추가 Sharpe
+# 레버라, LLM 추측 대신 결정적으로 훑는다(Gemini 호출 0, 기존 조합은 캐시히트=공짜).
+# 0 = 비활성화. 시뮬 비용(delay=0 개당 ~3분)을 고려해 기본 3.
+FOCUS_SWEEP_N = int(os.environ.get('HYFE_IQC_FOCUS_SWEEP_N', '3'))
 
 # 서킷 브레이커 — _run_one_round 가 연속 이만큼 예외나면 워커를 자동 중단.
 # (기존엔 무한 재시도라 같은 버그로 영원히 spin 했음.)
@@ -184,6 +204,7 @@ class Worker(threading.Thread):
             parent_fail_items = list(focus_entry.get('parent_fail_items') or [])
             focus_kind = str(focus_entry.get('focus_kind') or 'fail')
             self_corr_value = str(focus_entry.get('self_corr_value') or '')
+            parent_settings = dict(focus_entry.get('parent_settings') or {})
             round_id = _db.start_round(
                 self.user_id, round_num,
                 phase=phase, parent_idx=parent_idx, focus_fail=fail_desc,
@@ -205,6 +226,7 @@ class Worker(threading.Thread):
             parent_fail_items = []
             focus_kind = 'fail'
             self_corr_value = ''
+            parent_settings = {}
 
         feedback = _db.list_feedback(self.user_id)
         errors = _db.list_error_patterns(self.user_id, limit=100)
@@ -326,6 +348,23 @@ class Worker(threading.Thread):
                     forced_delay=forced_delay,
                     log_fn=lambda line: self._log_quiet(round_num, line),
                 )
+                # (c) settings 스윕 — 부모의 '정확한 공식'을 (universe×neutralization)
+                # 그리드로 결정적 재시뮬해 delay=0 의 유일한 추가 Sharpe 레버를 훑는다.
+                # Gemini 호출 0; 기존 조합은 아래 캐시 단계서 cache-hit 으로 공짜 처리.
+                # idx 101+ 로 부여해 Gemini 알파(1~10)와 충돌 회피. fail-open.
+                if FOCUS_SWEEP_N > 0 and focus_kind != 'correlation' and parent_code.strip():
+                    try:
+                        from . import settings_sweep
+                        _sweep = settings_sweep.sweep_candidates(
+                            parent_code, parent_settings,
+                            n=FOCUS_SWEEP_N, seed=round_num + phase, start_idx=101)
+                        if _sweep:
+                            strategies = list(strategies or []) + _sweep
+                            self._log(round_num,
+                                      f'  ⚙ settings 스윕 {len(_sweep)}개 주입 — 부모 #{parent_idx} '
+                                      f'동일 공식 × 다른 universe/neutralization (Gemini 호출 없음)')
+                    except Exception as _e:
+                        self._log_quiet(round_num, f'⚠ settings 스윕 예외(무시): {_e}')
             else:
                 # P4 메타전략: 정체(연속 하락) + survivor>=2 이면 RECOMBINE(두 survivor 융합),
                 # 아니면 기존 EXPLORE. 어떤 예외든 EXPLORE 로 폴백(fail-open).
@@ -416,8 +455,13 @@ class Worker(threading.Thread):
             # 기제출/거절 알파와 AST 서브트리가 겹치는 near-dup, 과복잡 알파를 시뮬 전에 제거.
             try:
                 from . import presim_gate
+                # focus 라운드는 구조적 overlap 드롭을 끈다(FOCUS_OVERLAP_DROP, 기본 0=OFF) —
+                # focus 는 부모를 일부러 변형하므로 닮는 게 정상이고, 끄지 않으면 생성의 50~80%
+                # 가 'near-duplicate' 로 버려져 Gemini 호출이 낭비된다. 탐색 라운드는 기본 임계 유지.
+                _gate_opts = {'overlap_drop': FOCUS_OVERLAP_DROP} if is_focus else None
                 _kept, _dropped = presim_gate.screen(
-                    strategies, existing_codes=(submitted_codes or [])[:60])
+                    strategies, existing_codes=(submitted_codes or [])[:60],
+                    opts=_gate_opts)
                 for _d in _dropped:
                     self._log(round_num,
                               f'  ⊘ #{_d.get("idx")} 사전게이트 드롭: {_d.get("reason")}')
@@ -751,21 +795,43 @@ class Worker(threading.Thread):
             elif status == 'done':
                 # 메인 라운드 종료 — PASS>=6 이고 미통과 항목(FAIL/ERROR)이 남은 알파마다
                 # FAIL 사유를 넣어 3 라운드(phase 1·2·3)씩 개선 변형을 큐에 추가한다.
+                def _fail_descs_of(r: dict) -> list[str]:
+                    ist = r.get('is_status') or {}
+                    return [
+                        str(it.get('desc') or it.get('name') or '')
+                        for it in (list(ist.get('fail') or [])
+                                   + list(ist.get('error') or []))
+                    ]
+
                 focus_candidates: list[dict] = []
+                _far_skipped = 0
                 for r in all_results:
                     _kind, _ = _classify_focus(r)
-                    if _kind:
-                        focus_candidates.append(r)
+                    if not _kind:
+                        continue
+                    # 절대 closeness 하한선 — 통과까지 너무 먼(예: Sharpe 0.07) 부모는
+                    # directed-mutation 으로 5배 끌어올리는 게 사실상 불가능하므로 큐에 넣지
+                    # 않고 예산을 탐색으로 돌린다. delay=0 은 hopeless 부모가 많아 특히 중요.
+                    try:
+                        _cs = _closeness_score(_fail_descs_of(r))
+                    except Exception:
+                        _cs = 0.0  # 점수 계산 실패 시 보수적으로 통과시킴
+                    # NEUTRAL(파싱불가)은 자르지 않는다 — gap 을 측정조차 못한 후보를 조용히
+                    # 드롭하면 안 되므로(no silent cap), 측정 가능한 far-miss 만 차단한다.
+                    if _cs > _NEUTRAL_SCORE and _cs < FOCUS_CLOSENESS_FLOOR:
+                        _far_skipped += 1
+                        continue
+                    focus_candidates.append(r)
+                if _far_skipped:
+                    self._log(round_num,
+                              f'  focus 제외: 통과에서 너무 먼 부모 {_far_skipped}개 '
+                              f'(closeness < {FOCUS_CLOSENESS_FLOOR}) — 연마 대신 탐색에 예산 회수')
 
                 # 라운드당 focus 후보 폭주 방지(pass-5 는 흔함) — closeness(통과 근접) 상위 N개만.
                 if len(focus_candidates) > FOCUS_MAX_PER_ROUND:
                     try:
                         focus_candidates.sort(
-                            key=lambda r: _closeness_score([
-                                str(it.get('desc') or it.get('name') or '')
-                                for it in (list((r.get('is_status') or {}).get('fail') or [])
-                                           + list((r.get('is_status') or {}).get('error') or []))
-                            ]),
+                            key=lambda r: _closeness_score(_fail_descs_of(r)),
                             reverse=True,
                         )
                     except Exception:
@@ -800,6 +866,9 @@ class Worker(threading.Thread):
                                 'parent_fail_items': fail_descs[:4],
                                 'focus_kind': 'fail',
                                 'self_corr_value': '',
+                                # 부모 settings 를 실어 보내 다음 focus 라운드의 settings 스윕이
+                                # 부모의 smoothing(decay 등)을 계승하고 자기 조합은 건너뛰게 한다.
+                                'parent_settings': settings_by_idx.get(int(a.get('idx') or 0), {}),
                             })
                     _db.set_focus_queue(self.user_id, new_q)
                     self._log(round_num,
