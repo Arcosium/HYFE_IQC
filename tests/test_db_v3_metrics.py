@@ -4,7 +4,7 @@ DB schema migration v2→v3 테스트.
 검증 항목:
   1. alphas 테이블에 sharpe/fitness/turnover/drawdown/margin/returns/generation/parent_alpha_id 컬럼 추가됨
   2. rounds 테이블에 delay_mode/gen_temperature/explore_exploit/injected_arms 컬럼 추가됨
-  3. PRAGMA user_version == 3
+  3. PRAGMA user_version == db._SCHEMA_VERSION (current)
   4. insert_alpha 가 metric 컬럼에 올바르게 값을 저장함
   5. self_corr 두-위치 폴백 동작: top-level 우선, 없으면 metrics 안 키 사용
   6. 멱등성 — 두 번 init() 해도 예외 없고 버전 유지
@@ -73,16 +73,16 @@ def test_new_round_columns_exist(isolated_db):
         assert col in cols, f"rounds 테이블에 '{col}' 컬럼 없음"
 
 
-# ─── 3. 버전 >= 3 ─────────────────────────────────────────────────────────────
-# v4 이후부터는 _SCHEMA_VERSION 이 3 초과일 수 있으므로 >= 3 으로 완화.
+# ─── 3. 버전 == _SCHEMA_VERSION ───────────────────────────────────────────────
+# init()/마이그레이션 후 PRAGMA user_version 은 반드시 db._SCHEMA_VERSION 과 일치해야 한다.
 
-def test_schema_version_is_3(isolated_db):
+def test_schema_version_matches_current(isolated_db):
     _, tmp_db = isolated_db
-    assert db._SCHEMA_VERSION >= 3, f"_SCHEMA_VERSION={db._SCHEMA_VERSION}"
+    assert db._SCHEMA_VERSION >= 4, f"_SCHEMA_VERSION={db._SCHEMA_VERSION}"
     conn = sqlite3.connect(tmp_db)
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert ver >= 3, f"PRAGMA user_version={ver}, 3 이상 기대"
+    assert ver == db._SCHEMA_VERSION, f"PRAGMA user_version={ver}, expected {db._SCHEMA_VERSION}"
 
 
 # ─── 4. insert_alpha 가 metric 컬럼에 올바른 값 저장 ─────────────────────────
@@ -200,7 +200,7 @@ def test_migration_idempotent(isolated_db):
     conn = sqlite3.connect(tmp_db)
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert ver >= 3, f"멱등 재실행 후 user_version={ver}"
+    assert ver == db._SCHEMA_VERSION, f"멱등 재실행 후 user_version={ver}"
 
 
 # ─── 7. 실제 data/ DB 미변경 ────────────────────────────────────────────────

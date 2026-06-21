@@ -625,7 +625,7 @@ def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str,
 @_with_conn
 def get_account_type(conn, user_id: int) -> str:
     row = conn.execute('SELECT account_type FROM users WHERE id=?', (user_id,)).fetchone()
-    return (row[0] if row and row[0] else 'standard')
+    return (row['account_type'] if row and row['account_type'] else 'standard')
 
 
 @_with_conn
