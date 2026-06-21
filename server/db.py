@@ -623,6 +623,12 @@ def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str,
 
 
 @_with_conn
+def get_user_id_by_username(conn, wqb_username: str) -> 'int | None':
+    row = conn.execute('SELECT id FROM users WHERE wqb_username=?', (wqb_username,)).fetchone()
+    return row['id'] if row else None
+
+
+@_with_conn
 def get_account_type(conn, user_id: int) -> str:
     row = conn.execute('SELECT account_type FROM users WHERE id=?', (user_id,)).fetchone()
     return (row['account_type'] if row and row['account_type'] else 'standard')
