@@ -32,6 +32,7 @@ from . import auth as _auth
 from . import db as _db
 from . import worker as _worker
 from . import run_config as _run_config
+from . import wqb_data_service as _wqb_data_service
 
 LOG = logging.getLogger('hyfe.app')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
@@ -56,6 +57,18 @@ _LOGIN_IN_FLIGHT: set[str] = set()
 # (모듈 import 만으로 DB 생성·워커 기동 → 테스트 불가, WSGI 다중워커서 중복
 #  resume). 둘 다 main() 에서 1회 수행. _db.* 호출은 내부적으로 init() 을
 #  lazy 하게 부르므로 라우트 동작에는 영향 없음.
+
+
+def _ensure_house_rc_account() -> None:
+    """하우스 RC 계정이 DB에 있으면 research_consultant로 보정 (데이터 서비스가
+    그 계정의 API 세션으로 라이브 data-fields를 받음). 어떤 실패도 부팅을 막지 않는다."""
+    try:
+        hid = _db.get_user_id_by_username(_wqb_data_service.HOUSE_RC_USERNAME)
+        if hid and _db.get_account_type(hid) != 'research_consultant':
+            _db.set_account_type(hid, 'research_consultant')
+            LOG.info('house RC 계정 보정: %s', _wqb_data_service.HOUSE_RC_USERNAME)
+    except Exception as e:
+        LOG.warning('house RC 보정 skip: %s', e)
 
 
 def _auto_resume_workers() -> None:
@@ -624,6 +637,7 @@ def api_health():
 def main():
     # import 부작용 제거 → 시작 시 1회 명시 수행 (fail-fast + 테스트 가능).
     _db.init()
+    _ensure_house_rc_account()
     _auto_resume_workers()
     port = int(os.environ.get('HYFE_IQC_PORT', '8088'))
     # 코드 기본값도 안전하게 루프백 (run.sh/systemd 없이 직접 실행해도 공개망

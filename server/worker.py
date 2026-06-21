@@ -23,6 +23,7 @@ from . import result_cache
 from . import gemini_strategist
 from . import wqb_browser
 from . import run_config
+from . import wqb_data_service
 from . import settings_fp as _settings_fp
 from .focus_priority import closeness_score as _closeness_score
 from .focus_priority import advance_focus_queue as _advance_focus_queue
@@ -145,6 +146,10 @@ class Worker(threading.Thread):
         _db.set_user_running(self.user_id, running=True, paused=False)
         consec_fails = 0
         while not self._stop_event.is_set():
+            try:
+                wqb_data_service.maybe_refresh(time.time())
+            except Exception:
+                pass
             try:
                 self._run_one_round()
                 consec_fails = 0          # 성공 → 카운터 리셋
