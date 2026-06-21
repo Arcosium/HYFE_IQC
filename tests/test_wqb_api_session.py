@@ -67,3 +67,36 @@ def test_authenticate_reuses_valid_saved_session_no_post(tmp_path):
     c=wqb_api.WqbApiClient('e','p',session=sess,session_file=sf)
     assert c.authenticate() is True
     assert ('POST','/authentication') not in sess.calls   # never re-authed → no biometric
+
+def test_authenticate_detects_persona_body_inquiry(tmp_path):
+    sf=str(tmp_path/'s.pkl')
+    sess=FakeSession()
+    sess.queue[('POST','/authentication')]=[FakeResp(401,{'inquiry':'inq_X'},
+                                            headers={'Content-Type':'application/json'})]
+    c=wqb_api.WqbApiClient('e','p',session=sess,session_file=sf)
+    assert c.authenticate() is False
+    assert c.persona_required is True
+    assert 'inq_X' in (c.persona_url or '')
+    assert os.path.exists(sf+'.pending')   # pending session saved
+
+def test_authenticate_detects_persona_header(tmp_path):
+    sf=str(tmp_path/'s.pkl')
+    sess=FakeSession()
+    sess.queue[('POST','/authentication')]=[FakeResp(401,{},
+        headers={'WWW-Authenticate':'persona','Location':'/authentication/persona?inquiry=inq_H'})]
+    c=wqb_api.WqbApiClient('e','p',session=sess,session_file=sf)
+    assert c.authenticate() is False and c.persona_required is True
+    assert 'inq_H' in (c.persona_url or '')
+
+def test_complete_persona_saves_session(tmp_path):
+    sf=str(tmp_path/'s.pkl')
+    # seed a pending session
+    sess=FakeSession(); sess.cookies=FakeCookies({'pre':'1'})
+    c=wqb_api.WqbApiClient('e','p',session=sess,session_file=sf)
+    c._save_pending('https://api.worldquantbrain.com/authentication/persona?inquiry=inq_X')
+    # finalize: POST /authentication/persona then GET /authentication shows user
+    sess.queue[('POST','/authentication/persona')]=[FakeResp(200,{'ok':True})]
+    sess.queue[('GET','/authentication')]=[FakeResp(200,{'user':{'id':'u'}})]
+    sess.cookies=FakeCookies({'t':'JWT_AFTER'})
+    assert c.complete_persona() is True
+    assert os.path.exists(sf) and not os.path.exists(sf+'.pending')

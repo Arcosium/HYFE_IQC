@@ -32,6 +32,8 @@ class WqbApiClient:
         else:
             self.session_file = session_file
         self._authed = False
+        self.persona_required = False
+        self.persona_url = None
 
     def _save_session(self) -> bool:
         try:
@@ -92,8 +94,90 @@ class WqbApiClient:
             self._save_session(); self._authed = True; return True
         if r.status_code in (200, 201):  # success without explicit user body
             self._save_session(); self._authed = True; return True
+        persona = self._extract_persona_url(r, body)
+        if persona:
+            self._save_pending(persona)
+            LOG.warning('WQB persona/biometric required: %s', persona)
+            return False
         LOG.warning('authenticate failed: HTTP %s', r.status_code)
         return False
+
+    @staticmethod
+    def _extract_persona_url(resp, body):
+        try:
+            from urllib.parse import urljoin
+            if resp.status_code == 401 and (resp.headers.get('WWW-Authenticate') or '').lower() == 'persona':
+                loc = resp.headers.get('Location')
+                if loc:
+                    return urljoin(f'{BASE}/authentication', loc)
+            inq = (body or {}).get('inquiry') if isinstance(body, dict) else None
+            if inq:
+                return f'{BASE}/authentication/persona?inquiry={inq}'
+        except Exception:
+            pass
+        return None
+
+    def _pending_file(self):
+        return (self.session_file + '.pending') if self.session_file else None
+
+    def _save_pending(self, persona_url):
+        self.persona_url = persona_url; self.persona_required = True  # always signal, even if disabled
+        try:
+            pf = self._pending_file()
+            if not pf:
+                return  # persistence disabled — still signal above
+            ck = self.session.cookies
+            d = ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)
+            os.makedirs(os.path.dirname(pf), mode=0o700, exist_ok=True)
+            try:
+                os.chmod(os.path.dirname(pf), 0o700)
+            except OSError:
+                pass
+            fd = os.open(pf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # owner-only
+            with os.fdopen(fd, 'w') as f:
+                json.dump({'cookies': d, 'persona_url': persona_url}, f)
+        except Exception as e:
+            LOG.warning('pending save err: %s', e)
+
+    def complete_persona(self) -> bool:
+        try:
+            pf = self._pending_file()
+            if not pf or not os.path.exists(pf):
+                # maybe biometric already done out-of-band → try fresh auth
+                return self.authenticate()
+            with open(pf, 'r') as f:
+                pend = json.load(f)
+            if not isinstance(pend, dict):
+                return False
+            self.session.cookies.update(pend.get('cookies') or {})
+            url = pend.get('persona_url') or f'{BASE}/authentication/persona'
+            # variant (a): POST .../authentication/persona with inquiry body
+            try:
+                inq = None
+                if 'inquiry=' in url:
+                    inq = url.split('inquiry=')[-1]
+                self.session.post(f'{BASE}/authentication/persona', json={'inquiry': inq}, timeout=30)
+            except Exception:
+                pass
+            if self._session_valid():
+                self._save_session(); self._clear_pending(); self.persona_required = False
+                self._authed = True; return True
+            # variant (b): re-POST /authentication
+            r = self.session.post(f'{BASE}/authentication', timeout=30)
+            if r.status_code in (200, 201) and self._session_valid():
+                self._save_session(); self._clear_pending(); self.persona_required = False
+                self._authed = True; return True
+            return False
+        except Exception as e:
+            LOG.warning('complete_persona err: %s', e); return False
+
+    def _clear_pending(self):
+        try:
+            pf = self._pending_file()
+            if pf and os.path.exists(pf):
+                os.remove(pf)
+        except OSError:
+            pass
 
     def _ensure_auth(self) -> bool:
         return self._authed or self.authenticate()
