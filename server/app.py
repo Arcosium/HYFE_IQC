@@ -370,6 +370,40 @@ def api_upgrade_to_rc():
     return jsonify({'ok': True, 'account_type': 'research_consultant'})
 
 
+@app.route('/api/account/wqb-persona-status', methods=['GET'])
+def api_wqb_persona_status():
+    """현재 사용자의 WQB 페르소나 완료 여부 확인."""
+    uid = _current_user_id()
+    if not uid:
+        return _err('not_logged_in', '로그인이 필요합니다', 401)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
+    u, p, _ = creds
+    v = _auth.validate_wqb_api(u, p)
+    if v.get('reason') == 'wqb_persona_required':
+        return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', '')})
+    return jsonify({'persona_required': False, 'persona_url': '', 'ok': bool(v.get('ok'))})
+
+
+@app.route('/api/account/wqb-persona-complete', methods=['POST'])
+def api_wqb_persona_complete():
+    """사용자가 브라우저에서 페르소나 완료 후 세션을 저장한다."""
+    uid = _current_user_id()
+    if not uid:
+        return _err('not_logged_in', '로그인이 필요합니다', 401)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
+    u, p, _ = creds
+    from .wqb_api import WqbApiClient
+    try:
+        ok = WqbApiClient(u, p).complete_persona()
+    except Exception as e:
+        return _err('persona_failed', f'완료 처리 실패: {e}', 400)
+    return jsonify({'ok': bool(ok)})
+
+
 @app.route('/api/logout', methods=['POST'])
 def api_logout():
     token = request.cookies.get(SESSION_COOKIE) or ''

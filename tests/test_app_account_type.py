@@ -102,3 +102,25 @@ def test_upgrade_to_rc_rejected(client, monkeypatch):
     assert data.get('ok') is False or data.get('reason') == 'wqb_not_consultant', \
         f"Unexpected response: {data}"
     assert len(set_called) == 0, f"set_account_type should NOT have been called, but was: {set_called}"
+
+
+# ── Task 5: Persona status / complete endpoints ──────────────────────────────
+
+def test_persona_status_and_complete(monkeypatch):
+    import server.app as app_mod
+    monkeypatch.setattr(app_mod, '_current_user_id', lambda: 2)
+    monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
+    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
+        lambda u, p: {'ok': False, 'reason': 'wqb_persona_required', 'persona_url': 'https://x/persona?inquiry=Z'})
+    cl = app_mod.app.test_client()
+    r = cl.get('/api/account/wqb-persona-status')
+    j = r.get_json()
+    assert j['persona_required'] is True and 'inquiry=Z' in j['persona_url']
+    # complete: monkeypatch the client factory used by the endpoint
+    import server.wqb_api as wqb_api
+    class FakeCli:
+        def __init__(self, *a, **k): pass
+        def complete_persona(self): return True
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli)
+    r2 = cl.post('/api/account/wqb-persona-complete')
+    assert r2.get_json()['ok'] is True
