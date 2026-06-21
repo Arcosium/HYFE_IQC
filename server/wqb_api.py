@@ -139,37 +139,35 @@ class WqbApiClient:
         except Exception as e:
             LOG.warning('pending save err: %s', e)
 
-    def complete_persona(self) -> bool:
+    def complete_persona(self, inquiry=None) -> bool:
         try:
-            pf = self._pending_file()
-            if not pf or not os.path.exists(pf):
-                # maybe biometric already done out-of-band → try fresh auth
-                return self.authenticate()
-            with open(pf, 'r') as f:
-                pend = json.load(f)
-            if not isinstance(pend, dict):
+            # backward-compat: if no inquiry passed, try the pending file's saved inquiry/url
+            if not inquiry:
+                pf = self._pending_file()
+                if pf and os.path.exists(pf):
+                    with open(pf, 'r') as f:
+                        pend = json.load(f)
+                    pu = (pend or {}).get('persona_url') or ''
+                    if 'inquiry=' in pu:
+                        from urllib.parse import urlparse, parse_qs
+                        q = parse_qs(urlparse(pu).query)
+                        inquiry = (q.get('inquiry') or q.get('inquiry-id') or [None])[0]
+            if not inquiry:
                 return False
-            self.session.cookies.update(pend.get('cookies') or {})
-            url = pend.get('persona_url') or f'{BASE}/authentication/persona'
-            # variant (a): POST .../authentication/persona with inquiry body
-            try:
-                inq = None
-                if 'inquiry=' in url:
-                    inq = url.split('inquiry=')[-1]
-                self.session.post(f'{BASE}/authentication/persona', json={'inquiry': inq}, timeout=30)
-            except Exception:
-                pass
-            if self._session_valid():
-                self._save_session(); self._clear_pending(); self.persona_required = False
-                self._authed = True; return True
-            # variant (b): re-POST /authentication
-            r = self.session.post(f'{BASE}/authentication', timeout=30)
-            if r.status_code in (200, 201) and self._session_valid():
-                self._save_session(); self._clear_pending(); self.persona_required = False
-                self._authed = True; return True
+            r = self.session.post(f'{BASE}/authentication/persona', json={'inquiry': inquiry}, timeout=30)
+            if r.status_code in (200, 201):
+                # finalize succeeded — session is now authenticated; persist its cookies
+                self._save_session()
+                self._clear_pending()
+                self.persona_required = False
+                self._authed = True
+                return True
+            # 403 INQUIRY_INCOMPLETE (biometric not done yet) or other → not authenticated
+            LOG.warning('complete_persona finalize HTTP %s', r.status_code)
             return False
         except Exception as e:
-            LOG.warning('complete_persona err: %s', e); return False
+            LOG.warning('complete_persona err: %s', e)
+            return False
 
     def _clear_pending(self):
         try:

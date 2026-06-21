@@ -173,16 +173,25 @@ def test_persona_status_and_complete(monkeypatch):
     monkeypatch.setattr(app_mod, '_current_user_id', lambda: 2)
     monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
     monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
-        lambda u, p: {'ok': False, 'reason': 'wqb_persona_required', 'persona_url': 'https://x/persona?inquiry=Z'})
+        lambda u, p: {'ok': False, 'reason': 'wqb_persona_required',
+                      'persona_url': 'https://x/persona?inquiry=Z', 'inquiry': 'inq_Z'})
     cl = app_mod.app.test_client()
     r = cl.get('/api/account/wqb-persona-status')
     j = r.get_json()
     assert j['persona_required'] is True and 'inquiry=Z' in j['persona_url']
-    # complete: monkeypatch the client factory used by the endpoint
+    # status response must include the raw inquiry
+    assert j.get('inquiry') == 'inq_Z'
+    # complete: FakeCli must accept the inquiry kwarg passed by the endpoint
     import server.wqb_api as wqb_api
+    captured = {}
     class FakeCli:
         def __init__(self, *a, **k): pass
-        def complete_persona(self): return True
+        def complete_persona(self, inquiry=None):
+            captured['inquiry'] = inquiry
+            return True
     monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli)
-    r2 = cl.post('/api/account/wqb-persona-complete')
+    r2 = cl.post('/api/account/wqb-persona-complete',
+                 data=json.dumps({'inquiry': 'inq_Z'}),
+                 content_type='application/json')
     assert r2.get_json()['ok'] is True
+    assert captured.get('inquiry') == 'inq_Z'

@@ -157,7 +157,7 @@ def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
         url = _resolve_persona_url(url)
         return {'ok': False, 'reason': 'wqb_persona_required',
                 'detail': 'WQB biometric(Persona) 인증 필요 — 대시보드에서 1회 완료하세요.',
-                'persona_url': url}
+                'persona_url': url, 'inquiry': inq}
     if r.status_code == 401:
         return {'ok': False, 'reason': 'wqb_credentials', 'detail': 'WQB API 401 — 자격증명 거절'}
     if r.status_code == 403:

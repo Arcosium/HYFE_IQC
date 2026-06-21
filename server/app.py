@@ -396,7 +396,8 @@ def api_wqb_persona_status():
     u, p, _ = creds
     v = _auth.validate_wqb_api(u, p)
     if v.get('reason') == 'wqb_persona_required':
-        return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', '')})
+        return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', ''),
+                        'inquiry': v.get('inquiry', '')})
     return jsonify({'persona_required': False, 'persona_url': '', 'ok': bool(v.get('ok'))})
 
 
@@ -410,9 +411,10 @@ def api_wqb_persona_complete():
     if not creds:
         return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
     u, p, _ = creds
+    inquiry = ((request.get_json(silent=True) or {}).get('inquiry') or '').strip() or None
     from .wqb_api import WqbApiClient
     try:
-        ok = WqbApiClient(u, p).complete_persona()
+        ok = WqbApiClient(u, p).complete_persona(inquiry=inquiry)
     except Exception as e:
         return _err('persona_failed', f'완료 처리 실패: {e}', 400)
     return jsonify({'ok': bool(ok)})

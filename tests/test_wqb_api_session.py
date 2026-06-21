@@ -100,3 +100,39 @@ def test_complete_persona_saves_session(tmp_path):
     sess.cookies=FakeCookies({'t':'JWT_AFTER'})
     assert c.complete_persona() is True
     assert os.path.exists(sf) and not os.path.exists(sf+'.pending')
+
+
+def test_complete_persona_with_inquiry_posts_finalize(tmp_path):
+    """complete_persona(inquiry=...) must POST /authentication/persona with that
+    inquiry and, on 200, save session + clear pending + set _authed."""
+    sf = str(tmp_path / 's.pkl')
+    sess = FakeSession()
+    sess.cookies = FakeCookies({'t': 'JWT'})
+    # Queue a 200 for the finalize POST
+    sess.queue[('POST', '/authentication/persona')] = [FakeResp(200, {'user': {}})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    result = c.complete_persona(inquiry='inq_X')
+    assert result is True
+    # session file must be written
+    assert os.path.exists(sf)
+    # _authed must be set
+    assert c._authed is True
+    assert c.persona_required is False
+    # POST /authentication/persona must have been called
+    assert ('POST', '/authentication/persona') in sess.calls
+
+
+def test_complete_persona_inquiry_incomplete_returns_false(tmp_path):
+    """If the finalize POST returns 403 INQUIRY_INCOMPLETE (biometric not done),
+    complete_persona must return False and NOT write a session file."""
+    sf = str(tmp_path / 's.pkl')
+    sess = FakeSession()
+    sess.cookies = FakeCookies({'t': 'JWT'})
+    sess.queue[('POST', '/authentication/persona')] = [
+        FakeResp(403, {'detail': 'INQUIRY_INCOMPLETE'})
+    ]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    result = c.complete_persona(inquiry='inq_Y')
+    assert result is False
+    # session file must NOT be created on failure
+    assert not os.path.exists(sf)

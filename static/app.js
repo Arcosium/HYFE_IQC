@@ -525,14 +525,18 @@
   const _personaStatus = document.getElementById('persona-status');
   const _btnPersonaComplete = document.getElementById('btn-persona-complete');
 
+  let _personaInquiry = '';
+
   async function checkPersonaStatus() {
     try {
       const r = await api('/api/account/wqb-persona-status');
       if (r.ok && r.data && r.data.persona_required) {
+        _personaInquiry = r.data.inquiry || '';
         if (_personaLink)  _personaLink.href = r.data.persona_url || '#';
         if (_personaStatus) _personaStatus.textContent = '';
         if (_personaBanner) _personaBanner.removeAttribute('hidden');
       } else {
+        _personaInquiry = '';
         if (_personaBanner) _personaBanner.setAttribute('hidden', '');
       }
     } catch (e) {
@@ -545,12 +549,17 @@
       _btnPersonaComplete.disabled = true;
       if (_personaStatus) _personaStatus.textContent = '저장 중…';
       try {
-        const r = await api('/api/account/wqb-persona-complete', { method: 'POST' });
+        const r = await api('/api/account/wqb-persona-complete', {
+          method: 'POST',
+          body: JSON.stringify({ inquiry: _personaInquiry }),
+        });
         if (r.ok && r.data && r.data.ok) {
           if (_personaStatus) _personaStatus.textContent = '인증 완료 — 세션 저장됨';
           if (_personaBanner) _personaBanner.setAttribute('hidden', '');
         } else {
-          const msg = (r.data && (r.data.detail || r.data.reason)) || '알 수 없는 오류';
+          const msg = r.data && r.data.ok === false
+            ? 'biometric 인증이 아직 완료되지 않았습니다 — 브라우저에서 완료 후 다시 눌러주세요.'
+            : ((r.data && (r.data.detail || r.data.reason)) || '알 수 없는 오류');
           if (_personaStatus) _personaStatus.textContent = '오류: ' + msg;
           _btnPersonaComplete.disabled = false;
         }

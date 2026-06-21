@@ -30,6 +30,8 @@ def test_validate_wqb_api_persona(monkeypatch):
     r=auth.validate_wqb_api('e','p')
     assert r['ok'] is False and r['reason']=='wqb_persona_required'
     assert 'inq_Z' in r.get('persona_url','')
+    # inquiry field must be present so the frontend can pass it to the finalize call
+    assert r.get('inquiry') == 'inq_Z'
 
 
 def test_validate_wqb_api_persona_location_no_double_path(monkeypatch):
