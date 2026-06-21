@@ -210,6 +210,9 @@ def api_login():
     wqb_password = (body.get('wqb_password') or '').strip()
     gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
+    account_type = (body.get('account_type') or 'standard').strip()
+    if account_type not in ('standard', 'research_consultant'):
+        account_type = 'standard'
 
     if not (wqb_username and wqb_password):
         return _err('missing_fields', '아이디 / 비밀번호가 필요합니다', 400)
@@ -281,7 +284,7 @@ def api_login():
 
     try:
         LOG.info('login attempt (full validation): %s', wqb_username)
-        result = _auth.validate_login(wqb_username, wqb_password, gemini_api_key)
+        result = _auth.validate_login(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
     finally:
         with _LOGIN_LOCK_LOCK:
             _LOGIN_IN_FLIGHT.discard(wqb_username)
@@ -291,7 +294,7 @@ def api_login():
                  wqb_username, result.get('reason'), result.get('detail'))
         return jsonify(result), 401
 
-    uid = _db.upsert_user(wqb_username, wqb_password, gemini_api_key)
+    uid = _db.upsert_user(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
     return _issue_session(uid, wqb_username, remember)
 
 
@@ -335,6 +338,23 @@ def _issue_session(uid: int, wqb_username: str, remember: bool) -> Response:
     LOG.info('login ok: user_id=%d (remember=%s, cookie secure=%s samesite=%s)',
              uid, remember, COOKIE_SECURE, COOKIE_SAMESITE)
     return resp
+
+
+@app.route('/api/account/upgrade-to-rc', methods=['POST'])
+def api_upgrade_to_rc():
+    """Research Consultant 계정으로 전환 — WQB API 로 RC 자격 확인 후 account_type 갱신."""
+    uid = _current_user_id()
+    if not uid:
+        return _err('not_logged_in', '로그인이 필요합니다', 401)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
+    username, password, _ = creds
+    v = _auth.validate_wqb_api(username, password)
+    if not v.get('ok'):
+        return jsonify(v), 400
+    _db.set_account_type(uid, 'research_consultant')
+    return jsonify({'ok': True, 'account_type': 'research_consultant'})
 
 
 @app.route('/api/logout', methods=['POST'])

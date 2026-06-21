@@ -76,9 +76,10 @@
     setStatus('info', 'WQB + Gemini 검증 중. 신규 로그인은 30~60초 걸릴 수 있습니다.');
     btnGoDashboard.setAttribute('hidden', '');
     try {
+      const account_type = (document.querySelector('input[name="account_type"]:checked') || {}).value || 'standard';
       const r = await api('/api/login', {
         method: 'POST',
-        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember }),
+        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember, account_type }),
       });
       if (r.ok && r.data && r.data.ok) {
         // 자동 전환 대신 명시적 버튼을 띄움 — 사용자가 직접 클릭해서 이동.
@@ -446,6 +447,15 @@
       try { refreshBest(); } catch (_) {}
     });
   }
+
+  // ── RC 전환 버튼 ─────────────────────────────────────────
+  const _btnUpRc = document.getElementById('btn-upgrade-rc');
+  if (_btnUpRc) _btnUpRc.addEventListener('click', async () => {
+    const r = await api('/api/account/upgrade-to-rc', { method: 'POST' });
+    const ok = r && r.data && r.data.ok;
+    alert(ok ? 'Research Consultant로 전환되었습니다.'
+             : ('전환 실패: ' + ((r && r.data && (r.data.detail || r.data.reason)) || '오류')));
+  });
 
   // ── 부팅 ─────────────────────────────────────────────────
   tryAutoLogin();
