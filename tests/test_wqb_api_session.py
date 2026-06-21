@@ -1,5 +1,5 @@
 # tests/test_wqb_api_session.py
-import pickle, os
+import stat, os
 import server.wqb_api as wqb_api
 
 class FakeResp:
@@ -35,6 +35,28 @@ def test_save_then_load_roundtrip(tmp_path):
     c2=wqb_api.WqbApiClient('e','p',session=sess2,session_file=sf)
     assert c2._load_session() is True
     assert sess2.cookies.get_dict().get('t')=='JWT123'
+
+def test_session_file_is_owner_only_0600(tmp_path):
+    sf = str(tmp_path / 's.json')
+    sess = FakeSession(); sess.cookies = FakeCookies({'t': 'JWT123'})
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    assert c._save_session() is True
+    mode = stat.S_IMODE(os.stat(sf).st_mode)
+    assert mode == 0o600, oct(mode)
+
+def test_load_rejects_non_dict_json(tmp_path):
+    sf = str(tmp_path / 's.json')
+    with open(sf, 'w') as f: f.write('["not", "a", "dict"]')
+    sess = FakeSession()
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    assert c._load_session() is False
+
+def test_load_rejects_corrupt_json(tmp_path):
+    sf = str(tmp_path / 's.json')
+    with open(sf, 'w') as f: f.write('{not valid json')
+    sess = FakeSession()
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    assert c._load_session() is False
 
 def test_authenticate_reuses_valid_saved_session_no_post(tmp_path):
     sf=str(tmp_path/'s.pkl')

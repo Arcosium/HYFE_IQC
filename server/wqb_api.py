@@ -2,9 +2,9 @@
 계약은 _wqb_pw_worker.py 에서 검증된 형태를 그대로 미러링한다."""
 from __future__ import annotations
 import hashlib
+import json
 import logging
 import os
-import pickle
 import requests
 from requests.auth import HTTPBasicAuth
 
@@ -34,10 +34,6 @@ class WqbApiClient:
         self._authed = False
 
     def _save_session(self) -> bool:
-        # pickle is safe here: we write only a plain str→str dict (cookie jar),
-        # and we read it back only from our own local data/ directory — no
-        # untrusted network source. Switching to JSON would be equally safe but
-        # the brief mandates pickle for requests.Session cookie round-trip compatibility.
         try:
             if not self.session_file:
                 return False  # persistence disabled
@@ -45,24 +41,29 @@ class WqbApiClient:
             d = ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)
             if not d:
                 return False
-            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
+            os.makedirs(os.path.dirname(self.session_file), mode=0o700, exist_ok=True)
+            try:
+                os.chmod(os.path.dirname(self.session_file), 0o700)
+            except OSError:
+                pass
             tmp = self.session_file + '.tmp'
-            with open(tmp, 'wb') as f:
-                pickle.dump(d, f)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                json.dump(d, f)
             os.replace(tmp, self.session_file)
             return True
         except Exception as e:
             LOG.warning('session save err: %s', e); return False
 
     def _load_session(self) -> bool:
-        # pickle load is safe here: file is written exclusively by _save_session above
-        # (a plain str→str dict), stored in our own local data/ directory, never from
-        # a network or user-supplied path.
         try:
             if not self.session_file or not os.path.exists(self.session_file):
                 return False
-            with open(self.session_file, 'rb') as f:
-                d = pickle.load(f)
+            with open(self.session_file, 'r') as f:
+                d = json.load(f)
+            if not isinstance(d, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in d.items()):
+                return False
             if not d:
                 return False
             self.session.cookies.update(d)
