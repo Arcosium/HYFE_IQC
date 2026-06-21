@@ -90,6 +90,17 @@ def test_simulate_batch_rate_limited():
     assert 'CONCURRENT' in res[0]['error_text'] or '429' in res[0]['error_text']
 
 
+def test_apibackend_persona_required_message():
+    class PersonaClient(FakeClient):
+        persona_required = True
+        def authenticate(self): return False
+
+    be = wb.ApiBackend('e', 'p', client=PersonaClient())
+    res = be.simulate_batch([{'idx': 1, 'code': 'x', 'desc': '', 'settings': {}}],
+                            wqb_username='e', wqb_password='p')
+    assert res[0]['mode'] == 'error' and 'Persona' in res[0]['error_text']
+
+
 def test_dispatch_routes_by_account_type(monkeypatch):
     import server.wqb_browser as wbz
     called = {}

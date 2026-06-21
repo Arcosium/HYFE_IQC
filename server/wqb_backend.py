@@ -25,7 +25,10 @@ class ApiBackend:
                        forced_delay=None, stop_event=None) -> list[dict]:
         results = []
         if not self._client.authenticate():
-            return [self._err(s, 'WQB API 인증 실패 (RC 자격증명/권한 확인)') for s in batch]
+            msg = ('WQB biometric(Persona) 인증 필요 — 대시보드에서 완료'
+                   if getattr(self._client, 'persona_required', False)
+                   else 'WQB API 인증 실패 (RC 자격증명/권한 확인)')
+            return [self._err(s, msg) for s in batch]
         for s in batch:
             if stop_event is not None and stop_event.is_set():
                 break
