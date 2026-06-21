@@ -96,6 +96,21 @@ def _api_post_auth(username: str, password: str):
     return sess.post(_WQB_API_BASE + '/authentication', timeout=30)
 
 
+def _resolve_persona_url(api_url: str) -> str:
+    """WQB '/authentication/persona?inquiry=...' 는 302 로 Persona 호스팅
+    verify 페이지(worldquantbrain.withpersona.com)로 리다이렉트한다. 그 최종
+    URL 을 따라가 반환한다. 네트워크 실패 등 어떤 문제든 입력 api_url 로 폴백.
+    (단위테스트에서는 monkeypatch 로 대체해 네트워크를 타지 않게 한다.)"""
+    try:
+        rr = _requests.get(api_url, timeout=10, allow_redirects=False)
+        loc = rr.headers.get('Location')
+        if rr.status_code in (301, 302, 303, 307, 308) and loc and 'withpersona.com' in loc:
+            return loc
+    except Exception:
+        pass
+    return api_url
+
+
 def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
     """WQB API 직접 인증 (Research Consultant 전용).
 
@@ -129,11 +144,17 @@ def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
         inq = body.get('inquiry') if isinstance(body, dict) else None
         loc = (getattr(r, 'headers', {}) or {}).get('Location')
         if loc and loc.startswith('/'):
-            url = f'{_WQB_API_BASE}/authentication{loc}'
+            # loc is root-relative and ALREADY includes '/authentication/...'
+            # (e.g. '/authentication/persona?inquiry=...') — do NOT prepend
+            # '/authentication' again (that double-path 404s).
+            url = f'{_WQB_API_BASE}{loc}'
         elif inq:
             url = f'{_WQB_API_BASE}/authentication/persona?inquiry={inq}'
         else:
             url = f'{_WQB_API_BASE}/authentication'
+        # Follow the WQB 302 to the Persona-hosted verify page (the real
+        # biometric URL the user must open); fall back to the API url.
+        url = _resolve_persona_url(url)
         return {'ok': False, 'reason': 'wqb_persona_required',
                 'detail': 'WQB biometric(Persona) 인증 필요 — 대시보드에서 1회 완료하세요.',
                 'persona_url': url}
