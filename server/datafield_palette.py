@@ -41,6 +41,17 @@ from typing import Any
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 DATAFIELDS_CSV = os.path.join(_THIS_DIR, 'IQC_brain_datafields.csv')
+_LIVE_CSV_PATH = os.path.join(os.path.dirname(_THIS_DIR), 'data', 'live_datafields.csv')
+
+
+def _default_datafields_path() -> str:
+    """라이브 CSV가 존재하고 비어있지 않으면 우선, 아니면 정적 CSV."""
+    try:
+        if os.path.exists(_LIVE_CSV_PATH) and os.path.getsize(_LIVE_CSV_PATH) > 0:
+            return _LIVE_CSV_PATH
+    except OSError:
+        pass
+    return DATAFIELDS_CSV
 
 # path+mtime-keyed cache: dict mapping (path, mtime_or_None) -> list[dict]
 # Keying on path prevents a test-injected file with the same mtime as the
@@ -187,7 +198,7 @@ def build_palette(
     universe: 'str | None' = None,
     n: int = 55,
     seed: int = 0,
-    _csv_path: str = DATAFIELDS_CSV,   # injectable for tests
+    _csv_path: 'str | None' = None,   # injectable for tests; None = auto-detect live vs static
 ) -> str:
     """Build a compact, diverse datafield palette for a Gemini alpha prompt.
 
@@ -206,6 +217,8 @@ def build_palette(
     or '' on any error (caller falls back gracefully).
     """
     try:
+        if _csv_path is None:
+            _csv_path = _default_datafields_path()
         rows = _load_csv(_csv_path)
         if not rows:
             return ''
