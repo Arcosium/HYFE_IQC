@@ -29,6 +29,7 @@
 
 ### 비목표 (Out of scope)
 - 대시보드 "데이터셋 탐색" UI 뷰 — **하지 않음** (완전 자동화 목표). 라이브 데이터는 생성 팔레트로만 흐른다.
+- **RC 알파의 WQB 쪽 별표/제출(list 추가) — Phase 1에서 연기** (2026-06-21 사장 결정, 최종 whole-branch 리뷰 Important#1). Phase 1의 `ApiBackend`는 시뮬·채점·자기상관·DB저장까지 동작하며 `submitted=False`로 둔다. WQB list/submit API의 정확한 엔드포인트는 `scripts/wqb_api_smoke.py` 라이브 확정이 선행돼야 하므로, 별표/제출 배선은 스모크 이후 **후속 단계**로 미룬다. (시스템은 이미 Submit→correlation-gated 별표로 전환돼 있고 self_correlation은 metrics에 수집되므로 기능 손실은 "WQB 리스트 자동 등록"에 한정.)
 - 브라우저 경로(`_wqb_pw_worker.py`)의 리팩터/개선 — 이번 변경에서 손대지 않는다(seam 추출 외).
 - Gemini 알파 생성 로직·AST·bandit·settings·reward·DB 스키마(아래 추가 컬럼 외) 변경 — 불변.
 
@@ -112,7 +113,7 @@ class WqbBackend(Protocol):
 - `poll_simulation(sim_id) -> (status, alpha_id)` — `GET /simulations/{sim_id}` 폴링. `COMPLETE`/`ERROR`/`FAIL` 판정. `_stop_event` 와 deadline(예: 720s) 체크.
 - `fetch_checks(alpha_id) -> is_status,metrics` — `GET /alphas/{alpha_id}` 의 `is.checks` 파싱 → 기존 `is_status:{pass/fail/error}` + `metrics` 매핑(브라우저 worker의 정규화 키와 동일하게: sharpe, fitness, turnover, subuniverse_sharpe, self_correlation, weight 등).
 - `read_self_correlation(alpha_id) -> float` — `GET /alphas/{alpha_id}/correlations/self` 의 max 값.
-- `submit_alpha(alpha_id)` — `POST /alphas/{alpha_id}/submit` (제출 활성 시).
+- `submit_alpha(alpha_id)` — `POST /alphas/{alpha_id}/submit` (제출 활성 시). **Phase 1 미배선** — 비목표 참조(스모크 후 후속 단계).
 
 `simulate_batch(...)` 구현: batch를 순회(동시 시뮬 한도 존중, 5.7 참조) → 각 알파 submit→poll→fetch_checks→(corr)→partial_fn → 결과 dict 누적. `_stop_event`(proc_holder가 아닌 worker의 stop_event를 주입) set이면 즉시 중단.
 
