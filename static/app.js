@@ -152,6 +152,7 @@
     try { startStreaming(); } catch (e) { console.error('startStreaming init', e); }
     try { refreshBest(); } catch (e) { console.error('refreshBest init', e); }
     try { initDelayMode(); } catch (e) { console.error('initDelayMode', e); }
+    try { checkPersonaStatus(); } catch (e) { console.error('checkPersonaStatus init', e); }
     if (statusTimer) clearInterval(statusTimer);
     if (bestTimer) clearInterval(bestTimer);
     statusTimer = setInterval(refreshStatus, 5000);
@@ -445,6 +446,48 @@
       } catch (_) {}
       btnClearSubmits.disabled = false;
       try { refreshBest(); } catch (_) {}
+    });
+  }
+
+  // ── Persona 배너 ─────────────────────────────────────────
+  const _personaBanner = document.getElementById('persona-banner');
+  const _personaLink   = document.getElementById('persona-link');
+  const _personaStatus = document.getElementById('persona-status');
+  const _btnPersonaComplete = document.getElementById('btn-persona-complete');
+
+  async function checkPersonaStatus() {
+    try {
+      const r = await api('/api/account/wqb-persona-status');
+      if (r.ok && r.data && r.data.persona_required) {
+        if (_personaLink)  _personaLink.href = r.data.persona_url || '#';
+        if (_personaStatus) _personaStatus.textContent = '';
+        if (_personaBanner) _personaBanner.removeAttribute('hidden');
+      } else {
+        if (_personaBanner) _personaBanner.setAttribute('hidden', '');
+      }
+    } catch (e) {
+      console.error('checkPersonaStatus 실패', e);
+    }
+  }
+
+  if (_btnPersonaComplete) {
+    _btnPersonaComplete.addEventListener('click', async () => {
+      _btnPersonaComplete.disabled = true;
+      if (_personaStatus) _personaStatus.textContent = '저장 중…';
+      try {
+        const r = await api('/api/account/wqb-persona-complete', { method: 'POST' });
+        if (r.ok && r.data && r.data.ok) {
+          if (_personaStatus) _personaStatus.textContent = '인증 완료 — 세션 저장됨';
+          if (_personaBanner) _personaBanner.setAttribute('hidden', '');
+        } else {
+          const msg = (r.data && (r.data.detail || r.data.reason)) || '알 수 없는 오류';
+          if (_personaStatus) _personaStatus.textContent = '오류: ' + msg;
+          _btnPersonaComplete.disabled = false;
+        }
+      } catch (e) {
+        if (_personaStatus) _personaStatus.textContent = '네트워크 오류: ' + (e && e.message ? e.message : e);
+        _btnPersonaComplete.disabled = false;
+      }
     });
   }
 

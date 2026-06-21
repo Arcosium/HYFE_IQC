@@ -51,6 +51,13 @@
 
   <!-- ── 대시보드 화면 ── -->
   <main id="screen-dashboard" class="screen" hidden>
+    <div id="persona-banner" hidden class="persona-banner">
+      <p>이 RC 계정은 WQB biometric(Persona) 인증이 필요합니다.
+        <a id="persona-link" href="#" target="_blank" rel="noopener">여기서 완료하기 ↗</a></p>
+      <button type="button" id="btn-persona-complete">완료했습니다 — 세션 저장</button>
+      <span id="persona-status"></span>
+    </div>
+
     <section class="control-row">
       <div class="status-block">
         <div class="kv"><span class="k">상태:</span> <span class="v" id="state-text">idle</span></div>
