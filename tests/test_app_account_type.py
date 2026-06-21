@@ -64,12 +64,18 @@ def _client():
 
 
 def test_login_rejects_unregistered(monkeypatch):
+    def _no_validate_login(*a, **kw):
+        raise AssertionError("validate_login must never be called from /api/login")
+    monkeypatch.setattr(app_mod._auth, 'validate_login', _no_validate_login)
     monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
     r = _client().post('/api/login', json={'wqb_username': 'new@x.com', 'wqb_password': 'pw'})
     assert r.status_code == 404 and r.get_json()['reason'] == 'not_registered'
 
 
 def test_login_existing_password_match(monkeypatch):
+    def _no_validate_login(*a, **kw):
+        raise AssertionError("validate_login must never be called from /api/login")
+    monkeypatch.setattr(app_mod._auth, 'validate_login', _no_validate_login)
     monkeypatch.setattr(app_mod._db, 'find_user_by_username',
                         lambda u: {'id': 2, 'wqb_password': 'pw', 'gemini_api_key': 'gk'})
     monkeypatch.setattr(app_mod._auth, 'validate_gemini_key', lambda k: {'ok': True})
