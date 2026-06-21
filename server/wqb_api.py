@@ -56,3 +56,99 @@ class WqbApiClient:
             if isf.get(k) is not None:
                 metrics[k] = str(isf[k])
         return {'metrics': metrics, 'is_status': out}
+
+    def submit_simulation(self, expr: str, settings: dict) -> str | None:
+        if not self._ensure_auth():
+            return None
+        body = {'type': 'REGULAR', 'settings': self._full_settings(settings), 'regular': expr}
+        try:
+            r = self.session.post(f'{BASE}/simulations', json=body)
+        except Exception as e:
+            LOG.warning('submit network err: %s', e); return None
+        if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
+            return 'RATE_LIMITED'
+        if r.status_code not in (200, 201):
+            return None
+        return r.headers.get('Location') or r.headers.get('location')
+
+    @staticmethod
+    def _full_settings(s: dict) -> dict:
+        # UI 기본값 채움. Task 2 스모크로 키/기본값 확정 후 필요시 조정.
+        return {
+            'instrumentType': 'EQUITY',
+            'region': s.get('region', 'USA'),
+            'universe': s.get('universe', 'TOP3000'),
+            'delay': int(s.get('delay', 1)),
+            'decay': int(s.get('decay', 0)),
+            'neutralization': s.get('neutralization', 'INDUSTRY'),
+            'truncation': float(s.get('truncation', 0.08)),
+            'pasteurization': s.get('pasteurization', 'ON'),
+            'unitHandling': s.get('unitHandling', 'VERIFY'),
+            'nanHandling': s.get('nanHandling', 'OFF'),
+            'language': 'FASTEXPR',
+            'visualization': False,
+        }
+
+    def poll(self, progress_url: str, stop_event=None, deadline_s: int = 720,
+             interval_s: float = 5.0, sleep=None) -> dict:
+        import time as _t
+        sleep = sleep or _t.sleep
+        loops = max(1, int(deadline_s / max(interval_s, 0.001)))
+        last = {'status': None, 'alpha': None, 'message': None, 'progress': None}
+        for _ in range(loops):
+            if stop_event is not None and stop_event.is_set():
+                self.cancel(progress_url)
+                return {'status': 'CANCELLED', 'alpha': None, 'message': '', 'progress': last.get('progress')}
+            try:
+                r = self.session.get(progress_url)
+                j = r.json() if r.ok else {}
+            except Exception as e:
+                j = {'message': str(e)}
+            last = {'status': j.get('status'), 'alpha': j.get('alpha'),
+                    'message': j.get('message'), 'progress': j.get('progress')}
+            if last['status'] in ('COMPLETE', 'ERROR', 'FAIL', 'WARNING'):
+                return last
+            sleep(interval_s)
+        # deadline 초과 — 슬롯 반환
+        self.cancel(progress_url)
+        return {'status': 'TIMEOUT', 'alpha': None, 'message': 'poll deadline', 'progress': last.get('progress')}
+
+    def cancel(self, progress_url: str) -> None:
+        if not progress_url:
+            return
+        try:
+            self.session.delete(progress_url)  # COMPLETE면 400 — 무해
+        except Exception:
+            pass
+
+    def read_self_correlation(self, alpha_id: str) -> float | None:
+        # Task 2 스모크로 경로/키 확정. 일반형: records 의 max.
+        if not alpha_id:
+            return None
+        try:
+            r = self.session.get(f'{BASE}/alphas/{alpha_id}/correlations/self')
+            if not r.ok:
+                return None
+            j = r.json()
+        except Exception:
+            return None
+        return _extract_max_correlation(j)
+
+
+def _extract_max_correlation(j) -> float | None:
+    """correlation 응답에서 max self-correlation 추출. 응답 형태가 여러 가지라 방어적."""
+    if not isinstance(j, dict):
+        return None
+    # 1) {'max': 0.4} 류
+    if isinstance(j.get('max'), (int, float)):
+        return float(j['max'])
+    # 2) {'records': [[...,corr], ...], 'schema': {...}} 류 — 모든 수치의 max
+    recs = j.get('records')
+    if isinstance(recs, list) and recs:
+        vals = []
+        for row in recs:
+            if isinstance(row, (list, tuple)):
+                vals += [x for x in row if isinstance(x, (int, float))]
+        if vals:
+            return max(vals)
+    return None

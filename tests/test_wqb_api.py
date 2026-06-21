@@ -35,3 +35,29 @@ def test_harvest_alpha_maps_checks():
     h = c.harvest_alpha('AB1')
     assert len(h['is_status']['pass']) == 1 and len(h['is_status']['fail']) == 1
     assert h['metrics']['sharpe'] == '2.1'
+
+def test_submit_returns_location():
+    sess = FakeSession()
+    sess.queue[('POST', '/simulations')] = [FakeResp(201, headers={'Location': 'https://api.worldquantbrain.com/simulations/SIM1'})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess); c._authed = True
+    url = c.submit_simulation('rank(close)', {'region': 'USA', 'universe': 'TOP3000', 'delay': 1, 'neutralization': 'INDUSTRY'})
+    assert url.endswith('/simulations/SIM1')
+
+def test_poll_until_complete():
+    sess = FakeSession()
+    sess.queue[('GET', '/simulations/SIM1')] = [
+        FakeResp(200, {'progress': 0.3, 'status': None, 'alpha': None}),
+        FakeResp(200, {'progress': 1.0, 'status': 'COMPLETE', 'alpha': 'AB1'}),
+    ]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess); c._authed = True
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1', deadline_s=30)
+    assert res['status'] == 'COMPLETE' and res['alpha'] == 'AB1'
+
+def test_poll_respects_stop_event():
+    import threading
+    sess = FakeSession()
+    sess.queue[('GET', '/simulations/SIM1')] = [FakeResp(200, {'progress': 0.1, 'status': None, 'alpha': None})] * 5
+    ev = threading.Event(); ev.set()
+    c = wqb_api.WqbApiClient('e', 'p', session=sess); c._authed = True
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1', stop_event=ev, deadline_s=30)
+    assert res['status'] == 'CANCELLED'
