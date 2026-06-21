@@ -277,7 +277,7 @@ def _failed_batch(strategies: list[dict], err: str) -> list[dict]:
 # 메인 진입점 — 워커가 호출. proc_holder 에 Popen 을 저장 → pause 시 kill.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_batch(
+def _browser_simulate_batch(
     strategies: list[dict], *,
     wqb_username: str, wqb_password: str,
     log_fn: Callable[[str], None] | None = None,
@@ -539,3 +539,35 @@ def simulate_batch(
             'is_status': is_status,
         })
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 공개 진입점 — account_type 에 따라 API 백엔드 또는 브라우저 경로로 분기.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def simulate_batch(
+    strategies: list[dict], *,
+    wqb_username: str, wqb_password: str,
+    account_type: str = 'standard',
+    log_fn: Callable[[str], None] | None = None,
+    proc_holder: dict[str, Any] | None = None,
+    partial_fn: Callable[[dict], None] | None = None,
+    forced_delay: str | None = None,
+    stop_event=None,
+) -> list[dict]:
+    """account_type=='research_consultant' → ApiBackend, else → Playwright 브라우저."""
+    if account_type == 'research_consultant':
+        from .wqb_backend import ApiBackend
+        be = ApiBackend(wqb_username, wqb_password)
+        return be.simulate_batch(
+            strategies,
+            wqb_username=wqb_username, wqb_password=wqb_password,
+            log_fn=log_fn, proc_holder=proc_holder, partial_fn=partial_fn,
+            forced_delay=forced_delay, stop_event=stop_event,
+        )
+    return _browser_simulate_batch(
+        strategies,
+        wqb_username=wqb_username, wqb_password=wqb_password,
+        log_fn=log_fn, proc_holder=proc_holder,
+        partial_fn=partial_fn, forced_delay=forced_delay,
+    )

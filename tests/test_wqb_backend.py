@@ -88,3 +88,21 @@ def test_simulate_batch_rate_limited():
                             wqb_username='e', wqb_password='p')
     assert res[0]['mode'] == 'error'
     assert 'CONCURRENT' in res[0]['error_text'] or '429' in res[0]['error_text']
+
+
+def test_dispatch_routes_by_account_type(monkeypatch):
+    import server.wqb_browser as wbz
+    called = {}
+    def fake_browser(batch, **kw): called['browser'] = True; return [{'idx': 1, 'mode': 'fail'}]
+    class FakeApi:
+        def __init__(self, *a, **k): pass
+        def simulate_batch(self, batch, **kw): called['api'] = True; return [{'idx': 1, 'mode': 'pass'}]
+    monkeypatch.setattr(wbz, '_browser_simulate_batch', fake_browser)
+    monkeypatch.setattr('server.wqb_backend.ApiBackend', FakeApi)
+    wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
+                       wqb_username='e', wqb_password='p', account_type='research_consultant')
+    assert called.get('api') and not called.get('browser')
+    called.clear()
+    wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
+                       wqb_username='e', wqb_password='p', account_type='standard')
+    assert called.get('browser') and not called.get('api')
