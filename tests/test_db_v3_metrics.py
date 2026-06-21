@@ -73,15 +73,16 @@ def test_new_round_columns_exist(isolated_db):
         assert col in cols, f"rounds 테이블에 '{col}' 컬럼 없음"
 
 
-# ─── 3. 버전 == 3 ─────────────────────────────────────────────────────────────
+# ─── 3. 버전 >= 3 ─────────────────────────────────────────────────────────────
+# v4 이후부터는 _SCHEMA_VERSION 이 3 초과일 수 있으므로 >= 3 으로 완화.
 
 def test_schema_version_is_3(isolated_db):
     _, tmp_db = isolated_db
-    assert db._SCHEMA_VERSION == 3, f"_SCHEMA_VERSION={db._SCHEMA_VERSION}"
+    assert db._SCHEMA_VERSION >= 3, f"_SCHEMA_VERSION={db._SCHEMA_VERSION}"
     conn = sqlite3.connect(tmp_db)
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert ver == 3, f"PRAGMA user_version={ver}, 3 기대"
+    assert ver >= 3, f"PRAGMA user_version={ver}, 3 이상 기대"
 
 
 # ─── 4. insert_alpha 가 metric 컬럼에 올바른 값 저장 ─────────────────────────
@@ -199,7 +200,7 @@ def test_migration_idempotent(isolated_db):
     conn = sqlite3.connect(tmp_db)
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
-    assert ver == 3, f"멱등 재실행 후 user_version={ver}"
+    assert ver >= 3, f"멱등 재실행 후 user_version={ver}"
 
 
 # ─── 7. 실제 data/ DB 미변경 ────────────────────────────────────────────────

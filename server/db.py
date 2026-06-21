@@ -35,7 +35,9 @@ from . import operator_catalog as _operator_catalog
 from . import settings_fp as _settings_fp
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.abspath(os.path.join(_THIS_DIR, '..', 'data', 'hyfe_iqc.db'))
+DB_PATH = os.environ.get('HYFE_DB_PATH') or os.path.abspath(
+    os.path.join(_THIS_DIR, '..', 'data', 'hyfe_iqc.db')
+)
 SECRET_KEY_PATH = os.path.abspath(os.path.join(_THIS_DIR, '..', 'data', '.fernet.key'))
 
 _DB_LOCK = threading.Lock()
@@ -45,12 +47,18 @@ _INITIALIZED = False
 # 스키마/데이터 마이그레이션 버전. ALTER·백필을 프로세스마다 재실행하지 않도록
 # PRAGMA user_version 게이트의 기준값. 향후 스키마/데이터 마이그레이션을
 # 추가하면 반드시 이 값을 올려야 새 마이그레이션이 1회 적용된다.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _FERNET: Fernet | None = None
 
 FEEDBACK_CAP = 30
 SESSION_TTL_SEC = 7 * 24 * 3600  # 7일
 SPACE_RX = re.compile(r'\s+')
+
+
+def _column_missing(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    """테이블에 col 컬럼이 없으면 True (마이그레이션 가드용)."""
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    return col not in cols
 
 
 def _coerce_float_or_none(v):
@@ -411,6 +419,13 @@ def init() -> None:
                     conn.execute(
                         "ALTER TABLE users ADD COLUMN focus_queue TEXT NOT NULL DEFAULT '[]'"
                     )
+
+                # v4: 계정 유형 (standard=브라우저, research_consultant=공식 API)
+                if _column_missing(conn, 'users', 'account_type'):
+                    conn.execute(
+                        "ALTER TABLE users ADD COLUMN account_type TEXT NOT NULL DEFAULT 'standard'"
+                    )
+
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         _INITIALIZED = True
 
@@ -578,7 +593,8 @@ def code_hash(code: str) -> str:
 # users
 # ─────────────────────────────────────────────────────────────────────────────
 
-def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str) -> int:
+def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str,
+                account_type: str = 'standard') -> int:
     """로그인 검증 통과 시 호출. 기존 user 면 자격증명 업데이트, 없으면 신규.
 
     반환: user_id.
@@ -594,16 +610,27 @@ def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str) -> in
             uid = int(row['id'])
             conn.execute(
                 'UPDATE users SET wqb_password_enc=?, gemini_api_key_enc=?, '
-                'last_login_at=?, last_validated_at=? WHERE id=?',
-                (pw_enc, key_enc, now, now, uid),
+                'last_login_at=?, last_validated_at=?, account_type=? WHERE id=?',
+                (pw_enc, key_enc, now, now, account_type, uid),
             )
             return uid
         cur = conn.execute(
             'INSERT INTO users (wqb_username, wqb_password_enc, gemini_api_key_enc, '
-            'created_at, last_login_at, last_validated_at) VALUES (?,?,?,?,?,?)',
-            (wqb_username, pw_enc, key_enc, now, now, now),
+            'account_type, created_at, last_login_at, last_validated_at) VALUES (?,?,?,?,?,?,?)',
+            (wqb_username, pw_enc, key_enc, account_type, now, now, now),
         )
         return int(cur.lastrowid)
+
+
+@_with_conn
+def get_account_type(conn, user_id: int) -> str:
+    row = conn.execute('SELECT account_type FROM users WHERE id=?', (user_id,)).fetchone()
+    return (row[0] if row and row[0] else 'standard')
+
+
+@_with_conn
+def set_account_type(conn, user_id: int, account_type: str) -> None:
+    conn.execute('UPDATE users SET account_type=? WHERE id=?', (account_type, user_id))
 
 
 def get_user(user_id: int) -> dict[str, Any] | None:
