@@ -23,6 +23,11 @@ import hashlib
 import logging
 from typing import Any
 
+import requests as _requests
+from requests.auth import HTTPBasicAuth as _HTTPBasicAuth
+
+_WQB_API_BASE = 'https://api.worldquantbrain.com'
+
 LOG = logging.getLogger('hyfe.auth')
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +83,43 @@ def validate_gemini_key(api_key: str) -> dict[str, Any]:
                     'detail': f'Gemini API 쿼터 초과: {msg[:200]}'}
         return {'ok': False, 'reason': 'gemini_network',
                 'detail': f'Gemini 호출 실패: {msg[:300]}'}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WQB API 검증 (Research Consultant 계정 전용)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _api_post_auth(username: str, password: str):
+    """POST /authentication 을 HTTPBasicAuth 로 호출. 테스트에서 monkeypatch 가능한 독립 함수."""
+    sess = _requests.Session()
+    sess.auth = _HTTPBasicAuth(username, password)
+    return sess.post(_WQB_API_BASE + '/authentication', timeout=30)
+
+
+def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
+    """WQB API 직접 인증 (Research Consultant 전용).
+
+    반환 reason 코드:
+      - ok                  : 200/201
+      - wqb_credentials     : 401 또는 빈 자격증명
+      - wqb_not_consultant  : 403 — API 접근 권한 없음
+      - wqb_unreachable     : 연결 실패 또는 기타 HTTP 오류
+    """
+    if not username or not password:
+        return {'ok': False, 'reason': 'wqb_credentials', 'detail': '아이디/비밀번호 비어있음'}
+    try:
+        r = _api_post_auth(username, password)
+    except Exception as e:
+        return {'ok': False, 'reason': 'wqb_unreachable',
+                'detail': f'API 인증 연결 실패: {type(e).__name__}: {e}'}
+    if r.status_code in (200, 201):
+        return {'ok': True, 'reason': 'ok', 'detail': 'WQB API 인증 성공'}
+    if r.status_code == 401:
+        return {'ok': False, 'reason': 'wqb_credentials', 'detail': 'WQB API 401 — 자격증명 거절'}
+    if r.status_code == 403:
+        return {'ok': False, 'reason': 'wqb_not_consultant',
+                'detail': 'WQB API 403 — Research Consultant 권한 없음(또는 API 미허용)'}
+    return {'ok': False, 'reason': 'wqb_unreachable', 'detail': f'WQB API 인증 HTTP {r.status_code}'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,15 +392,23 @@ def validate_wqb_login(username: str, password: str) -> dict[str, Any]:
 # 통합 검증 — 두 단계 순차
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_login(wqb_username: str, wqb_password: str, gemini_api_key: str) -> dict[str, Any]:
-    """둘 다 통과해야 ok. 어느 단계에서 실패했는지 명확히 반환."""
+def validate_login(wqb_username: str, wqb_password: str, gemini_api_key: str,
+                   account_type: str = 'standard') -> dict[str, Any]:
+    """둘 다 통과해야 ok. 어느 단계에서 실패했는지 명확히 반환.
+
+    account_type='research_consultant' 이면 WQB API 직접 인증,
+    그 외(기본값 'standard')는 Playwright 브라우저 인증.
+    """
     # 1) Gemini 먼저 (빠르고 비용 0).
     g = validate_gemini_key(gemini_api_key)
     if not g.get('ok'):
         return g
-    # 2) WQB.
-    w = validate_wqb_login(wqb_username, wqb_password)
+    # 2) WQB — account_type 에 따라 분기.
+    if account_type == 'research_consultant':
+        w = validate_wqb_api(wqb_username, wqb_password)
+    else:
+        w = validate_wqb_login(wqb_username, wqb_password)
     if not w.get('ok'):
         return w
     return {'ok': True, 'reason': 'ok',
-            'detail': f'Gemini + WQB 모두 통과. WQB final_url={w.get("final_url","")}'}
+            'detail': f'Gemini + WQB({account_type}) 모두 통과. WQB final_url={w.get("final_url","")}'}
