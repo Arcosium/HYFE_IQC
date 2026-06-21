@@ -50,8 +50,15 @@ def test_poll_until_complete():
         FakeResp(200, {'progress': 1.0, 'status': 'COMPLETE', 'alpha': 'AB1'}),
     ]
     c = wqb_api.WqbApiClient('e', 'p', session=sess); c._authed = True
-    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1', deadline_s=30)
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
+                 deadline_s=30, sleep=lambda _: None)
     assert res['status'] == 'COMPLETE' and res['alpha'] == 'AB1'
+
+def test_submit_rate_limited():
+    sess = FakeSession()
+    sess.queue[('POST', '/simulations')] = [FakeResp(429)]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess); c._authed = True
+    assert c.submit_simulation('rank(close)', {'region': 'USA', 'delay': 1}) == 'RATE_LIMITED'
 
 def test_poll_respects_stop_event():
     import threading
