@@ -174,6 +174,7 @@ class Worker(threading.Thread):
             self._stop_event.set()
             return
         username, password, api_key = creds
+        account_type = _db.get_account_type(self.user_id)
 
         u = _db.get_user(self.user_id)
         # focus 큐 우선 — PASS=6 알파에 대한 sub-round 가 대기중이면 그것을 먼저 실행.
@@ -561,6 +562,8 @@ class Worker(threading.Thread):
                     results = wqb_browser.simulate_batch(
                         batch,
                         wqb_username=username, wqb_password=password,
+                        account_type=account_type,
+                        stop_event=self._stop_event,
                         log_fn=None,  # [pw]/[playwright] 로그가 UI 로 흘러들어오지 않도록 끔
                         proc_holder=self._batch_proc_holder,
                         partial_fn=_on_partial,
@@ -598,6 +601,8 @@ class Worker(threading.Thread):
                         retry = wqb_browser.simulate_batch(
                             batch,
                             wqb_username=username, wqb_password=password,
+                            account_type=account_type,
+                            stop_event=self._stop_event,
                             log_fn=None,
                             proc_holder=self._batch_proc_holder,
                         )
