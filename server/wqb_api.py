@@ -1,27 +1,98 @@
 """WorldQuant BRAIN 공식 API 클라이언트 (Research Consultant 경로).
 계약은 _wqb_pw_worker.py 에서 검증된 형태를 그대로 미러링한다."""
 from __future__ import annotations
+import hashlib
 import logging
+import os
+import pickle
 import requests
 from requests.auth import HTTPBasicAuth
 
 LOG = logging.getLogger('hyfe.wqb_api')
 BASE = 'https://api.worldquantbrain.com'
 
+
+def _default_session_file(email: str) -> str:
+    h = hashlib.sha1((email or '').encode('utf-8')).hexdigest()[:16]
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'wqb_sessions')
+    return os.path.join(d, f'{h}.pkl')
+
+
 class WqbApiClient:
-    def __init__(self, email: str, password: str, session=None):
+    def __init__(self, email: str, password: str, session=None, session_file=None):
         self.email = email; self.password = password
         self.session = session or requests.Session()
         self.session.auth = HTTPBasicAuth(email, password)
+        # session_file semantics: None → default per-account path (worker/prod);
+        #   False → persistence DISABLED (unit tests / no-persist); str → that path.
+        if session_file is None:
+            self.session_file = _default_session_file(email)
+        elif session_file is False:
+            self.session_file = None  # disabled
+        else:
+            self.session_file = session_file
         self._authed = False
 
-    def authenticate(self) -> bool:
+    def _save_session(self) -> bool:
+        # pickle is safe here: we write only a plain str→str dict (cookie jar),
+        # and we read it back only from our own local data/ directory — no
+        # untrusted network source. Switching to JSON would be equally safe but
+        # the brief mandates pickle for requests.Session cookie round-trip compatibility.
         try:
-            r = self.session.post(BASE + '/authentication')
+            if not self.session_file:
+                return False  # persistence disabled
+            ck = self.session.cookies
+            d = ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)
+            if not d:
+                return False
+            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
+            tmp = self.session_file + '.tmp'
+            with open(tmp, 'wb') as f:
+                pickle.dump(d, f)
+            os.replace(tmp, self.session_file)
+            return True
+        except Exception as e:
+            LOG.warning('session save err: %s', e); return False
+
+    def _load_session(self) -> bool:
+        # pickle load is safe here: file is written exclusively by _save_session above
+        # (a plain str→str dict), stored in our own local data/ directory, never from
+        # a network or user-supplied path.
+        try:
+            if not self.session_file or not os.path.exists(self.session_file):
+                return False
+            with open(self.session_file, 'rb') as f:
+                d = pickle.load(f)
+            if not d:
+                return False
+            self.session.cookies.update(d)
+            return True
+        except Exception as e:
+            LOG.warning('session load err: %s', e); return False
+
+    def _session_valid(self) -> bool:
+        try:
+            r = self.session.get(f'{BASE}/authentication', timeout=15)
+            return r.ok and isinstance(r.json(), dict) and ('user' in r.json())
+        except Exception:
+            return False
+
+    def authenticate(self) -> bool:
+        # 1) reuse persisted session — no /authentication POST → no biometric
+        if self._load_session() and self._session_valid():
+            self._authed = True; return True
+        # 2) fresh Basic Auth (persona handling added in Task 2)
+        try:
+            r = self.session.post(f'{BASE}/authentication', timeout=30)
         except Exception as e:
             LOG.warning('authenticate network err: %s', e); return False
-        self._authed = r.status_code in (200, 201)
-        return self._authed
+        body = r.json() if (r.headers.get('Content-Type', '').startswith('application/json')) else {}
+        if r.status_code in (200, 201) and isinstance(body, dict) and 'user' in body:
+            self._save_session(); self._authed = True; return True
+        if r.status_code in (200, 201):  # success without explicit user body
+            self._save_session(); self._authed = True; return True
+        LOG.warning('authenticate failed: HTTP %s', r.status_code)
+        return False
 
     def _ensure_auth(self) -> bool:
         return self._authed or self.authenticate()
