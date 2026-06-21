@@ -19,6 +19,17 @@ def test_validate_wqb_api_not_consultant(monkeypatch):
     r = auth.validate_wqb_api('e', 'p')
     assert r['reason'] == 'wqb_not_consultant'
 
+def test_validate_wqb_api_persona(monkeypatch):
+    class R:
+        status_code=401
+        headers={'WWW-Authenticate':'persona','Content-Type':'application/json'}
+        text=''
+        def json(self): return {'inquiry':'inq_Z'}
+    monkeypatch.setattr(auth, '_api_post_auth', lambda u,p: R())
+    r=auth.validate_wqb_api('e','p')
+    assert r['ok'] is False and r['reason']=='wqb_persona_required'
+    assert 'inq_Z' in r.get('persona_url','')
+
 def test_validate_login_routes_rc(monkeypatch):
     monkeypatch.setattr(auth, 'validate_gemini_key', lambda k: {'ok': True, 'reason': 'ok'})
     monkeypatch.setattr(auth, 'validate_wqb_api', lambda u, p: {'ok': True, 'reason': 'ok'})

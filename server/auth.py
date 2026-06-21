@@ -114,6 +114,29 @@ def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
                 'detail': f'API 인증 연결 실패: {type(e).__name__}: {e}'}
     if r.status_code in (200, 201):
         return {'ok': True, 'reason': 'ok', 'detail': 'WQB API 인증 성공'}
+    body: dict = {}
+    try:
+        headers = getattr(r, 'headers', {}) or {}
+        if (headers.get('Content-Type', '') or '').startswith('application/json'):
+            body = r.json()
+    except Exception:
+        body = {}
+    is_persona = (
+        r.status_code == 401
+        and (getattr(r, 'headers', {}) or {}).get('WWW-Authenticate', '').lower() == 'persona'
+    ) or (isinstance(body, dict) and bool(body.get('inquiry')))
+    if is_persona:
+        inq = body.get('inquiry') if isinstance(body, dict) else None
+        loc = (getattr(r, 'headers', {}) or {}).get('Location')
+        if loc and loc.startswith('/'):
+            url = f'{_WQB_API_BASE}/authentication{loc}'
+        elif inq:
+            url = f'{_WQB_API_BASE}/authentication/persona?inquiry={inq}'
+        else:
+            url = f'{_WQB_API_BASE}/authentication'
+        return {'ok': False, 'reason': 'wqb_persona_required',
+                'detail': 'WQB biometric(Persona) 인증 필요 — 대시보드에서 1회 완료하세요.',
+                'persona_url': url}
     if r.status_code == 401:
         return {'ok': False, 'reason': 'wqb_credentials', 'detail': 'WQB API 401 — 자격증명 거절'}
     if r.status_code == 403:
