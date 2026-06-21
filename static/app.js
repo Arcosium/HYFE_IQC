@@ -60,6 +60,31 @@
     return false;
   }
 
+  // ── 탭 토글 ──────────────────────────────────────────────
+  const tabLoginBtn = $('#tab-login-btn');
+  const tabRegisterBtn = $('#tab-register-btn');
+  const formLogin = $('#form-login');
+  const formRegister = $('#form-register');
+
+  function showLoginTab() {
+    formLogin.removeAttribute('hidden');
+    formRegister.setAttribute('hidden', '');
+    tabLoginBtn.classList.add('active');
+    tabRegisterBtn.classList.remove('active');
+    setStatus('empty', '');
+  }
+
+  function showRegisterTab() {
+    formRegister.removeAttribute('hidden');
+    formLogin.setAttribute('hidden', '');
+    tabRegisterBtn.classList.add('active');
+    tabLoginBtn.classList.remove('active');
+    setStatus('empty', '');
+  }
+
+  if (tabLoginBtn) tabLoginBtn.addEventListener('click', showLoginTab);
+  if (tabRegisterBtn) tabRegisterBtn.addEventListener('click', showRegisterTab);
+
   // 검증 성공 시 보관할 사용자 정보 — 버튼 클릭 시 onLoggedIn 에 전달.
   let _pendingMe = null;
   const btnGoDashboard = $('#btn-go-dashboard');
@@ -73,13 +98,12 @@
     const btn = $('#btn-login');
     btn.disabled = true;
     btn.textContent = '검증 중... (최대 90초)';
-    setStatus('info', 'WQB + Gemini 검증 중. 신규 로그인은 30~60초 걸릴 수 있습니다.');
+    setStatus('info', 'WQB + Gemini 검증 중. 로그인은 30~60초 걸릴 수 있습니다.');
     btnGoDashboard.setAttribute('hidden', '');
     try {
-      const account_type = (document.querySelector('input[name="account_type"]:checked') || {}).value || 'standard';
       const r = await api('/api/login', {
         method: 'POST',
-        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember, account_type }),
+        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember }),
       });
       if (r.ok && r.data && r.data.ok) {
         // 자동 전환 대신 명시적 버튼을 띄움 — 사용자가 직접 클릭해서 이동.
@@ -90,13 +114,59 @@
       } else {
         const reason = (r.data && r.data.reason) || 'unknown';
         const detail = (r.data && r.data.detail) || '알 수 없는 오류';
-        setStatus('error', `[${reason}] ${reasonLabel(reason)} — ${detail}`);
+        if (r.status === 404 && reason === 'not_registered') {
+          setStatus('info', '가입되지 않은 계정입니다 — 회원가입 탭으로 이동하세요.');
+          showRegisterTab();
+        } else {
+          setStatus('error', `[${reason}] ${reasonLabel(reason)} — ${detail}`);
+        }
       }
     } catch (err) {
       setStatus('error', '네트워크 오류: ' + err.message);
     } finally {
       btn.disabled = false;
       btn.textContent = '로그인 검증 시작';
+    }
+  });
+
+  // ── 회원가입 제출 ─────────────────────────────────────────
+  $('#form-register').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const wqb_username = $('#reg_wqb_username').value.trim();
+    const wqb_password = $('#reg_wqb_password').value;
+    const gemini_api_key = $('#reg_gemini_api_key').value.trim();
+    const remember = !!($('#reg_remember_device') && $('#reg_remember_device').checked);
+    const account_type = (document.querySelector('input[name="reg_account_type"]:checked') || {}).value || 'standard';
+    const btn = $('#btn-register');
+    btn.disabled = true;
+    btn.textContent = '가입 중... (최대 90초)';
+    setStatus('info', 'WQB + Gemini 검증 중. 신규 가입은 30~60초 걸릴 수 있습니다.');
+    btnGoDashboard.setAttribute('hidden', '');
+    try {
+      const r = await api('/api/register', {
+        method: 'POST',
+        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember, account_type }),
+      });
+      if (r.ok && r.data && r.data.ok) {
+        setStatus('empty', '');
+        _pendingMe = r.data;
+        btnGoDashboard.removeAttribute('hidden');
+        btnGoDashboard.focus();
+      } else {
+        const reason = (r.data && r.data.reason) || 'unknown';
+        const detail = (r.data && r.data.detail) || '알 수 없는 오류';
+        if (r.status === 409 && reason === 'already_registered') {
+          setStatus('info', '이미 가입됨 — 로그인하세요.');
+          showLoginTab();
+        } else {
+          setStatus('error', `[${reason}] ${reasonLabel(reason)} — ${detail}`);
+        }
+      }
+    } catch (err) {
+      setStatus('error', '네트워크 오류: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '회원가입';
     }
   });
 
