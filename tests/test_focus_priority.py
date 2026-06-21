@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unittest
 
 from server import focus_priority
-from server.focus_priority import closeness_score, advance_focus_queue
+from server.focus_priority import closeness_score, advance_focus_queue, NEUTRAL_SCORE
 
 
 class TestClosenessScore(unittest.TestCase):
@@ -120,6 +120,16 @@ class TestClosenessScore(unittest.TestCase):
         # Neutral must be below even the farthest miss
         self.assertLess(neutral, far_miss)
         self.assertLess(neutral, near_miss)
+
+
+    def test_closeness_score_dict_items(self):
+        near = closeness_score([{'name': 'Sharpe', 'value': 1.20, 'cutoff': 1.25}])
+        far = closeness_score([{'name': 'Fitness', 'value': 0.30, 'cutoff': 1.0}])
+        assert near > far                      # near-miss closer to pass (less negative)
+        assert near != NEUTRAL_SCORE and far != NEUTRAL_SCORE
+
+    def test_closeness_score_dict_missing_values_is_neutral(self):
+        assert closeness_score([{'name': 'X', 'value': None, 'cutoff': None}]) == NEUTRAL_SCORE
 
 
 class TestFocusQueueSorting(unittest.TestCase):

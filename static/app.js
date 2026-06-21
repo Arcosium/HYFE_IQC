@@ -451,10 +451,14 @@
   // ── RC 전환 버튼 ─────────────────────────────────────────
   const _btnUpRc = document.getElementById('btn-upgrade-rc');
   if (_btnUpRc) _btnUpRc.addEventListener('click', async () => {
-    const r = await api('/api/account/upgrade-to-rc', { method: 'POST' });
-    const ok = r && r.data && r.data.ok;
-    alert(ok ? 'Research Consultant로 전환되었습니다.'
-             : ('전환 실패: ' + ((r && r.data && (r.data.detail || r.data.reason)) || '오류')));
+    try {
+      const r = await api('/api/account/upgrade-to-rc', { method: 'POST' });
+      const ok = r && r.data && r.data.ok;
+      alert(ok ? 'Research Consultant로 전환되었습니다.'
+               : ('전환 실패: ' + ((r && r.data && (r.data.detail || r.data.reason)) || '오류')));
+    } catch (e) {
+      alert('전환 실패: ' + (e && e.message ? e.message : e));
+    }
   });
 
   // ── 부팅 ─────────────────────────────────────────────────

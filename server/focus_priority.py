@@ -10,7 +10,8 @@ closeness_score(fail_items) -> float
   Formula: score = -sum(relative_gaps)   when at least one item parses
            score = NEUTRAL_SCORE         when no items parse (neutral sentinel)
 
-  For each fail item that can be parsed as:
+  For each fail item that can be parsed as a dict with numeric ``value`` and
+  ``cutoff`` keys, or as a string matching:
     'of VALUE is [below|above] cutoff of CUTOFF'
   we compute:
     relative_gap = abs(cutoff - value) / max(abs(cutoff), 1e-9)
@@ -74,21 +75,32 @@ def closeness_score(fail_items: object) -> float:
     parsed = 0
 
     for item in items:
-        try:
-            text = str(item)
-        except Exception:
-            continue
-
-        m = _FAIL_RX.search(text)
-        if not m:
-            continue
-
-        try:
-            value = float(m.group(1))
-            cutoff = float(m.group(2))
-        except (ValueError, IndexError):
-            continue
-
+        value = None
+        cutoff = None
+        # 1) dict fail items (API harvest / is_status dicts) with numeric value+cutoff
+        if isinstance(item, dict):
+            v = item.get('value')
+            c = item.get('cutoff')
+            try:
+                if v is not None and c is not None:
+                    value = float(v)
+                    cutoff = float(c)
+            except (ValueError, TypeError):
+                value = cutoff = None
+        # 2) fall back to parsing the WQB human-readable string
+        if value is None or cutoff is None:
+            try:
+                text = str(item)
+            except Exception:
+                continue
+            m = _FAIL_RX.search(text)
+            if not m:
+                continue
+            try:
+                value = float(m.group(1))
+                cutoff = float(m.group(2))
+            except (ValueError, IndexError):
+                continue
         gap = abs(cutoff - value) / max(abs(cutoff), 1e-9)
         total_gap += gap
         parsed += 1
