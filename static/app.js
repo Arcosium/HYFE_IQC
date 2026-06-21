@@ -530,14 +530,26 @@
   async function checkPersonaStatus() {
     try {
       const r = await api('/api/account/wqb-persona-status');
-      if (r.ok && r.data && r.data.persona_required) {
-        _personaInquiry = r.data.inquiry || '';
-        if (_personaLink)  _personaLink.href = r.data.persona_url || '#';
+      const d = r && r.data;
+      if (d && d.rate_limited) {
+        // 429 rate-limit: 배너를 띄워 사용자에게 알리되, complete 버튼은 비활성.
+        if (_personaStatus) _personaStatus.textContent = 'WQB 호출 한도 초과 — 1분 후 새로고침';
+        if (_personaLink)   _personaLink.removeAttribute('href');
+        if (_btnPersonaComplete) _btnPersonaComplete.disabled = true;
+        if (_personaBanner) _personaBanner.removeAttribute('hidden');
+      } else if (d && d.persona_required) {
+        _personaInquiry = d.inquiry || '';
+        if (_personaLink)  _personaLink.href = d.persona_url || '#';
         if (_personaStatus) _personaStatus.textContent = '';
+        if (_btnPersonaComplete) _btnPersonaComplete.disabled = false;
         if (_personaBanner) _personaBanner.removeAttribute('hidden');
       } else {
         _personaInquiry = '';
         if (_personaBanner) _personaBanner.setAttribute('hidden', '');
+      }
+      // RC 전환 버튼: 이미 research_consultant 이면 숨김.
+      if (_btnUpRc) {
+        _btnUpRc.hidden = (d && d.account_type === 'research_consultant');
       }
     } catch (e) {
       console.error('checkPersonaStatus 실패', e);

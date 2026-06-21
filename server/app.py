@@ -386,7 +386,11 @@ def api_upgrade_to_rc():
 
 @app.route('/api/account/wqb-persona-status', methods=['GET'])
 def api_wqb_persona_status():
-    """현재 사용자의 WQB 페르소나 완료 여부 확인."""
+    """현재 사용자의 WQB 페르소나 완료 여부 확인.
+
+    저장된 세션이 유효하면 POST /authentication 호출 없이 즉시 반환한다
+    (rate-limit 절약). 세션이 없거나 만료된 경우에만 인증 호출(최대 1회).
+    """
     uid = _current_user_id()
     if not uid:
         return _err('not_logged_in', '로그인이 필요합니다', 401)
@@ -394,11 +398,26 @@ def api_wqb_persona_status():
     if not creds:
         return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
     u, p, _ = creds
+    account_type = _db.get_account_type(uid)
+    # 1) 저장된 세션이 살아있으면 biometric 불필요 — POST /authentication 호출 없이 반환.
+    try:
+        from .wqb_api import WqbApiClient
+        c = WqbApiClient(u, p)
+        if c._load_session() and c._session_valid():
+            return jsonify({'persona_required': False, 'authenticated': True,
+                            'account_type': account_type})
+    except Exception:
+        pass
+    # 2) 세션 없음 → 인증 1회 호출. persona / rate-limit / 기타 분기.
     v = _auth.validate_wqb_api(u, p)
     if v.get('reason') == 'wqb_persona_required':
         return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', ''),
-                        'inquiry': v.get('inquiry', '')})
-    return jsonify({'persona_required': False, 'persona_url': '', 'ok': bool(v.get('ok'))})
+                        'inquiry': v.get('inquiry', ''), 'account_type': account_type})
+    if v.get('reason') == 'wqb_rate_limited':
+        return jsonify({'persona_required': False, 'rate_limited': True,
+                        'detail': v.get('detail', ''), 'account_type': account_type})
+    return jsonify({'persona_required': False, 'ok': bool(v.get('ok')),
+                    'account_type': account_type})
 
 
 @app.route('/api/account/wqb-persona-complete', methods=['POST'])

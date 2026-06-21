@@ -168,13 +168,28 @@ def test_upgrade_to_rc_rejected(client, monkeypatch):
 
 # ── Task 5: Persona status / complete endpoints ──────────────────────────────
 
+def _fake_wqb_client_no_session():
+    """WqbApiClient stub: _load_session() returns False so flow reaches validate_wqb_api."""
+    import server.wqb_api as wqb_api
+    class FakeCli:
+        def __init__(self, *a, **k): pass
+        def _load_session(self): return False
+        def _session_valid(self): return False
+        def complete_persona(self, inquiry=None): return True
+    return wqb_api, FakeCli
+
+
 def test_persona_status_and_complete(monkeypatch):
     import server.app as app_mod
     monkeypatch.setattr(app_mod, '_current_user_id', lambda: 2)
     monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
+    monkeypatch.setattr(app_mod._db, 'get_account_type', lambda uid: 'research_consultant')
     monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
         lambda u, p: {'ok': False, 'reason': 'wqb_persona_required',
                       'persona_url': 'https://x/persona?inquiry=Z', 'inquiry': 'inq_Z'})
+    # Ensure WqbApiClient._load_session() returns False so flow falls through to validate_wqb_api
+    wqb_api, FakeCli = _fake_wqb_client_no_session()
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli)
     cl = app_mod.app.test_client()
     r = cl.get('/api/account/wqb-persona-status')
     j = r.get_json()
@@ -182,16 +197,40 @@ def test_persona_status_and_complete(monkeypatch):
     # status response must include the raw inquiry
     assert j.get('inquiry') == 'inq_Z'
     # complete: FakeCli must accept the inquiry kwarg passed by the endpoint
-    import server.wqb_api as wqb_api
     captured = {}
-    class FakeCli:
+    class FakeCli2:
         def __init__(self, *a, **k): pass
+        def _load_session(self): return False
+        def _session_valid(self): return False
         def complete_persona(self, inquiry=None):
             captured['inquiry'] = inquiry
             return True
-    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli)
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli2)
     r2 = cl.post('/api/account/wqb-persona-complete',
                  data=json.dumps({'inquiry': 'inq_Z'}),
                  content_type='application/json')
     assert r2.get_json()['ok'] is True
     assert captured.get('inquiry') == 'inq_Z'
+
+
+def test_persona_status_rate_limited(monkeypatch):
+    """429 rate-limit 시 rate_limited=True 와 account_type 이 함께 반환되어야 한다."""
+    import server.app as app_mod
+    import server.wqb_api as wqb_api
+    monkeypatch.setattr(app_mod, '_current_user_id', lambda: 3)
+    monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
+    monkeypatch.setattr(app_mod._db, 'get_account_type', lambda uid: 'research_consultant')
+    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
+        lambda u, p: {'ok': False, 'reason': 'wqb_rate_limited',
+                      'detail': 'WQB API 인증 호출 한도(분당 5회) 초과 — 1분 후 다시 시도하세요.'})
+    class FakeCliNoSession:
+        def __init__(self, *a, **k): pass
+        def _load_session(self): return False
+        def _session_valid(self): return False
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCliNoSession)
+    cl = app_mod.app.test_client()
+    r = cl.get('/api/account/wqb-persona-status')
+    j = r.get_json()
+    assert j.get('rate_limited') is True, f"expected rate_limited=True, got {j}"
+    assert j.get('account_type') == 'research_consultant', f"missing account_type: {j}"
+    assert j.get('persona_required') is False

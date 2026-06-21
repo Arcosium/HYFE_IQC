@@ -69,3 +69,17 @@ def test_validate_login_routes_rc(monkeypatch):
     monkeypatch.setattr(auth, 'validate_wqb_api', lambda u, p: {'ok': True, 'reason': 'ok'})
     monkeypatch.setattr(auth, 'validate_wqb_login', lambda u, p: {'ok': False, 'reason': 'should_not_call'})
     assert auth.validate_login('e', 'p', 'g', account_type='research_consultant')['ok'] is True
+
+
+def test_validate_wqb_api_rate_limited(monkeypatch):
+    """`_api_post_auth` 가 429 반환 시 reason=wqb_rate_limited 이어야 한다."""
+    class R:
+        status_code = 429
+        text = ''
+        headers = {'X-RateLimit-Limit-Minute': '5'}
+        def json(self): return {}
+    monkeypatch.setattr(auth, '_api_post_auth', lambda u, p: R())
+    r = auth.validate_wqb_api('e', 'p')
+    assert r['ok'] is False
+    assert r['reason'] == 'wqb_rate_limited', f"got reason={r['reason']!r}"
+    assert 'detail' in r

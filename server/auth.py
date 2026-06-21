@@ -163,6 +163,9 @@ def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
     if r.status_code == 403:
         return {'ok': False, 'reason': 'wqb_not_consultant',
                 'detail': 'WQB API 403 — Research Consultant 권한 없음(또는 API 미허용)'}
+    if r.status_code == 429:
+        return {'ok': False, 'reason': 'wqb_rate_limited',
+                'detail': 'WQB API 인증 호출 한도(분당 5회) 초과 — 1분 후 다시 시도하세요.'}
     return {'ok': False, 'reason': 'wqb_unreachable', 'detail': f'WQB API 인증 HTTP {r.status_code}'}
 
 
