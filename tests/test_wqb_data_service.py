@@ -19,5 +19,13 @@ def test_write_live_csv_atomic_and_header(tmp_path):
     with open(p, newline='') as fh:
         rd = list(csv.DictReader(fh))
     assert rd[0]['name'] == 'x'
-    assert set(['name','category','coverage','description','type','date_coverage_pct',
-                'alphas','region','universe','delay']).issubset(rd[0].keys())
+    assert list(rd[0].keys()) == ds.CSV_COLUMNS
+
+
+def test_refresh_never_raises_on_house_client_exception(monkeypatch):
+    """_house_client() 이 예외를 던져도 refresh()는 절대 raise하지 않고 False를 반환해야 한다."""
+    def boom():
+        raise RuntimeError('DB locked')
+    monkeypatch.setattr(ds, '_house_client', boom)
+    result = ds.refresh()
+    assert result is False

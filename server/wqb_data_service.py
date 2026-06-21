@@ -67,12 +67,12 @@ def _house_client():
 def refresh(now_ts: float | None = None,
             grid=(('USA', 'TOP3000', 1), ('USA', 'TOP3000', 0))) -> bool:
     """하우스 계정으로 grid 별 /data-fields 페이지네이션 수집 → 라이브 CSV. 성공 True."""
-    c = _house_client()
-    if not c or not c.authenticate():
-        LOG.warning('house RC client 미가용 — 라이브 데이터 새로고침 skip')
-        return False
-    all_rows = []
     try:
+        c = _house_client()
+        if not c or not c.authenticate():
+            LOG.warning('house RC client 미가용 — 라이브 데이터 새로고침 skip')
+            return False
+        all_rows = []
         for region, universe, delay in grid:
             offset = 0
             while True:
