@@ -21,7 +21,7 @@ def client():
 
 def test_signup_passes_account_type(client, monkeypatch):
     """신규 가입 시 account_type='research_consultant' 가 validate_login 과
-    upsert_user 에 정확히 전달되어야 한다."""
+    upsert_user 에 정확히 전달되어야 한다. (가입 경로는 /api/register)"""
     captured = {}
 
     # 신규 사용자 — 찾을 수 없음
@@ -43,7 +43,7 @@ def test_signup_passes_account_type(client, monkeypatch):
     monkeypatch.setattr(app_mod._db, 'upsert_user', fake_upsert_user)
     monkeypatch.setattr(app_mod, '_issue_session', fake_issue_session)
 
-    r = client.post('/api/login', data=json.dumps({
+    r = client.post('/api/register', data=json.dumps({
         'wqb_username': 'user@example.com',
         'wqb_password': 'pass123',
         'gemini_api_key': 'AIzaSytest',
@@ -55,6 +55,62 @@ def test_signup_passes_account_type(client, monkeypatch):
         f"validate_login 에 account_type 미전달: {captured}"
     assert captured.get('upsert_account_type') == 'research_consultant', \
         f"upsert_user 에 account_type 미전달: {captured}"
+
+
+# ── Test 1b–1e: login/register split (Task 1) ────────────────────────────────
+
+def _client():
+    return app_mod.app.test_client()
+
+
+def test_login_rejects_unregistered(monkeypatch):
+    monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
+    r = _client().post('/api/login', json={'wqb_username': 'new@x.com', 'wqb_password': 'pw'})
+    assert r.status_code == 404 and r.get_json()['reason'] == 'not_registered'
+
+
+def test_login_existing_password_match(monkeypatch):
+    monkeypatch.setattr(app_mod._db, 'find_user_by_username',
+                        lambda u: {'id': 2, 'wqb_password': 'pw', 'gemini_api_key': 'gk'})
+    monkeypatch.setattr(app_mod._auth, 'validate_gemini_key', lambda k: {'ok': True})
+    monkeypatch.setattr(app_mod._db, 'update_user_secrets', lambda *a, **k: None)
+    monkeypatch.setattr(app_mod, '_issue_session',
+                        lambda uid, u, r: app_mod.jsonify({'ok': True, 'user_id': uid}))
+    r = _client().post('/api/login', json={'wqb_username': 'e', 'wqb_password': 'pw', 'gemini_api_key': 'gk'})
+    assert r.get_json().get('ok') is True
+
+
+def test_register_rejects_existing(monkeypatch):
+    monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: {'id': 2, 'wqb_password': 'pw'})
+    r = _client().post('/api/register', json={
+        'wqb_username': 'e', 'wqb_password': 'pw',
+        'gemini_api_key': 'gk', 'account_type': 'research_consultant',
+    })
+    assert r.status_code == 409 and r.get_json()['reason'] == 'already_registered'
+
+
+def test_register_creates_with_account_type(monkeypatch):
+    monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
+    captured = {}
+
+    def fake_validate(u, p, g, account_type='standard'):
+        captured['vl'] = account_type
+        return {'ok': True, 'reason': 'ok'}
+
+    def fake_upsert(u, p, g, account_type='standard'):
+        captured['up'] = account_type
+        return 7
+
+    monkeypatch.setattr(app_mod._auth, 'validate_login', fake_validate)
+    monkeypatch.setattr(app_mod._db, 'upsert_user', fake_upsert)
+    monkeypatch.setattr(app_mod, '_issue_session',
+                        lambda uid, u, r: app_mod.jsonify({'ok': True}))
+    r = _client().post('/api/register', json={
+        'wqb_username': 'new@x.com', 'wqb_password': 'pw',
+        'gemini_api_key': 'gk', 'account_type': 'research_consultant',
+    })
+    assert r.get_json().get('ok') is True
+    assert captured['vl'] == 'research_consultant' and captured['up'] == 'research_consultant'
 
 
 # ── Test 2: Upgrade success ──────────────────────────────────────────────────
