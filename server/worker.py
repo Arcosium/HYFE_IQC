@@ -49,6 +49,14 @@ FOCUS_MAX_PER_ROUND = int(os.environ.get('HYFE_IQC_FOCUS_MAX_PER_ROUND', '2'))
 # (정확 중복은 code_hash dedup 이 이미 잡음, 복잡도 캡은 유지). 탐색 라운드는 영향 없음.
 FOCUS_OVERLAP_DROP = int(os.environ.get('HYFE_IQC_FOCUS_OVERLAP_DROP', '0'))
 
+
+def _round_label(round_num: int, parent_idx: int, phase: int) -> str:
+    """계층 라운드 라벨 = {base}-{부모알파}-{개선깊이}.
+    탐색(base, phase 0) 은 정수 그대로('3'), focus 는 '2-2-3' (round 2 의 알파 #2 를 깊이 3 개선)."""
+    if phase and phase > 0:
+        return f'{round_num}-{parent_idx}-{phase}'
+    return str(round_num)
+
 # focus 진입 절대 하한선 — closeness_score(통과까지의 상대 gap 합의 음수) 가 이 값보다
 # 낮은(=통과에서 너무 먼) 부모는 directed-mutation 으로 정제해도 가망이 없으므로 큐에
 # 넣지 않고 예산을 탐색으로 돌린다. delay=0 은 Sharpe 통과가 본래 어려워 hopeless 부모가
@@ -217,7 +225,7 @@ class Worker(threading.Thread):
             )
             kind_tag = '🚫 corr 회피' if focus_kind == 'correlation' else '🔧 fail 개선'
             self._log(round_num,
-                      f'═══ ROUND {round_num}-{phase} 시작 ({kind_tag}, on #{parent_idx}, fix: {fail_desc[:60]}) ═══',
+                      f'═══ ROUND {_round_label(round_num, parent_idx, phase)} 시작 ({kind_tag}, on #{parent_idx}, fix: {fail_desc[:60]}) ═══',
                       level='round_start')
         else:
             round_num = int((u or {}).get('last_round_num') or 0) + 1
@@ -334,7 +342,7 @@ class Worker(threading.Thread):
         try:
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
-                self._log(round_num, f'1) Gemini focused 10 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
+                self._log(round_num, f'1) Gemini focused 8 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
                 # correlation 모드는 직교화 가이드 위해 제출/거절 알파 코드를 함께 전달
                 # (submitted_codes 는 위에서 이미 제출+거절 합본으로 만들어 둠).
                 _submitted_for_corr = list(submitted_codes) if focus_kind == 'correlation' else []
@@ -398,7 +406,7 @@ class Worker(threading.Thread):
                     self._log_quiet(round_num, f'⚠ RECOMBINE 경로 예외, EXPLORE 폴백: {_e}')
                     strategies = None
                 if not strategies:
-                    self._log(round_num, '1) Gemini 10 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
+                    self._log(round_num, '1) Gemini 8 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
                     strategies = gemini_strategist.generate_strategies(
                         api_key=api_key,
                         round_num=round_num,
@@ -511,8 +519,10 @@ class Worker(threading.Thread):
 
             if do_simulate and not self._stop_event.is_set():
                 batch = to_simulate
+                _sim_mode = ('RC API 동시' if account_type == 'research_consultant'
+                             else '1탭 순차')
                 self._log(round_num,
-                          f'  ── 라운드 시뮬 시작 (1탭 순차) — 알파 {len(batch)}개 '
+                          f'  ── 라운드 시뮬 시작 ({_sim_mode}) — 알파 {len(batch)}개 '
                           f'#{[s_["idx"] for s_ in batch]}')
                 # 어떤 전략을 테스트하는지 (idx + desc) 로그에 한 줄씩 노출.
                 for s_ in batch:
@@ -759,7 +769,7 @@ class Worker(threading.Thread):
                               level='pass')
 
             status = 'paused' if self._stop_event.is_set() else 'done'
-            label = f'{round_num}-{phase}' if phase > 0 else str(round_num)
+            label = _round_label(round_num, parent_idx, phase)
             summary = (f'═══ ROUND {label} {status} — 시도 {len(all_results)} / '
                        f'PASS≥{PASS_THRESHOLD} {pass_total} / 오류 {err_total} / '
                        f'캐시히트 {cache_hit_total} ═══')

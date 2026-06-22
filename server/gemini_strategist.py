@@ -1,4 +1,4 @@
-"""Gemini 2.5 Flash 로 10개 알파를 한 번에 생성. DB 기반 feedback/errors 사용.
+"""Gemini 2.5 Flash 로 8개 알파를 한 번에 생성. DB 기반 feedback/errors 사용.
 
 원본 ArcAI.ve/Daily/IQC/gemini_strategist.py 의 알파 생성 로직을 그대로 사용하되:
   - API 키는 user_id 별로 받음 (env 폴백 없음).
@@ -50,7 +50,7 @@ brain_operators.csv / IQC_brain_datafields.csv 는 **참고용 일부 목록일 
 [가장 중요 — 상관관계 0.7 벽 깨기]
 이 계정은 이미 price/return·기초 펀더멘털 위주의 알파를 30개 넘게 제출했다. 그래서 비슷한 발상은 거의 다 self-corr > 0.7 로 막힌다. **익숙하고 안전한 수식으로 후퇴하는 것이 진짜 실패다.** 매 배치는 서로, 그리고 기존 풀과 달라야 한다.
 - **문법 오류를 두려워하지 마라.** 틀린 식별자·새 조합으로 에러가 나도 그 에러는 저장·학습되어 다음 배치를 좋게 만든다. 모르는 필드라도 가설이 좋으면 시도하라 — 잃는 건 시뮬 한 칸, 얻는 건 새 영역이다.
-- 매 알파 = 서로 다른 **경제적 가설**. 한 배치 10개의 데이터셋·시간스케일·신호구조·settings 가 골고루 흩어져야 한다. 닮은 알파가 3개를 넘으면 실패다.
+- 매 알파 = 서로 다른 **경제적 가설**. 한 배치 8개의 데이터셋·시간스케일·신호구조·settings 가 골고루 흩어져야 한다. 닮은 알파가 3개를 넘으면 실패다.
 - **탈상관 레버 적극 사용**: 같은 신호라도 universe(TOP3000↔TOP500↔TOP200) 나 neutralization(SECTOR↔SUBINDUSTRY↔MARKET) 을 바꾸면 self-corr 가 크게 떨어진다 (공식 커리큘럼 권장). 한 배치 안에서 settings 를 분산하라.
 - 잘 안 쓰는 dataset 을 의도적으로 파라: 애널리스트(anl4_*) · 옵션IV(implied_volatility_*) · 현금흐름/배당(cashflow_*, dividend) · 뉴스/소셜(nws12_*, scl12_*, snt_*) · 모델파생(*_rank_derivative, mdl*).
 
@@ -124,15 +124,15 @@ WQB Settings 항목도 통과 여부에 직접 영향을 준다. 각 알파의 �
   - nan_handling: OFF (default) | ON — 결측 많은 fundamental/option 데이터 알파엔 ON 을 적극 섞어 탈상관.
 
 [출력 형식 — 반드시 준수]
-JSON 만 출력. 코드 블록(```), 사족 절대 금지. 정확히 10개 객체:
+JSON 만 출력. 코드 블록(```), 사족 절대 금지. 정확히 8개 객체:
 [
   {"code": "<한 줄 알파 수식>",
    "desc": "<한국어 1줄 요약, 60자 이내 — 어떤 가설/데이터/구조인지>",
    "settings": {"universe":"TOP3000", "neutralization":"INDUSTRY", "decay":4, "truncation":0.01}},
-  ...총 10개...
+  ...총 8개...
 ]
 settings 는 일부 키만 적어도 됨 (생략 키는 default).
-10개 알파의 가설 · 데이터소스 · 신호구조 · settings 가 서로 충분히 달라야 한다. 비슷한 알파 반복은 실패다.
+8개 알파의 가설 · 데이터소스 · 신호구조 · settings 가 서로 충분히 달라야 한다. 비슷한 알파 반복은 실패다.
 🚨 출력 가드(엄수): JSON 배열만. markdown 코드펜스·따옴표 래핑·"분석 결과"/"개선된 알파" 류 사족 절대 금지.
 ✅ 올바른 응답 시작: [{"code": "...", ...
 ❌ 잘못: 다음은 제안 알파입니다: [{..."""
@@ -440,7 +440,7 @@ def _build_dynamic_section(round_num: int, feedback: list[dict],
             )
         parts.append('')
 
-    parts.append('위 학습 자료를 바탕으로 PASS 7개 이상을 노리는 10개 알파를 JSON 으로만 출력하라.')
+    parts.append('위 학습 자료를 바탕으로 PASS 7개 이상을 노리는 8개 알파를 JSON 으로만 출력하라.')
     return '\n'.join(parts)
 
 
@@ -459,7 +459,7 @@ def _build_building_blocks_section(seeds: list[dict]) -> str:
         '  · 같은 operator 구조에 다른 시간 윈도우 (lookback)',
         '  · 두 building block 을 결합 (rank(A) - rank(B), trade_when(condition, A, B), if_else)',
         '  · group_neutralize 의 group 만 변경 (sector ↔ industry ↔ subindustry)',
-        '10개 알파 중 절반 정도는 이 building block 의 변형/조합, 나머지는 새로운 시도가 좋다.',
+        '8개 알파 중 절반 정도는 이 building block 의 변형/조합, 나머지는 새로운 시도가 좋다.',
     ]
     for s in seeds[:5]:
         sh = s.get('_sharpe', 0.0)
@@ -491,7 +491,7 @@ def _build_preference_section(stats: dict) -> str:
         parts.append('직전 알파들에서 PASS 평균이 높았던 datafield (avg_pass, n_used):')
         for name, avg, n in stats['top_fields']:
             parts.append(f'  · {name}: avg_pass={avg}, n={n}')
-    parts.append('이 통계는 권장사항. 다양성도 중요하니 단일 operator/field 에 10개 모두 몰리지 마라.')
+    parts.append('이 통계는 권장사항. 다양성도 중요하니 단일 operator/field 에 8개 모두 몰리지 마라.')
     return '\n'.join(parts)
 
 
@@ -540,7 +540,7 @@ def _build_user_prompt_full(round_num: int, feedback: list[dict],
     if not datafields:
         datafields = _read_csv_text(DATAFIELDS_CSV)
     parts = [
-        f"라운드 #{round_num} — 10개 알파를 새로 생성하라.",
+        f"라운드 #{round_num} — 8개 알파를 새로 생성하라.",
         "",
         "===== brain_operators.csv =====",
         operators,
@@ -566,7 +566,7 @@ def _build_user_prompt_cached(round_num: int, feedback: list[dict],
                                seeds_section: str = '',
                                research_notes: str = '') -> str:
     # 원본과 byte-동일: 기존 `A + '\n' + B + ...` == `'\n'.join([A,B,...])`.
-    base = f"라운드 #{round_num} — 10개 알파를 새로 생성하라.\n\n" + '\n'.join(
+    base = f"라운드 #{round_num} — 8개 알파를 새로 생성하라.\n\n" + '\n'.join(
         _common_sections(round_num, feedback, errors, avoid_codes,
                          submitted_codes, seeds, pref_stats))
     slot_block = _format_slot_settings(slot_settings)
@@ -584,7 +584,7 @@ def _build_challenging_section() -> str:
         '',
         '===== 🔥 다양성 / 도전적 전략 의무사항 =====',
         '최근 라운드 캐시 히트가 누적되고 있다. 같은 패턴을 반복 생성 중이라는 강한 신호다.',
-        '10개 알파가 서로 다른 가설/데이터소스/구조를 갖도록 분산하라 (같은 패턴 3개 초과 금지). 예:',
+        '8개 알파가 서로 다른 가설/데이터소스/구조를 갖도록 분산하라 (같은 패턴 3개 초과 금지). 예:',
         '  • 자주 안 쓰는 dataset 적극 활용 — anl4 (analyst), fnd6 (fundamental), news18/socialmedia12, mdf 등',
         '  • 비표준 universe / group_* 함수로 sector/industry 슬라이스 신호화',
         '  • 다중 신호 결합 — alpha = 0.6 * sigA + 0.4 * sigB - 0.3 * sigC',
@@ -787,7 +787,7 @@ def _delay_directive(forced_delay: str | None) -> str:
                 '  5) neutralization(SECTOR/INDUSTRY/SUBINDUSTRY)으로 시장노이즈를 제거해 Sharpe·Sub-universe '
                 'Sharpe 를 끌어올려라(delay=0 에서 거의 필수).\n'
                 '★ 탈상관(self-corr<0.7) — delay=0 은 필드가 PV 로 묶여 데이터셋 다양성이 없으니 남은 레버는 '
-                'settings·구조뿐이다. 10개 알파를 **(universe × neutralization) 서로 다른 칸**에 강제 분산하라 '
+                'settings·구조뿐이다. 8개 알파를 **(universe × neutralization) 서로 다른 칸**에 강제 분산하라 '
                 '(TOP200/500/1000/3000 × MARKET/SECTOR/INDUSTRY/SUBINDUSTRY). 또한 기존 제출풀은 delay=1 '
                 '신호라, "어제 반전을 오늘 실행" 류는 그 풀과 겹친다 — delay=1 이 물리적으로 못 잡는 **당일 '
                 '인트라데이 반응**(오늘 open→현재가/vwap, 당일 volume 급증→당일 포지션)을 노려야 진짜 직교한다.\n'
@@ -799,7 +799,7 @@ def _delay_directive(forced_delay: str | None) -> str:
                 '  (그룹/중립화용: market, sector, industry, subindustry — group_rank/group_neutralize 에만)\n'
                 '\n'
                 '🎯 [구조적 다양성 의무 — Sharpe edge 의 핵심] delay=0 은 필드가 ~10개뿐이라 edge 는 '
-                '**같은 필드를 얼마나 다른 구조로 조합하느냐**에서 나온다. 10개 알파를 아래 서로 다른 '
+                '**같은 필드를 얼마나 다른 구조로 조합하느냐**에서 나온다. 8개 알파를 아래 서로 다른 '
                 'archetype 칸에 분산하라(같은 반전 신호 10번 복제 금지 — 이게 지금 PASS=5 천장의 주원인):\n'
                 '  1) 오버나이트 갭 반전: open 대비 전일 close 갭 (open/ts_delay(close,1)-1) 의 평균회귀\n'
                 '  2) 일중 위치 모멘텀: (close-open)/(high-low+ε) — 당일 봉 내 종가 위치\n'
@@ -895,7 +895,7 @@ def generate_strategies(
     effectiveness_priors: str | None = None,
     log_fn: Callable | None = None,
 ) -> list[dict]:
-    """10개 알파 생성. user_id 별 API 키 받음.
+    """8개 알파 생성. user_id 별 API 키 받음.
 
     avoid_codes: 이미 시뮬한 distinct 코드 리스트 — 정확히 동일 코드는 cache hit 으로
                  무시되니 다시 만들지 말라고 Gemini 에게 명시.
@@ -973,7 +973,7 @@ def generate_strategies(
                 clean = _filter_by_lint(strategies, log_fn=log_fn, forced_delay=forced_delay)
                 for new_idx, s in enumerate(clean, start=1):
                     s['idx'] = new_idx
-                if len(clean) < 10 and log_fn:
+                if len(clean) < 8 and log_fn:
                     log_fn(f'⚠ Gemini 가 {len(strategies)}개 중 {len(clean)}개만 lint 통과 — 그대로 진행')
                 if not clean:
                     last_err = ValueError(f'all {len(strategies)} strategies failed lint')
@@ -1012,7 +1012,7 @@ def _build_focused_prompt(round_num: int, phase: int, parent_idx: int,
                    if self_corr_value
                    else "- Self-Correlation cutoff 0.7 초과 → reject (정확한 값 미수집)")
         parts = [
-            f"라운드 #{round_num}-{phase} (focused — Self-Correlation 회피) — 10개 직교화 변형 알파를 생성하라.",
+            f"라운드 #{round_num}-{parent_idx}-{phase} (focused — Self-Correlation 회피) — 8개 직교화 변형 알파를 생성하라.",
             "",
             "===== 🚫 거절된 부모 알파 =====",
             f"- 부모 라운드 #{round_num} idx #{parent_idx}",
@@ -1030,7 +1030,7 @@ def _build_focused_prompt(round_num: int, phase: int, parent_idx: int,
             "  - 같은 datafield 에서 비슷한 통계량 (rank vs zscore 의 단순 교체)",
             "  - 같은 archetype 안에서 미세 조정",
             "",
-            "✅ 10개 모두 **서로 다른 직교화 차원** 으로 만들어라. 다음 중 분산되게:",
+            "✅ 8개 모두 **서로 다른 직교화 차원** 으로 만들어라. 다음 중 분산되게:",
             "  1. **다른 datafield/dataset 으로 동일 의도 재구현** — pv → fundamental(fnd6), anl4 → news/soc/mdf, returns → volume-derived",
             "  2. **다른 시간 윈도우** — 단기(5~10d) ↔ 장기(120~250d) (다른 진동 주파수)",
             "  3. **archetype 전환** — mean-reversion ↔ momentum ↔ event-driven ↔ micro-structure",
@@ -1058,7 +1058,7 @@ def _build_focused_prompt(round_num: int, phase: int, parent_idx: int,
 
     # === 기본 'fail' 모드 — PASS=6 FAIL=1 의 단일 실패 테스트만 개선 ===
     parts = [
-        f"라운드 #{round_num}-{phase} (focused sub-round — fail 개선) — 10개 변형 알파를 생성하라.",
+        f"라운드 #{round_num}-{parent_idx}-{phase} (focused sub-round — fail 개선) — 8개 변형 알파를 생성하라.",
         "",
         "===== 🎯 개선 대상 부모 알파 =====",
         f"- 부모 라운드 #{round_num} idx #{parent_idx}",
@@ -1071,12 +1071,12 @@ def _build_focused_prompt(round_num: int, phase: int, parent_idx: int,
         "이 부모 알파는 7개 PASS 중 1개만 FAIL 했다. PASS=6 FAIL=1 (PENDING=1) 상태.",
         f"이 단 하나의 실패한 테스트(\"{fail_desc}\")만 개선해야 한다. 다른 PASS 항목들을 깨뜨리지 마라.",
         "",
-        "다음 10개의 변형을 만들되, 각각 명확히 다른 접근으로 실패 테스트를 개선해야 한다:",
+        "다음 8개의 변형을 만들되, 각각 명확히 다른 접근으로 실패 테스트를 개선해야 한다:",
         "  1. 부모 코드의 핵심 구조는 유지하되 한두 부분만 의미 있게 바꿔라.",
         "  2. FAIL 한 테스트의 cutoff 와 방향을 의식해서 (예: turnover 가 너무 낮다면 더 활발한 시그널 필요).",
         "  3. window 크기, decay, neutralization, ts_* 함수, rank/zscore wrapping 변경 시도.",
         "  4. 다른 datafield 로 일부 교체. 단 검증된 building block 은 유지.",
-        "  5. 10개가 동일한 변형 패턴이면 안 됨. 서로 다른 가설을 10개.",
+        "  5. 8개가 동일한 변형 패턴이면 안 됨. 서로 다른 가설을 8개.",
         "",
         "각 알파의 desc 에는 '부모대비 무엇을 바꿨는지' 와 '왜 그게 실패 테스트를 개선할 것이라 보는지' 명시.",
     ]
@@ -1194,7 +1194,7 @@ def _build_crossover_prompt(parents: list, submitted_codes: list | None = None) 
     parts = [
         "===== 🧬 교차(Crossover) 알파 생성 =====",
         "아래 두 고성과 부모 알파의 성공 요소(연산자 선택·시간창·정규화·신호 방향·중립화)를",
-        "각각 추출한 뒤, 그것들을 **창의적으로 융합**해 새 알파 10개를 만들어라.",
+        "각각 추출한 뒤, 그것들을 **창의적으로 융합**해 새 알파 8개를 만들어라.",
         "각 알파는 두 부모와도, 서로와도 **구조적으로 달라야** 한다(단순 결합·복붙 금지).",
         "비율>곱>합 원칙, 회전 억제(ts_decay_linear/hump), group_neutralize 로 안정화.",
         "delay/settings 도 배치 안에서 분산하라.",
@@ -1213,7 +1213,7 @@ def _build_crossover_prompt(parents: list, submitted_codes: list | None = None) 
     parts += [
         "===== 융합 미션 =====",
         "1. 각 부모의 핵심 신호 구조(필드, 집계, 정규화, 방향)를 별도로 분석하라.",
-        "2. 두 부모의 강점을 결합한 10개의 **새로운** 하이브리드 알파를 생성하라.",
+        "2. 두 부모의 강점을 결합한 8개의 **새로운** 하이브리드 알파를 생성하라.",
         "3. 각 알파는 부모들과 서로 **구조적으로 달라야** 한다:",
         "   - 단순히 코드를 붙여 넣거나(연결 금지), 부모 코드를 그대로 반환 금지.",
         "   - 새로운 시간창/정규화/연산자 조합으로 동일 경제 가설을 재구현하라.",
@@ -1221,7 +1221,7 @@ def _build_crossover_prompt(parents: list, submitted_codes: list | None = None) 
         "4. 비율>곱>합 설계 원칙을 우선 적용.",
         "5. 회전 억제: ts_decay_linear(signal, 5~10) 또는 hump(x, hump=0.03) 활용.",
         "6. group_neutralize 로 섹터/산업 편향 제거.",
-        "7. settings(universe/neutralization/decay/delay)를 10개 안에서 골고루 분산.",
+        "7. settings(universe/neutralization/decay/delay)를 8개 안에서 골고루 분산.",
         "",
         "각 알파의 desc 에는 '부모1/부모2 에서 어떤 요소를 가져왔는지' 와",
         "'왜 그 조합이 Sharpe/Fitness 를 높일 것이라 보는지' 명시.",
@@ -1252,7 +1252,7 @@ def generate_crossover_strategies(
     forced_delay: str | None = None,
     log_fn: Callable | None = None,
 ) -> list[dict]:
-    """두 고성과 '생존자' 알파를 교차(crossover)해 구조적으로 다른 하이브리드 알파 10개를 생성.
+    """두 고성과 '생존자' 알파를 교차(crossover)해 구조적으로 다른 하이브리드 알파 8개를 생성.
 
     parents: list of dicts with keys 'code' (str), 'pass_count' (int), 'operators' (list).
              부모가 2개 미만이면 generate_strategies 로 폴백.
