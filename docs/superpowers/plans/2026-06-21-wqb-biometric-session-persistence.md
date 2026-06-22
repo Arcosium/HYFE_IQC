@@ -258,13 +258,16 @@ def test_complete_persona_saves_session(tmp_path):
     def _save_pending(self, persona_url):
         self.persona_url=persona_url; self.persona_required=True   # always signal, even if disabled
         try:
-            if not self._pending_file(): return   # persistence disabled — still signal above
+            pf=self._pending_file()
+            if not pf: return   # persistence disabled — still signal above
             ck=self.session.cookies
             d=ck.get_dict() if hasattr(ck,'get_dict') else dict(ck)
-            os.makedirs(os.path.dirname(self._pending_file()), exist_ok=True)
-            with open(self._pending_file(),'wb') as f:
-                pickle.dump({'cookies':d,'persona_url':persona_url}, f)
-            self.persona_url=persona_url; self.persona_required=True
+            os.makedirs(os.path.dirname(pf), mode=0o700, exist_ok=True)
+            try: os.chmod(os.path.dirname(pf), 0o700)
+            except OSError: pass
+            fd=os.open(pf, os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o600)   # owner-only (holds pre-auth cookies)
+            with os.fdopen(fd,'w') as f:
+                json.dump({'cookies':d,'persona_url':persona_url}, f)
         except Exception as e:
             LOG.warning('pending save err: %s', e)
 
@@ -282,7 +285,8 @@ def test_complete_persona_saves_session(tmp_path):
             if not os.path.exists(self._pending_file()): 
                 # maybe biometric already done out-of-band → try fresh auth
                 return self.authenticate()
-            with open(self._pending_file(),'rb') as f: pend=pickle.load(f)
+            with open(self._pending_file(),'r') as f: pend=json.load(f)
+            if not isinstance(pend, dict): return False
             self.session.cookies.update(pend.get('cookies') or {})
             url=pend.get('persona_url') or f'{BASE}/authentication/persona'
             # variant (a): POST .../authentication/persona with inquiry body

@@ -116,6 +116,7 @@ def _status_payload(uid: int) -> dict[str, Any]:
     s['errors_count'] = _db.total_errors_count(uid)
     s['latest_log_id'] = _db.latest_log_id(uid)
     s['last_cleared_log_id'] = _db.get_last_cleared_log_id(uid)
+    s['account_type'] = _db.get_account_type(uid)
     return s
 
 

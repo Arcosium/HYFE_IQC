@@ -5,11 +5,16 @@ import hashlib
 import json
 import logging
 import os
+import time as _time
 import requests
 from requests.auth import HTTPBasicAuth
 
 LOG = logging.getLogger('hyfe.wqb_api')
 BASE = 'https://api.worldquantbrain.com'
+
+# (connect, read) 타임아웃 — 시뮬 경로 requests 가 WQB 소켓에서 무한 대기하는 것을 차단.
+# read=45s 는 정상 응답엔 충분하고, 매달린 연결은 끊어 poll 루프가 전진하게 한다.
+_HTTP_TIMEOUT = (10, 45)
 
 
 def _default_session_file(email: str) -> str:
@@ -185,7 +190,7 @@ class WqbApiClient:
         if not alpha_id:
             return None
         try:
-            r = self.session.get(f'{BASE}/alphas/{alpha_id}')
+            r = self.session.get(f'{BASE}/alphas/{alpha_id}', timeout=_HTTP_TIMEOUT)
             if not r.ok:
                 return None
             data = r.json()
@@ -199,7 +204,12 @@ class WqbApiClient:
         for ch in checks:
             res = str(ch.get('result') or '').upper()
             nm = ch.get('name')
-            item = {'name': nm, 'value': ch.get('value'), 'cutoff': ch.get('limit'),
+            # value/cutoff 는 브라우저 스크레이퍼와 동일하게 **문자열** 계약을 지킨다.
+            # (워커 _short_metric_label/_extract_self_corr_value 가 `.strip()` 호출 → raw float 면 크래시)
+            v = ch.get('value'); lim = ch.get('limit')
+            item = {'name': nm,
+                    'value': '' if v is None else str(v),
+                    'cutoff': '' if lim is None else str(lim),
                     'result': res,
                     'desc': f"{nm}: {ch.get('result')} (value={ch.get('value')}, limit={ch.get('limit')})"}
             bucket = {'PASS': 'pass', 'FAIL': 'fail', 'PENDING': 'pending', 'ERROR': 'error'}.get(res)
@@ -216,7 +226,7 @@ class WqbApiClient:
             return None
         body = {'type': 'REGULAR', 'settings': self._full_settings(settings), 'regular': expr}
         try:
-            r = self.session.post(f'{BASE}/simulations', json=body)
+            r = self.session.post(f'{BASE}/simulations', json=body, timeout=_HTTP_TIMEOUT)
         except Exception as e:
             LOG.warning('submit network err: %s', e); return None
         if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
@@ -245,16 +255,17 @@ class WqbApiClient:
 
     def poll(self, progress_url: str, stop_event=None, deadline_s: int = 720,
              interval_s: float = 5.0, sleep=None) -> dict:
-        import time as _t
-        sleep = sleep or _t.sleep
-        loops = max(1, int(deadline_s / max(interval_s, 0.001)))
+        sleep = sleep or _time.sleep
+        # deadline 은 **벽시계**(monotonic) 기준이어야 한다. 루프-카운트 방식은 단일 GET 이
+        # 매달리면 영원히 한 바퀴를 못 돌아 deadline 이 도달 불가능해진다(라이브 무한 행 회귀).
+        start = _time.monotonic()
         last = {'status': None, 'alpha': None, 'message': None, 'progress': None}
-        for _ in range(loops):
+        while _time.monotonic() - start < deadline_s:
             if stop_event is not None and stop_event.is_set():
                 self.cancel(progress_url)
                 return {'status': 'CANCELLED', 'alpha': None, 'message': '', 'progress': last.get('progress')}
             try:
-                r = self.session.get(progress_url)
+                r = self.session.get(progress_url, timeout=_HTTP_TIMEOUT)
                 j = r.json() if r.ok else {}
             except Exception as e:
                 j = {'message': str(e)}
@@ -271,7 +282,7 @@ class WqbApiClient:
         if not progress_url:
             return
         try:
-            self.session.delete(progress_url)  # COMPLETE면 400 — 무해
+            self.session.delete(progress_url, timeout=_HTTP_TIMEOUT)  # COMPLETE면 400 — 무해
         except Exception:
             pass
 
@@ -280,7 +291,7 @@ class WqbApiClient:
         if not alpha_id:
             return None
         try:
-            r = self.session.get(f'{BASE}/alphas/{alpha_id}/correlations/self')
+            r = self.session.get(f'{BASE}/alphas/{alpha_id}/correlations/self', timeout=_HTTP_TIMEOUT)
             if not r.ok:
                 return None
             j = r.json()

@@ -3035,7 +3035,12 @@ def _api_harvest_alpha(page, alpha_id):
     for ch in checks:
         res = str(ch.get('result') or '').upper()
         nm = ch.get('name')
-        item = {'name': nm, 'value': ch.get('value'), 'cutoff': ch.get('limit'),
+        # value/cutoff 는 DOM 스크레이퍼(_scrape_is_testing_status)와 동일하게 **문자열** 계약 유지.
+        # (워커 _short_metric_label/_extract_self_corr_value 가 `.strip()` 호출 → raw float 면 크래시)
+        v = ch.get('value'); lim = ch.get('limit')
+        item = {'name': nm,
+                'value': '' if v is None else str(v),
+                'cutoff': '' if lim is None else str(lim),
                 'result': res,
                 'desc': f"{nm}: {ch.get('result')} (value={ch.get('value')}, limit={ch.get('limit')})"}
         if res == 'PASS':

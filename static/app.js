@@ -320,6 +320,15 @@
 
     btnStart.disabled = running && alive && !paused;
     btnPause.disabled = !alive || paused;
+
+    // 현재 계정 유형 표시 — RC 면 전환 안내/버튼 숨김.
+    const _isRc = s.account_type === 'research_consultant';
+    const _cur = document.getElementById('account-type-current');
+    if (_cur) _cur.textContent = _isRc ? 'Research Consultant' : '일반(Standard)';
+    const _prompt = document.getElementById('account-upgrade-prompt');
+    if (_prompt) _prompt.hidden = _isRc;
+    const _upBtn = document.getElementById('btn-upgrade-rc');
+    if (_upBtn) _upBtn.hidden = _isRc;
   }
 
   // ── 로그 backlog ─────────────────────────────────────────
