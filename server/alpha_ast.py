@@ -550,3 +550,38 @@ def structural_overlap(code, others):
         return best, best_i
     except Exception:
         return 0, -1
+
+
+# ---------------------------------------------------------------------------
+# Field hygiene — deterministic winsorize(ts_backfill(F,120),std=4) auto-wrap
+# ---------------------------------------------------------------------------
+# LLM 비순응 보완(참조: worldquant-miner machine_lib.process_datafields): base 데이터필드를
+# 코드 레벨에서 결정론적으로 위생 래핑해 Sharpe~0.2(결측갭+이상치 횡단면 지배)를 차단한다.
+_HYGIENE_GROUP_NAMES = {'sector', 'industry', 'subindustry', 'market', 'country'}
+_HYGIENE_LITERALS = {'true', 'false', 'nan'}
+_HYGIENE_ASSIGN_RX = re.compile(r'(\w+)\s*=(?!=)')   # sig_a= , std= , filter=  (== 은 제외)
+
+
+def apply_field_hygiene(code: str, *, backfill: int = 120, std: int = 4) -> str:
+    """base 데이터필드를 winsorize(ts_backfill(F, backfill), std=std) 로 자동 래핑.
+
+    제외: sig_ 중간변수·named-arg key(X=...)·group 명(sector 등)·리터럴·이미 ts_backfill 로
+    감싼 필드. vec_ 벡터 알파는 그대로 둔다(vec_* 별도 처리 필요). 절대 raise 안 함."""
+    try:
+        if not code or 'vec_' in code:
+            return code
+        fields = fields_used(code)
+        if not fields:
+            return code
+        assigned = set(_HYGIENE_ASSIGN_RX.findall(code))
+        exclude = assigned | _HYGIENE_GROUP_NAMES | _HYGIENE_LITERALS
+        # 긴 이름부터 — 짧은 필드가 긴 필드의 부분문자열일 때 오치환 방지
+        targets = sorted((f for f in fields if f not in exclude), key=len, reverse=True)
+        for f in targets:
+            wrapped = f'winsorize(ts_backfill({f}, {backfill}), std={std})'
+            # 단어경계 + 이미 ts_backfill( 안에 있는 필드는 건너뛴다(멱등)
+            pat = r'(?<!ts_backfill\()(?<!\w)' + re.escape(f) + r'(?!\w)'
+            code = re.sub(pat, wrapped, code)
+        return code
+    except Exception:
+        return code

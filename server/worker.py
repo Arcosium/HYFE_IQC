@@ -25,6 +25,7 @@ from . import wqb_browser
 from . import run_config
 from . import wqb_data_service
 from . import settings_fp as _settings_fp
+from . import alpha_ast as _alpha_ast
 from .focus_priority import closeness_score as _closeness_score
 from .focus_priority import advance_focus_queue as _advance_focus_queue
 from .focus_priority import NEUTRAL_SCORE as _NEUTRAL_SCORE
@@ -489,6 +490,18 @@ class Worker(threading.Thread):
                 self._log_quiet(round_num, f'⚠ 사전게이트 예외(무시하고 진행): {_e}')
 
             _db.update_round_status(round_id, 'simulating')
+
+            # 필드 위생 자동 래핑 — presim 게이트(신호 복잡도 평가) 이후·캐시/시뮬 이전.
+            # LLM 이 winsorize(ts_backfill(F,120),std=4) 를 안 붙여도 코드 레벨에서 결정론적
+            # 보장(Sharpe~0.2 차단). 멱등이라 Gemini 가 직접 감쌌어도 이중래핑 안 됨. 래핑된
+            # 코드를 이후 code_hash/cache/simulate/저장에 일관되게 사용한다.
+            for _s in strategies:
+                try:
+                    _hy = _alpha_ast.apply_field_hygiene(_s['code'])
+                    if _hy != _s['code']:
+                        _s['code'] = _hy
+                except Exception:
+                    pass
 
             # 캐시 hit 분리 (settings-aware 키: code_hash + settings_fingerprint).
             cached_results: list[dict] = []
