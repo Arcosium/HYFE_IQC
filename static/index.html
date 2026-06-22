@@ -25,16 +25,12 @@
 
       <!-- 로그인 폼 -->
       <form id="form-login" autocomplete="off">
-        <p class="subtitle">WQB 자격증명과 Gemini API 키를 입력하면 두 가지 모두 검증한 뒤 다음 화면으로 이동합니다.</p>
+        <p class="subtitle">WQB 자격증명을 입력하면 검증 후 다음 화면으로 이동합니다. 알파 생성은 서버의 로컬 LLM을 사용합니다.</p>
         <label>WQB 이메일
           <input type="email" id="wqb_username" required placeholder="example@domain.com" />
         </label>
         <label>WQB 비밀번호
           <input type="password" id="wqb_password" required placeholder="••••••••" />
-        </label>
-        <label>Gemini API 키 <span class="opt">(기존 계정은 비워두면 저장된 키 사용)</span>
-          <input type="text" id="gemini_api_key" placeholder="AIzaSy..." />
-          <small>새 키를 입력하면 저장된 키를 교체합니다. 기존 계정은 비워두면 저장된 키를 사용합니다.</small>
         </label>
         <label class="toggle inline-toggle">
           <span>기기에서 자동 로그인 (7일)</span>
@@ -45,16 +41,12 @@
 
       <!-- 회원가입 폼 -->
       <form id="form-register" autocomplete="off" hidden>
-        <p class="subtitle">WQB 자격증명과 Gemini API 키를 입력해 새 계정을 등록합니다.</p>
+        <p class="subtitle">WQB 자격증명을 입력해 새 계정을 등록합니다. 별도 LLM API 키는 필요하지 않습니다.</p>
         <label>WQB 이메일
           <input type="email" id="reg_wqb_username" required placeholder="example@domain.com" />
         </label>
         <label>WQB 비밀번호
           <input type="password" id="reg_wqb_password" required placeholder="••••••••" />
-        </label>
-        <label>Gemini API 키 <span class="opt">(신규 가입 시 필수)</span>
-          <input type="text" id="reg_gemini_api_key" placeholder="AIzaSy..." required />
-          <small>Google AI Studio (<a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a>) 에서 발급한 키.</small>
         </label>
         <label>계정 유형
           <span class="account-type-radios">

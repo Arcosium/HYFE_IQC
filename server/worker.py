@@ -187,7 +187,7 @@ class Worker(threading.Thread):
             self._log(0, '⚠ 자격증명 조회 실패 (user 가 삭제됐을 수 있음) — 워커 종료')
             self._stop_event.set()
             return
-        username, password, api_key = creds
+        username, password = creds
         account_type = _db.get_account_type(self.user_id)
 
         u = _db.get_user(self.user_id)
@@ -348,7 +348,6 @@ class Worker(threading.Thread):
                 # (submitted_codes 는 위에서 이미 제출+거절 합본으로 만들어 둠).
                 _submitted_for_corr = list(submitted_codes) if focus_kind == 'correlation' else []
                 strategies = gemini_strategist.generate_focused_strategies(
-                    api_key=api_key,
                     round_num=round_num,
                     phase=phase,
                     parent_idx=parent_idx,
@@ -400,7 +399,7 @@ class Worker(threading.Thread):
                                   f'1) 🧬 RECOMBINE — survivor 2개 융합 '
                                   f'(PASS {_p1.get("pass_count")} × {_p2.get("pass_count")})')
                         strategies = gemini_strategist.generate_crossover_strategies(
-                            api_key=api_key, round_num=round_num, parents=[_p1, _p2],
+                            round_num=round_num, parents=[_p1, _p2],
                             submitted_codes=submitted_codes, forced_delay=forced_delay,
                             log_fn=lambda line: self._log_quiet(round_num, line))
                 except Exception as _e:
@@ -409,7 +408,6 @@ class Worker(threading.Thread):
                 if not strategies:
                     self._log(round_num, '1) Gemini 8 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
                     strategies = gemini_strategist.generate_strategies(
-                        api_key=api_key,
                         round_num=round_num,
                         feedback=feedback,
                         errors=errors,
