@@ -1,6 +1,9 @@
-"""로그인 검증 — WQB 자격증명만 검증.
+"""로그인 검증 — WQB 자격증명 + Gemini API 키 둘 다 검증.
 
 각 단계마다 구체적 reason 코드를 반환:
+  - gemini_invalid     : Gemini API 키 자체가 401/403 (잘못된 키)
+  - gemini_quota       : 429 등 — 키는 맞는데 쿼터 초과
+  - gemini_network     : SDK/네트워크 오류
   - wqb_credentials    : WQB 로그인 폼이 자격증명 거절 (이메일/비밀번호 오타)
   - wqb_unreachable    : platform.worldquantbrain.com 접속 자체 실패 (서버/네트워크)
   - wqb_captcha        : Cloudflare 등 봇 챌린지 발견
@@ -37,15 +40,49 @@ if not os.path.exists(IQC_PYTHON):
 VALIDATE_TIMEOUT_SEC = 90  # WQB 로그인까지 90초.
 
 
-def validate_gemini_key(_legacy_api_key: str = '') -> dict[str, Any]:
-    """Deprecated compatibility shim. Local mode never validates or sends a key."""
-    return {'ok': True, 'reason': 'ok'}
-
-
 def _user_profile_dir(username: str) -> str:
     """user 별 격리된 chromium 프로필. 검증/실행 모두 같은 프로필을 재사용."""
     h = hashlib.sha1(username.encode('utf-8')).hexdigest()[:10]
     return os.path.expanduser(f'~/.hyfe_iqc_browser_{h}')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemini 검증
+# ─────────────────────────────────────────────────────────────────────────────
+
+def validate_gemini_key(api_key: str) -> dict[str, Any]:
+    """Gemini API 키를 가벼운 호출로 검증. 1회 generate_content 로 충분."""
+    if not api_key or len(api_key) < 10:
+        return {'ok': False, 'reason': 'gemini_invalid', 'detail': 'API 키가 비어있거나 너무 짧음'}
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except Exception as e:
+        return {'ok': False, 'reason': 'gemini_network',
+                'detail': f'google-genai SDK 임포트 실패: {e}'}
+
+    try:
+        client = genai.Client(api_key=api_key)
+        # 1 토큰만 생성 — 비용 거의 0.
+        resp = client.models.generate_content(
+            model='gemini-2.5-flash-lite',
+            contents='ping',
+            config=genai_types.GenerateContentConfig(max_output_tokens=4),
+        )
+        _ = (resp.text or '').strip()
+        return {'ok': True, 'reason': 'ok'}
+    except Exception as e:
+        msg = str(e)
+        ml = msg.lower()
+        if any(s in ml for s in ('api key not valid', 'invalid api key', 'permission_denied',
+                                  '401', '403', 'unauthenticated', 'unauthorized')):
+            return {'ok': False, 'reason': 'gemini_invalid',
+                    'detail': f'Gemini API 키가 유효하지 않습니다: {msg[:200]}'}
+        if any(s in ml for s in ('quota', 'rate limit', 'resource_exhausted', '429')):
+            return {'ok': False, 'reason': 'gemini_quota',
+                    'detail': f'Gemini API 쿼터 초과: {msg[:200]}'}
+        return {'ok': False, 'reason': 'gemini_network',
+                'detail': f'Gemini 호출 실패: {msg[:300]}'}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -402,14 +439,18 @@ def validate_wqb_login(username: str, password: str) -> dict[str, Any]:
 # 통합 검증 — 두 단계 순차
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_login(wqb_username: str, wqb_password: str, _legacy_api_key: str | None = None,
+def validate_login(wqb_username: str, wqb_password: str, gemini_api_key: str,
                    account_type: str = 'standard') -> dict[str, Any]:
-    """WQB 인증이 통과하면 ok를 반환한다.
+    """둘 다 통과해야 ok. 어느 단계에서 실패했는지 명확히 반환.
 
     account_type='research_consultant' 이면 WQB API 직접 인증,
     그 외(기본값 'standard')는 Playwright 브라우저 인증.
     """
-    # WQB — account_type 에 따라 분기.
+    # 1) Gemini 먼저 (빠르고 비용 0).
+    g = validate_gemini_key(gemini_api_key)
+    if not g.get('ok'):
+        return g
+    # 2) WQB — account_type 에 따라 분기.
     if account_type == 'research_consultant':
         w = validate_wqb_api(wqb_username, wqb_password)
     else:
@@ -417,4 +458,4 @@ def validate_login(wqb_username: str, wqb_password: str, _legacy_api_key: str | 
     if not w.get('ok'):
         return w
     return {'ok': True, 'reason': 'ok',
-            'detail': f'WQB({account_type}) 인증 통과. WQB final_url={w.get("final_url","")}'}
+            'detail': f'Gemini + WQB({account_type}) 모두 통과. WQB final_url={w.get("final_url","")}'}

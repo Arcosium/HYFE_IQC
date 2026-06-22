@@ -1,7 +1,7 @@
-"""로컬 Qwen 모델로 8개 알파를 한 번에 생성. DB 기반 feedback/errors 사용.
+"""Gemini 2.5 Flash 로 8개 알파를 한 번에 생성. DB 기반 feedback/errors 사용.
 
 원본 ArcAI.ve/Daily/IQC/gemini_strategist.py 의 알파 생성 로직을 그대로 사용하되:
-  - 로컬 OpenAI 호환 서버 URL은 환경변수로만 받으며 API 키는 사용하지 않음.
+  - API 키는 user_id 별로 받음 (env 폴백 없음).
   - feedback/errors 는 db.list_feedback / db.list_error_patterns 로부터 주입.
   - prompt cache 는 (model, csv_sig, gemini_key_hash) 키로 user 별 격리.
 """
@@ -16,85 +16,31 @@ import time
 import logging
 from typing import Any, Callable
 
+from google import genai
+from google.genai import types as genai_types
+
 from . import datafield_palette
 from . import alpha_seeds
-from . import local_llm
 
-
-# Compatibility facade: the generation code below retains its mature prompt and
-# parsing flow, but every former google-genai call is routed to the local client.
-class _Config:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
-class _Schema(_Config):
-    pass
-
-
-class _Types:
-    class Type:
-        ARRAY = 'array'
-        OBJECT = 'object'
-        STRING = 'string'
-    Schema = _Schema
-    GenerateContentConfig = _Config
-    CreateCachedContentConfig = _Config
-    Content = _Config
-    Part = _Config
-    Tool = _Config
-    GoogleSearch = _Config
-    ThinkingConfig = _Config
-
-
-class _Response:
-    def __init__(self, text: str):
-        self.text = text
-
-
-class _Models:
-    def generate_content(self, *, model, contents, config):
-        system = getattr(config, 'system_instruction', None)
-        if not system:
-            raise RuntimeError('local prompt caching is unavailable; retrying without cache')
-        return _Response(local_llm.generate_json(
-            system_instruction=system,
-            user_prompt=str(contents),
-            temperature=float(getattr(config, 'temperature', 0.9)),
-            max_tokens=int(getattr(config, 'max_output_tokens', 8192)),
-        ))
-
-
-class _Caches:
-    def create(self, **_kwargs):
-        raise RuntimeError('local prompt caching is unavailable')
-
-
-class _LocalClient:
-    def __init__(self, **_kwargs):
-        self.models = _Models()
-        self.caches = _Caches()
-
-
-class _GenAI:
-    Client = _LocalClient
-
-
-genai = _GenAI()
-genai_types = _Types()
-
-LOG = logging.getLogger('hyfe.local_llm')
+LOG = logging.getLogger('hyfe.gemini')
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 OPERATORS_CSV = os.path.join(_THIS_DIR, 'brain_operators.csv')
 DATAFIELDS_CSV = os.path.join(_THIS_DIR, 'IQC_brain_datafields.csv')
 
-MODEL = local_llm.DEFAULT_MODEL
+MODEL = 'gemini-2.5-flash'
+_FALLBACK_CHAIN_DEFAULT = (
+    'gemini-2.5-flash',
+    'gemini-flash-latest',
+    'gemini-2.5-flash-lite',
+)
 
 
 def _model_chain() -> tuple[str, ...]:
-    """One local model only; unlike the former cloud fallback chain."""
-    return (local_llm.model_name(),)
+    raw = os.environ.get('IQC_MODEL_CHAIN', '')
+    if raw:
+        return tuple(m.strip() for m in raw.split(',') if m.strip())
+    return _FALLBACK_CHAIN_DEFAULT
 
 
 SYSTEM_INSTRUCTION = """[역할]
@@ -886,7 +832,7 @@ def _delay_directive(forced_delay: str | None) -> str:
             'fundamental/analyst 등 모든 datafield 를 자유롭게 사용해도 된다.\n')
 
 
-def generate_research_notes(*, round_num: int, api_key: str | None = None,
+def generate_research_notes(*, api_key: str, round_num: int,
                             forced_delay: str | None = None,
                             log_fn: Callable | None = None) -> str:
     """One short Google-grounded call per round → 3 fresh factor hypotheses as text,
@@ -901,6 +847,8 @@ def generate_research_notes(*, round_num: int, api_key: str | None = None,
         if not run_config.is_grounding_enabled():
             return ''
     except Exception:
+        return ''
+    if not api_key:
         return ''
     if str(forced_delay) == '0':
         prompt = (
@@ -920,7 +868,7 @@ def generate_research_notes(*, round_num: int, api_key: str | None = None,
                'group_neutralize(x, sector) 처럼 bare group(IndClass/indneutralize 금지), '
                'exp/tanh/sigmoid 금지.')
     try:
-        client = genai.Client()
+        client = genai.Client(api_key=api_key)
         tools = [genai_types.Tool(google_search=genai_types.GoogleSearch())]
         # thinking_budget=0: 2.5-flash 의 thinking 토큰이 출력 예산을 잠식해 grounded
         # 응답이 ~30자에서 MAX_TOKENS 로 잘리던 문제 수정(라이브 디버깅으로 규명). thinking
@@ -942,6 +890,7 @@ def generate_research_notes(*, round_num: int, api_key: str | None = None,
 
 def generate_strategies(
     *,
+    api_key: str,
     round_num: int,
     feedback: list[dict] | None = None,
     errors: list[dict] | None = None,
@@ -966,7 +915,10 @@ def generate_strategies(
     cache_hit_ratio_hint: 직전 라운드 cache hit 비율. 0.5 이상이면 다양성 부족 → 온도 부스트.
     max_retries=None : 무한 재시도 (IQC 와 동일).
     """
-    client = genai.Client()
+    if not api_key:
+        raise RuntimeError('Gemini API key 없음 (HYFE_IQC user 자격 미설정)')
+
+    client = genai.Client(api_key=api_key)
     chain = _model_chain()
 
     # 캐시 hit ratio 에 따라 temperature 적극 부스팅.
@@ -988,7 +940,7 @@ def generate_strategies(
     import random as _rnd
     _seeds_list = alpha_seeds.sample_seeds(5, rng=_rnd.Random(round_num))
     seeds_section = alpha_seeds.render_seeds_section(_seeds_list)
-    research_notes = generate_research_notes(round_num=round_num,
+    research_notes = generate_research_notes(api_key=api_key, round_num=round_num,
                                              forced_delay=forced_delay, log_fn=log_fn)
 
     attempt = 0
@@ -997,7 +949,7 @@ def generate_strategies(
         last_err = None
         for m in chain:
             try:
-                cache_name = _get_or_create_prompt_cache(client, m, 'local', log_fn=log_fn)
+                cache_name = _get_or_create_prompt_cache(client, m, api_key, log_fn=log_fn)
                 if cache_name:
                     user_prompt = _build_user_prompt_cached(round_num, feedback or [], errors or [], avoid_codes or [], submitted_codes or [], seeds or [], pref_stats or {}, slot_settings=slot_settings, seeds_section=seeds_section, research_notes=research_notes)
                     cfg = genai_types.GenerateContentConfig(
@@ -1047,7 +999,7 @@ def generate_strategies(
                 last_err = e
                 err_str = str(e)
                 if 'cached_content' in err_str.lower() or 'cache' in err_str.lower():
-                    _PROMPT_CACHE.pop(_prompt_cache_key(m, 'local'), None)
+                    _PROMPT_CACHE.pop(_prompt_cache_key(m, api_key), None)
                 if log_fn:
                     log_fn(f'⚠ {m}: 호출 실패 — 다음 모델: {err_str[:120]}')
                 continue
@@ -1144,6 +1096,7 @@ def _build_focused_prompt(round_num: int, phase: int, parent_idx: int,
 
 def generate_focused_strategies(
     *,
+    api_key: str,
     round_num: int,
     phase: int,
     parent_idx: int,
@@ -1166,7 +1119,10 @@ def generate_focused_strategies(
       - 'fail'        : PASS=6 FAIL=1 의 단일 실패 테스트만 개선 (다른 PASS 유지).
       - 'correlation' : PASS=7+ 거절 — 본인 제출 알파와의 self-correlation 직교화.
     """
-    client = genai.Client()
+    if not api_key:
+        raise RuntimeError('Gemini API key 없음')
+
+    client = genai.Client(api_key=api_key)
     chain = _model_chain()
 
     # focused 모드는 베이스 prompt 가 다르므로 cache 안 씀 (미스 거의 보장).
@@ -1299,7 +1255,7 @@ def _build_crossover_prompt(parents: list, submitted_codes: list | None = None) 
 
 def generate_crossover_strategies(
     *,
-    api_key: str | None = None,
+    api_key: str,
     round_num: int,
     parents: list,
     submitted_codes: list | None = None,
@@ -1313,13 +1269,14 @@ def generate_crossover_strategies(
              부모가 2개 미만이면 generate_strategies 로 폴백.
     submitted_codes: 이미 WQB 에 제출 성공한 알파 코드 (self-corr 회피용).
     """
-    if api_key == '':
-        raise RuntimeError('local mode does not accept API keys')
+    if not api_key:
+        raise RuntimeError('Gemini API key 없음')
 
     if len(parents) < 2:
         if log_fn:
             log_fn('🧬 crossover: 부모 2개 미만 → generate_strategies 폴백')
         return generate_strategies(
+            api_key=api_key,
             round_num=round_num,
             forced_delay=forced_delay,
             log_fn=log_fn,
@@ -1329,7 +1286,7 @@ def generate_crossover_strategies(
         ids = ' × '.join(f"#{p.get('pass_count', '?')}" for p in parents[:2])
         log_fn(f'🧬 crossover 생성 (부모 {ids})')
 
-    client = genai.Client()
+    client = genai.Client(api_key=api_key)
     chain = _model_chain()
 
     # crossover 프롬프트는 매 호출마다 고유하므로 prompt cache 미사용.

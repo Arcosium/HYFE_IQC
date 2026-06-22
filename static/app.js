@@ -93,16 +93,17 @@
     e.preventDefault();
     const wqb_username = $('#wqb_username').value.trim();
     const wqb_password = $('#wqb_password').value;
+    const gemini_api_key = $('#gemini_api_key').value.trim();
     const remember = !!($('#remember_device') && $('#remember_device').checked);
     const btn = $('#btn-login');
     btn.disabled = true;
     btn.textContent = '검증 중... (최대 90초)';
-    setStatus('info', 'WQB 검증 중. 로그인은 30~60초 걸릴 수 있습니다.');
+    setStatus('info', 'WQB + Gemini 검증 중. 로그인은 30~60초 걸릴 수 있습니다.');
     btnGoDashboard.setAttribute('hidden', '');
     try {
       const r = await api('/api/login', {
         method: 'POST',
-        body: JSON.stringify({ wqb_username, wqb_password, remember }),
+        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember }),
       });
       if (r.ok && r.data && r.data.ok) {
         // 자동 전환 대신 명시적 버튼을 띄움 — 사용자가 직접 클릭해서 이동.
@@ -133,17 +134,18 @@
     e.preventDefault();
     const wqb_username = $('#reg_wqb_username').value.trim();
     const wqb_password = $('#reg_wqb_password').value;
+    const gemini_api_key = $('#reg_gemini_api_key').value.trim();
     const remember = !!($('#reg_remember_device') && $('#reg_remember_device').checked);
     const account_type = (document.querySelector('input[name="reg_account_type"]:checked') || {}).value || 'standard';
     const btn = $('#btn-register');
     btn.disabled = true;
     btn.textContent = '가입 중... (최대 90초)';
-    setStatus('info', 'WQB 검증 중. 신규 가입은 30~60초 걸릴 수 있습니다.');
+    setStatus('info', 'WQB + Gemini 검증 중. 신규 가입은 30~60초 걸릴 수 있습니다.');
     btnGoDashboard.setAttribute('hidden', '');
     try {
       const r = await api('/api/register', {
         method: 'POST',
-        body: JSON.stringify({ wqb_username, wqb_password, remember, account_type }),
+        body: JSON.stringify({ wqb_username, wqb_password, gemini_api_key, remember, account_type }),
       });
       if (r.ok && r.data && r.data.ok) {
         setStatus('empty', '');
@@ -183,6 +185,9 @@
 
   function reasonLabel(reason) {
     return ({
+      gemini_invalid: 'Gemini API 키가 잘못되었습니다',
+      gemini_quota: 'Gemini API 키 쿼터 초과 (다른 키를 시도하세요)',
+      gemini_network: 'Gemini API 호출 자체 실패 (네트워크/SDK)',
       wqb_credentials: 'WQB 아이디 또는 비밀번호가 잘못되었습니다',
       wqb_unreachable: 'WQB 사이트 접속 실패 (서버 또는 네트워크 문제)',
       wqb_captcha: 'WQB 사이트가 봇 챌린지를 표시했습니다 (잠시 후 재시도)',

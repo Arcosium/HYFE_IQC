@@ -1,7 +1,7 @@
 """HYFE_IQC 멀티유저 SQLite DB.
 
 스키마:
-  users      — WQB 자격증명(암호화) + 라운드 카운터
+  users      — WQB 자격증명(암호화) + Gemini API 키(암호화) + 라운드 카운터
   sessions   — 로그인 토큰 (쿠키)
   rounds     — user_id 별 라운드 (number, status, started/ended)
   alphas     — round 안의 알파 1개당 한 row (코드, pass_count, metrics, error)
@@ -593,7 +593,7 @@ def code_hash(code: str) -> str:
 # users
 # ─────────────────────────────────────────────────────────────────────────────
 
-def upsert_user(wqb_username: str, wqb_password: str, _legacy_api_key: str | None = None,
+def upsert_user(wqb_username: str, wqb_password: str, gemini_api_key: str,
                 account_type: str = 'standard') -> int:
     """로그인 검증 통과 시 호출. 기존 user 면 자격증명 업데이트, 없으면 신규.
 
@@ -602,9 +602,7 @@ def upsert_user(wqb_username: str, wqb_password: str, _legacy_api_key: str | Non
     init()
     now = time.time()
     pw_enc = encrypt(wqb_password)
-    # Legacy column is retained so existing SQLite databases remain readable.
-    # New registrations never receive or persist a cloud-provider API key.
-    key_enc = encrypt('')
+    key_enc = encrypt(gemini_api_key)
     with _DB_LOCK, _connect() as conn:
         row = conn.execute('SELECT id FROM users WHERE wqb_username=?',
                            (wqb_username,)).fetchone()
@@ -710,12 +708,12 @@ def list_running_user_ids() -> list[int]:
     return [int(r['id']) for r in rows]
 
 
-def get_user_credentials(user_id: int) -> tuple[str, str] | None:
-    """(wqb_username, wqb_password) — 워커가 사용."""
+def get_user_credentials(user_id: int) -> tuple[str, str, str] | None:
+    """(wqb_username, wqb_password, gemini_api_key) — 워커가 사용."""
     u = get_user(user_id)
     if not u:
         return None
-    return u['wqb_username'], u['wqb_password']
+    return u['wqb_username'], u['wqb_password'], u['gemini_api_key']
 
 
 @_with_conn

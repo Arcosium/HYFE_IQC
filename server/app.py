@@ -212,13 +212,17 @@ def static_files(path: str):
 def api_login():
     """기존 사용자 전용 로그인.
 
-    DB 에 등록된 사용자만 통과. 로컬 모델은 서버 설정으로 공유하므로
-    사용자 API 키를 받거나 검증하지 않는다.
+    DB 에 등록된 사용자만 통과. 비밀번호 일치 후 Gemini 키를 다음 우선순위로 확정:
+      1) 입력한 키가 유효 → 채택(변경 시 DB 갱신)
+      2) 입력 키가 없거나 무효지만 저장된 키가 유효 → 저장 키로 폴백
+         → 새 기기에서 ID+비밀번호만으로 로그인 가능
+      3) 입력·저장 둘 다 무효 → 새 키 발급 요구
     신규 가입은 /api/register 를 사용할 것.
     """
     body = request.get_json(silent=True) or {}
     wqb_username = (body.get('wqb_username') or '').strip()
     wqb_password = (body.get('wqb_password') or '').strip()
+    gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
 
     if not (wqb_username and wqb_password):
@@ -236,23 +240,51 @@ def api_login():
                     '저장된 자격증명과 일치하지 않습니다. WQB 비밀번호를 변경했다면 '
                     '관리자에게 record 초기화를 요청하세요.', 401)
 
+    # ── 비밀번호 일치 — Gemini 키 우선순위 확정 ──
     uid = int(existing['id'])
-    _db.update_user_secrets(uid)
-    LOG.info('login fast-path (local LLM): %s', wqb_username)
-    return _issue_session(uid, wqb_username, remember)
+    stored_key = existing.get('gemini_api_key') or ''
+
+    # 1) 입력한 키가 유효하면 채택 (변경됐으면 갱신).
+    if gemini_api_key:
+        g = _auth.validate_gemini_key(gemini_api_key)
+        if g.get('ok'):
+            LOG.info('login fast-path (existing, 입력 키 OK): %s', wqb_username)
+            if gemini_api_key != stored_key:
+                _db.update_user_secrets(uid, gemini_api_key=gemini_api_key)
+            else:
+                _db.update_user_secrets(uid)  # last_login_at touch
+            return _issue_session(uid, wqb_username, remember)
+        LOG.info('login fast-path (existing, 입력 키 무효:%s) — 저장 키로 폴백: %s',
+                 g.get('reason'), wqb_username)
+
+    # 2) 저장된 키로 폴백 (입력 키와 다를 때만 재검증 가치 있음).
+    if stored_key and stored_key != gemini_api_key:
+        gs = _auth.validate_gemini_key(stored_key)
+        if gs.get('ok'):
+            LOG.info('login fast-path (existing, 저장 키 폴백 OK): %s', wqb_username)
+            _db.update_user_secrets(uid)  # last_login_at touch
+            return _issue_session(uid, wqb_username, remember)
+
+    # 3) 입력 키도 저장 키도 무효 → 새 키 필요.
+    LOG.info('login fail (existing, 유효 Gemini 키 없음 — 입력·저장 모두 무효): %s',
+             wqb_username)
+    return _err('gemini_invalid',
+                'Gemini API 키가 만료/무효합니다. 새 키를 발급받아 입력해 주세요 '
+                '(https://aistudio.google.com/app/api-keys).', 401)
 
 
 @app.route('/api/register', methods=['POST'])
 def api_register():
     """신규 사용자 전용 가입.
 
-    이미 등록된 username 이면 409. account_type 화이트리스트
+    이미 등록된 username 이면 409. Gemini API 키 필수. account_type 화이트리스트
     적용(standard/research_consultant, 그 외는 standard 로 강등).
     기존 사용자 로그인은 /api/login 을 사용할 것.
     """
     body = request.get_json(silent=True) or {}
     wqb_username = (body.get('wqb_username') or '').strip()
     wqb_password = (body.get('wqb_password') or '').strip()
+    gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
     account_type = (body.get('account_type') or 'standard').strip()
     if account_type not in ('standard', 'research_consultant'):
@@ -265,6 +297,10 @@ def api_register():
         return _err('already_registered',
                     '이미 가입된 계정입니다. 로그인해 주세요.', 409)
 
+    if not gemini_api_key:
+        return _err('missing_fields',
+                    '신규 가입에는 Gemini API 키가 필요합니다.', 400)
+
     # chromium subprocess 보호용 in-flight 락 (같은 username 이 동시에
     # 두 번 풀 검증을 트리거하지 않도록).
     with _LOGIN_LOCK_LOCK:
@@ -276,7 +312,7 @@ def api_register():
 
     try:
         LOG.info('register attempt (full validation): %s', wqb_username)
-        result = _auth.validate_login(wqb_username, wqb_password, None, account_type=account_type)
+        result = _auth.validate_login(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
     finally:
         with _LOGIN_LOCK_LOCK:
             _LOGIN_IN_FLIGHT.discard(wqb_username)
@@ -286,7 +322,7 @@ def api_register():
                  wqb_username, result.get('reason'), result.get('detail'))
         return jsonify(result), 401
 
-    uid = _db.upsert_user(wqb_username, wqb_password, None, account_type=account_type)
+    uid = _db.upsert_user(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
     return _issue_session(uid, wqb_username, remember)
 
 
@@ -294,7 +330,7 @@ def api_register():
 def api_m_login():
     """모바일 light 로그인 — 아이디 / 비밀번호만으로 세션 발급.
 
-    이미 등록된 사용자만 통과.
+    이미 등록된 사용자만 통과 (Gemini 키는 신규 가입 / 갱신 시점에만 필요).
     워커는 desktop 에서 시작/제어하고, 모바일은 진행 상황만 본다.
     """
     body = request.get_json(silent=True) or {}
@@ -305,7 +341,7 @@ def api_m_login():
     existing = _db.find_user_by_username(wqb_username)
     if not existing:
         return _err('not_registered',
-                    '등록되지 않은 사용자입니다. 데스크톱에서 먼저 가입하세요.',
+                    '등록되지 않은 사용자입니다. 데스크톱에서 Gemini 키를 포함해 한 번 가입하세요.',
                     401)
     if existing.get('wqb_password') != wqb_password:
         return _err('wqb_credentials', '비밀번호가 일치하지 않습니다.', 401)

@@ -1,7 +1,7 @@
 # HYFE IQC — WorldQuant Brain Alpha Auto-Discovery
 
 > **Hybrid Financial Engineering — In-Contest Optimizer**
-> 로컬 Qwen LLM이 알파(트레이딩 시그널)를 생성하고, Playwright 가 WorldQuant Brain 에 24/7 자동 제출하는 멀티유저 자동화 봇.
+> Gemini 가 알파(트레이딩 시그널)를 생성하고, Playwright 가 WorldQuant Brain 에 24/7 자동 제출하는 멀티유저 자동화 봇.
 
 [WorldQuant Brain](https://platform.worldquantbrain.com) 은 트레이더가 알파(트레이딩 시그널) 을
 제출해 채점받는 글로벌 퀀트 컨테스트 플랫폼입니다.
@@ -10,7 +10,7 @@ HYFE IQC 는 이 과정을 끝에서 끝까지 자동화합니다 — 알파 발
 ## 한 줄 요약
 
 ```
-로컬 Qwen3.6-35B-A3B-Uncensored-Claude-Genesis-Q8_0.gguf 가 한 라운드에 알파를 생성
+Gemini 2.5 Flash 가 12개 알파를 한 라운드에 생성
   → Playwright 가 WQB 시뮬레이션 페이지에서 3개씩 동시 시뮬
   → IS Testing Status 패널 (PASS/FAIL/ERROR/PENDING 8개 항목) 을 scrape
   → PASS≥7 + FAIL=0 + ERROR=0 알파에 한해 자동으로 Submit 시도
@@ -38,7 +38,7 @@ HYFE IQC 는 이 과정을 끝에서 끝까지 자동화합니다 — 알파 발
 
 ```bash
 # 의존성
-python3 -m pip install --user --upgrade -r requirements.txt
+python3 -m pip install --user --upgrade flask google-genai cryptography python-dotenv
 sudo dnf install -y python3.11 python3.11-pip          # Playwright 전용 인터프리터
 python3.11 -m pip install --user playwright
 python3.11 -m playwright install chromium
@@ -46,10 +46,9 @@ python3.11 -m playwright install chromium
 # 기동
 git clone https://github.com/Arcosium/HYFE_IQC.git
 cd HYFE_IQC
-export IQC_LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1  # 로컬 OpenAI 호환 서버 URL
 ./run.sh                # 포트 8088 foreground
 # → http://localhost:8088 접속
-# → 첫 화면에서 WQB 이메일/비밀번호만 입력하면 끝
+# → 첫 화면에서 WQB 이메일/비밀번호 + Gemini API 키 입력하면 끝
 ```
 
 상세 운영(systemd, Cloudflare Tunnel, Nginx, 멀티유저 운영)은 아래로 계속 읽으세요.
@@ -59,7 +58,7 @@ export IQC_LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1  # 로컬 OpenAI 호환 �
 ## 기능 요약
 
 - **멀티유저** — WQB 아이디별 격리 (chromium 프로필 / 워커 스레드 / DB scope / 세션 쿠키)
-- **자동 라운드** — 로컬 LLM 알파 생성 → Playwright 4 배치 (3 동시 시뮬) → DB 저장 → 다음 라운드
+- **자동 라운드** — Gemini 12 알파 생성 → Playwright 4 배치 (3 동시 시뮬) → DB 저장 → 다음 라운드
 - **IS Tests scrape** — Show test period 클릭 → PASS/FAIL/ERROR/PENDING 4 섹션 자동 분류
 - **Submit Alpha 자동화** — PASS≥7 충족 시 Submit Alpha 버튼 클릭 + 확인 modal 처리
 - **Submit 결과 검증** — modal 닫힘 + 거절 텍스트 매칭 + post-submit 재 scrape 로 Submitted/Rejected 정확 분류
@@ -73,8 +72,9 @@ export IQC_LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1  # 로컬 OpenAI 호환 �
 
 ### 데스크톱 (`/`)
 
-1. **로그인** — WQB 이메일/비밀번호만 입력. Playwright 가 실제로 WQB 사이트에 로그인 시도한다. 로컬 LLM URL은 서버의 `IQC_LOCAL_LLM_BASE_URL`에서만 설정하며 API 키는 받지 않는다.
-   실패 시 다음 코드 중 하나 반환:
+1. **로그인** — WQB 이메일/비밀번호 + Gemini API 키 입력. Playwright 가 실제로 WQB 사이트에 로그인 시도하고, Gemini API 키도 작은 호출로 검증.
+   실패 시 다음 7가지 코드 중 하나 반환:
+   - `gemini_invalid` / `gemini_quota` / `gemini_network`
    - `wqb_credentials` / `wqb_unreachable` / `wqb_captcha`
    - `wqb_auth_required` — WQB 가 새 디바이스 인증 요구 (자동화 불가, 사용자가 한 번 직접 로그인 필요)
    - `playwright_setup` — 브라우저 자동화 시작 자체 실패
@@ -82,7 +82,7 @@ export IQC_LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1  # 로컬 OpenAI 호환 �
 
 ### 모바일 (`/m`, `/mobile`, 또는 모바일 UA 로 `/` 접속)
 
-1. **로그인** — 등록된 사용자만, ID + 비밀번호로 빠른 로그인
+1. **로그인** — 등록된 사용자만, ID + 비밀번호로 빠른 로그인 (Gemini 키 재입력 불필요)
 2. **상태 카드 4개**:
    - 현재 라운드 (실행/일시정지 태그)
    - 완료 라운드
@@ -121,8 +121,8 @@ export IQC_LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1  # 로컬 OpenAI 호환 �
 ## 기동
 
 ```bash
-# 의존성 (시스템 python3.9 — Flask, cryptography)
-python3 -m pip install --user --upgrade -r requirements.txt
+# 의존성 (시스템 python3.9 — Flask, google-genai, cryptography)
+python3 -m pip install --user --upgrade flask google-genai cryptography python-dotenv
 
 # Playwright 는 python3.11 (browser-use 와 동일 정책)
 sudo dnf install -y python3.11 python3.11-pip
@@ -253,7 +253,7 @@ CF SSL 모드 = Flexible (CF→origin HTTP) 또는 Full (origin cert 설치).
 | chromium 프로필 | `~/.hyfe_iqc_browser_<sha1(wqb_username)[:10]>/` |
 | 워커 thread | `worker._REGISTRY[user_id]` |
 | DB 데이터 | `users / rounds / alphas / errors / feedback / logs` 모두 `user_id` 컬럼 |
-| 로컬 LLM | 서버 공용 `IQC_LOCAL_LLM_BASE_URL`, 사용자 API 키 없음 |
+| Gemini API | 각자 자기 키 (공유 가능, quota 만 공유) |
 | WQB 시뮬 탭 번호 | 라벨 기반 전후 비교 (1/23/999 어떤 번호라도 동작) |
 | 세션 쿠키 | 32B URL-safe 랜덤, sessions 테이블에 user_id 매핑 |
 
@@ -305,7 +305,7 @@ PENDING 이 Submit 시점에 새 검사 결과 FAIL 로 바뀌어 거절되는 �
 
 ## 자격증명 보안
 
-- WQB 비밀번호는 Fernet (AES-128-CBC + HMAC) 으로 암호화 후 SQLite 저장. LLM API 키는 저장하지 않음.
+- 비밀번호 + Gemini API 키는 Fernet (AES-128-CBC + HMAC) 으로 암호화 후 SQLite 저장
 - 마스터 키는 `HYFE_IQC_FERNET_KEY` 환경변수 또는 `data/.fernet.key` 파일 (퍼미션 600)
 - 세션 토큰 32 byte URL-safe 랜덤, 7일 유효, HttpOnly 쿠키
 - DB 파일 / 마스터 키 파일이 동시 유출되지 않으면 자격증명 복호화 불가
