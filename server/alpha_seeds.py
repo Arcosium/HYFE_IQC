@@ -53,6 +53,19 @@ SEED_TEMPLATES: list[dict] = [
      "expr": "min(rank(ts_decay_linear((rank(open) + rank(low)) - (rank(high) + rank(close)), 8)), ts_rank(ts_decay_linear(ts_corr(ts_rank(close, 8), ts_rank(adv60, 21), 8), 7), 3))",
      "ops": ["min", "rank", "ts_decay_linear", "ts_rank", "ts_corr"],
      "intuition": "모든 항이 경계화/decay → 매끄럽고 가중치 분산 양호"},
+    # ── 필드위생 래퍼 winsorize(ts_backfill(F,120),std=4) + 검증된 스켈레톤 (고-Sharpe 표준) ──
+    {"family": "hygiene_fundamental_skeleton",
+     "expr": "-1 * rank(ts_decay_linear(ts_corr(group_neutralize(winsorize(ts_backfill(operating_income, 120), std=4), sector), winsorize(ts_backfill(assets, 120), std=4), 5), 8))",
+     "ops": ["rank", "ts_decay_linear", "ts_corr", "group_neutralize", "winsorize", "ts_backfill"],
+     "intuition": "위생래퍼+섹터중립 펀더멘털 스켈레톤 — Sharpe 0.2 차단의 표준 골격"},
+    {"family": "hygiene_two_factor_value",
+     "expr": "rank(winsorize(ts_backfill(cashflow_op, 120), std=4) / (winsorize(ts_backfill(cap, 120), std=4) + 0.000001)) * rank(ts_delta(close, 20))",
+     "ops": ["rank", "winsorize", "ts_backfill", "ts_delta"],
+     "intuition": "2팩터(현금흐름수익률×가격모멘텀) 각각 rank 후 결합 — 단일팩터 천장 탈출"},
+    {"family": "hygiene_analyst_zscore",
+     "expr": "-1 * ts_zscore(winsorize(ts_backfill(anl4_bvps_mean, 120), std=4), 63)",
+     "ops": ["ts_zscore", "winsorize", "ts_backfill"],
+     "intuition": "위생래퍼 애널리스트 BVPS 의 63일 zscore 역전 (jglazar 류 Sharpe~2.0)"},
 ]
 
 FAMILIES: list[str] = sorted({t["family"] for t in SEED_TEMPLATES})
