@@ -615,7 +615,7 @@ class Worker(threading.Thread):
                 # WQB 새 디바이스 인증 등 사용자 액션이 필요한 영구 에러 — 즉시 라운드 abort + 워커 종료.
                 if not aborted and results and any(
                         _is_auth_required(r.get('error_text') or '') for r in results):
-                    self._log(round_num, '  🛑 WQB 가 새 디바이스/2FA 인증 요구 — 자동화 불가, 워커 종료')
+                    self._log(round_num, '  🛑 WQB 인증 실패(세션 만료/biometric/2FA) — 대시보드에서 재인증 후 다시 시작하세요. 워커 종료')
                     all_results.extend(results)
                     self._stop_event.set()
                     aborted = True
@@ -1135,5 +1135,9 @@ def _is_auth_required(text: str) -> bool:
         '새 디바이스 인증', 'new device', 'verification code',
         'two-factor', '2fa', 'verify your identity', 'mfa',
         'auth_required', 'wqb_auth_required',
+        # RC(공식 API) 세션 만료/biometric — 재인증(대시보드) 필요. 워커가 멈춰야
+        # /authentication 을 연타(5/min 429 폭주)하며 Gemini 를 낭비하지 않는다.
+        # ⚠ 'concurrent_simulation_limit'(슬롯 429)는 인증문제가 아니므로 포함하지 않는다.
+        'biometric', 'persona', 'rc 자격증명',
     )
     return any(s in t for s in sigs)
