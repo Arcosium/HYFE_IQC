@@ -144,6 +144,32 @@ class WqbApiClient:
         except Exception as e:
             LOG.warning('pending save err: %s', e)
 
+    def pending_persona(self):
+        """저장된 미완료 persona challenge 를 **네트워크 호출 없이** 읽어 반환한다.
+
+        반환: {'persona_url': str, 'inquiry': str} 또는 None.
+        상태조회(passive)는 이 메서드만 쓰고 절대 POST /authentication 을 하지 않는다 —
+        매 조회마다 POST 하면 WQB biometric throttle 가 영원히 재무장되기 때문이다.
+        """
+        try:
+            pf = self._pending_file()
+            if not pf or not os.path.exists(pf):
+                return None
+            with open(pf, 'r') as f:
+                pend = json.load(f)
+            pu = (pend or {}).get('persona_url') or ''
+            if not pu:
+                return None
+            inquiry = ''
+            if 'inquiry=' in pu:
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(pu).query)
+                inquiry = (q.get('inquiry') or q.get('inquiry-id') or [''])[0]
+            return {'persona_url': pu, 'inquiry': inquiry}
+        except Exception as e:
+            LOG.warning('pending_persona read err: %s', e)
+            return None
+
     def complete_persona(self, inquiry=None) -> bool:
         try:
             # backward-compat: if no inquiry passed, try the pending file's saved inquiry/url

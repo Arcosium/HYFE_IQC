@@ -136,3 +136,27 @@ def test_complete_persona_inquiry_incomplete_returns_false(tmp_path):
     assert result is False
     # session file must NOT be created on failure
     assert not os.path.exists(sf)
+
+
+# ── pending_persona(): 저장된 미완료 challenge 를 네트워크 호출 없이 읽는다 ──
+# (passive 상태조회가 POST /authentication 으로 biometric throttle 를 재무장시키던
+#  버그의 근본 수정: 상태조회는 이 파일만 읽고 절대 POST 하지 않는다.)
+
+def test_pending_persona_reads_saved_challenge_no_network(tmp_path):
+    sf = str(tmp_path / 's.pkl')
+    sess = FakeSession()
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=sf)
+    c._save_pending('https://api.worldquantbrain.com/authentication/persona?inquiry=inq_PEND')
+    sess.calls.clear()  # forget the save; we only care that READ makes no calls
+    pend = c.pending_persona()
+    assert pend is not None
+    assert pend['persona_url'].endswith('inquiry=inq_PEND')
+    assert pend['inquiry'] == 'inq_PEND'
+    # crucial: reading the pending challenge must NOT touch the network
+    assert sess.calls == []
+
+
+def test_pending_persona_returns_none_when_absent(tmp_path):
+    sf = str(tmp_path / 's.pkl')
+    c = wqb_api.WqbApiClient('e', 'p', session=FakeSession(), session_file=sf)
+    assert c.pending_persona() is None

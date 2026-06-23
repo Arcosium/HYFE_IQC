@@ -541,9 +541,10 @@
       const r = await api('/api/account/wqb-persona-status');
       const d = r && r.data;
       if (d && d.rate_limited) {
-        // 429 rate-limit: 배너를 띄워 사용자에게 알리되, complete 버튼은 비활성.
-        if (_personaStatus) _personaStatus.textContent = 'WQB 호출 한도 초과 — 1분 후 새로고침';
-        if (_personaLink)   _personaLink.removeAttribute('href');
+        // 429 throttle: ⚠ 새로고침하면 재인증 POST 가 나가 throttle 가 재무장된다.
+        // 절대 "새로고침"을 권하지 말 것. 가만히 기다리면 풀린다. 링크 href 는 보존.
+        if (_personaStatus) _personaStatus.textContent =
+          'WQB 인증 throttle — 새로고침하지 마세요. 잠시 기다리면 자동 해제됩니다.';
         if (_btnPersonaComplete) _btnPersonaComplete.disabled = true;
         if (_personaBanner) _personaBanner.removeAttribute('hidden');
       } else if (d && d.persona_required) {

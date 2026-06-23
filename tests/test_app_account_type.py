@@ -213,6 +213,39 @@ def test_persona_status_and_complete(monkeypatch):
     assert captured.get('inquiry') == 'inq_Z'
 
 
+def test_persona_status_pending_returns_url_without_post(monkeypatch):
+    """저장된 세션이 만료됐지만 미완료 persona challenge(.pending)가 있으면,
+    상태조회는 그 URL 을 반환하고 절대 validate_wqb_api(POST /authentication)를
+    호출하지 않아야 한다. (passive 조회가 biometric throttle 를 재무장시키던 버그 방지.)"""
+    import server.app as app_mod
+    import server.wqb_api as wqb_api
+    monkeypatch.setattr(app_mod, '_current_user_id', lambda: 2)
+    monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
+    monkeypatch.setattr(app_mod._db, 'get_account_type', lambda uid: 'research_consultant')
+
+    def _must_not_call(*a, **k):
+        raise AssertionError('validate_wqb_api MUST NOT be called when a pending persona exists')
+    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api', _must_not_call)
+
+    class FakeCliPending:
+        def __init__(self, *a, **k): pass
+        def _load_session(self): return True       # session file present...
+        def _session_valid(self): return False     # ...but expired
+        def pending_persona(self):
+            return {'persona_url': 'https://api.worldquantbrain.com/authentication/persona?inquiry=inq_P',
+                    'inquiry': 'inq_P'}
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCliPending)
+
+    cl = app_mod.app.test_client()
+    r = cl.get('/api/account/wqb-persona-status')
+    j = r.get_json()
+    assert j.get('persona_required') is True, j
+    assert 'inquiry=inq_P' in j.get('persona_url', ''), j
+    assert j.get('inquiry') == 'inq_P', j
+    assert j.get('rate_limited') is not True, j
+    assert j.get('account_type') == 'research_consultant', j
+
+
 def test_persona_status_rate_limited(monkeypatch):
     """429 rate-limit 시 rate_limited=True 와 account_type 이 함께 반환되어야 한다."""
     import server.app as app_mod

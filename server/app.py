@@ -389,8 +389,11 @@ def api_upgrade_to_rc():
 def api_wqb_persona_status():
     """현재 사용자의 WQB 페르소나 완료 여부 확인.
 
-    저장된 세션이 유효하면 POST /authentication 호출 없이 즉시 반환한다
-    (rate-limit 절약). 세션이 없거나 만료된 경우에만 인증 호출(최대 1회).
+    이 엔드포인트는 **읽기 전용**이다 — 저장된 세션과 .pending 파일만 본다.
+    절대 passive 하게 POST /authentication 을 하지 않는다: 매 조회마다 POST 하면
+    미완료 persona 상태에서 WQB 가 BIOMETRICS_THROTTLED(429)를 매번 재무장시켜
+    throttle 가 영원히 안 풀린다(사장님 "버튼 안 눌림" 버그의 근본 원인).
+    세션도 pending challenge 도 없을 때만 인증 1회로 신규 challenge 를 발급한다.
     """
     uid = _current_user_id()
     if not uid:
@@ -407,9 +410,18 @@ def api_wqb_persona_status():
         if c._load_session() and c._session_valid():
             return jsonify({'persona_required': False, 'authenticated': True,
                             'account_type': account_type})
+        # 1.5) 미완료 persona challenge(.pending)가 있으면 그 URL 을 POST 없이 반환.
+        #      사용자가 브라우저에서 완료 후 '완료' 버튼을 누르면 그때 complete_persona()
+        #      가 단 한 번 POST 한다. 여기서 POST 하면 throttle 재무장 루프가 된다.
+        pend = c.pending_persona()
+        if pend:
+            return jsonify({'persona_required': True,
+                            'persona_url': pend.get('persona_url', ''),
+                            'inquiry': pend.get('inquiry', ''),
+                            'account_type': account_type})
     except Exception:
         pass
-    # 2) 세션 없음 → 인증 1회 호출. persona / rate-limit / 기타 분기.
+    # 2) 세션도 pending 도 없음 → 인증 1회 호출(신규 challenge 발급). persona / rate-limit 분기.
     v = _auth.validate_wqb_api(u, p)
     if v.get('reason') == 'wqb_persona_required':
         return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', ''),
