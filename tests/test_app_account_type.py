@@ -27,7 +27,7 @@ def test_signup_passes_account_type(client, monkeypatch):
     # 신규 사용자 — 찾을 수 없음
     monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
 
-    def fake_validate_login(u, p, g, account_type='standard'):
+    def fake_validate_login(u, p, g='', account_type='standard'):
         captured['validate_account_type'] = account_type
         return {'ok': True, 'reason': 'ok'}
 
@@ -99,7 +99,7 @@ def test_register_creates_with_account_type(monkeypatch):
     monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
     captured = {}
 
-    def fake_validate(u, p, g, account_type='standard'):
+    def fake_validate(u, p, g='', account_type='standard'):
         captured['vl'] = account_type
         return {'ok': True, 'reason': 'ok'}
 
@@ -172,9 +172,19 @@ def _fake_wqb_client_no_session():
     """WqbApiClient stub: _load_session() returns False so flow reaches validate_wqb_api."""
     import server.wqb_api as wqb_api
     class FakeCli:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            self.persona_required = False
+            self.persona_url = None
+            self.last_auth_status_code = None
         def _load_session(self): return False
         def _session_valid(self): return False
+        def pending_persona(self):
+            return {'persona_url': 'https://worldquantbrain.withpersona.com/verify?inquiry-id=inq_Z',
+                    'inquiry': 'inq_Z'} if self.persona_required else None
+        def authenticate(self):
+            self.persona_required = True
+            self.persona_url = 'https://api.worldquantbrain.com/authentication/persona?inquiry=inq_Z'
+            return False
         def complete_persona(self, inquiry=None): return True
     return wqb_api, FakeCli
 
@@ -185,15 +195,14 @@ def test_persona_status_and_complete(monkeypatch):
     monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('e', 'p', 'g'))
     monkeypatch.setattr(app_mod._db, 'get_account_type', lambda uid: 'research_consultant')
     monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
-        lambda u, p: {'ok': False, 'reason': 'wqb_persona_required',
-                      'persona_url': 'https://x/persona?inquiry=Z', 'inquiry': 'inq_Z'})
+        lambda u, p: (_ for _ in ()).throw(AssertionError('status should use WqbApiClient to persist persona cookies')))
     # Ensure WqbApiClient._load_session() returns False so flow falls through to validate_wqb_api
     wqb_api, FakeCli = _fake_wqb_client_no_session()
     monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCli)
     cl = app_mod.app.test_client()
     r = cl.get('/api/account/wqb-persona-status')
     j = r.get_json()
-    assert j['persona_required'] is True and 'inquiry=Z' in j['persona_url']
+    assert j['persona_required'] is True and 'withpersona.com' in j['persona_url']
     # status response must include the raw inquiry
     assert j.get('inquiry') == 'inq_Z'
     # complete: FakeCli must accept the inquiry kwarg passed by the endpoint
@@ -232,7 +241,7 @@ def test_persona_status_pending_returns_url_without_post(monkeypatch):
         def _load_session(self): return True       # session file present...
         def _session_valid(self): return False     # ...but expired
         def pending_persona(self):
-            return {'persona_url': 'https://api.worldquantbrain.com/authentication/persona?inquiry=inq_P',
+            return {'persona_url': 'https://worldquantbrain.withpersona.com/verify?inquiry-id=inq_P',
                     'inquiry': 'inq_P'}
     monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCliPending)
 
@@ -240,7 +249,7 @@ def test_persona_status_pending_returns_url_without_post(monkeypatch):
     r = cl.get('/api/account/wqb-persona-status')
     j = r.get_json()
     assert j.get('persona_required') is True, j
-    assert 'inquiry=inq_P' in j.get('persona_url', ''), j
+    assert 'withpersona.com' in j.get('persona_url', ''), j
     assert j.get('inquiry') == 'inq_P', j
     assert j.get('rate_limited') is not True, j
     assert j.get('account_type') == 'research_consultant', j
@@ -257,9 +266,13 @@ def test_persona_status_rate_limited(monkeypatch):
         lambda u, p: {'ok': False, 'reason': 'wqb_rate_limited',
                       'detail': 'WQB API 인증 호출 한도(분당 5회) 초과 — 1분 후 다시 시도하세요.'})
     class FakeCliNoSession:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            self.persona_required = False
+            self.last_auth_status_code = 429
         def _load_session(self): return False
         def _session_valid(self): return False
+        def pending_persona(self): return None
+        def authenticate(self): return False
     monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeCliNoSession)
     cl = app_mod.app.test_client()
     r = cl.get('/api/account/wqb-persona-status')

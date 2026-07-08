@@ -101,3 +101,31 @@ def test_update_round_config_no_fields_noop(isolated_db):
     _, tmp_db = isolated_db
     _uid, rid = _create_user_and_round(tmp_db)
     db.update_round_config(rid)  # no kwargs → should be harmless
+
+
+def test_interrupt_open_rounds_marks_unfinished_rounds(isolated_db):
+    _tmp_path, tmp_db = isolated_db
+    uid, rid = _create_user_and_round(tmp_db)
+
+    count = db.interrupt_open_rounds('restart cleanup')
+
+    assert count == 1
+    conn = sqlite3.connect(tmp_db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute('SELECT status, ended_at, summary FROM rounds WHERE id=?', (rid,)).fetchone()
+    conn.close()
+    assert row['status'] == 'interrupted'
+    assert row['ended_at'] is not None
+    assert row['summary'] == 'restart cleanup'
+
+
+def test_get_user_status_focus_label_includes_parent_idx(isolated_db):
+    _tmp_path, _tmp_db = isolated_db
+    uid, _rid = _create_user_and_round(_tmp_db)
+    db.interrupt_open_rounds('clear setup round')
+    db.start_round(uid, 65, phase=1, parent_idx=3, focus_fail='LOW_SHARPE')
+
+    status = db.get_user_status(uid)
+
+    assert status['current_round_label'] == '65-3-1'
+    assert status['current_phase'] == 1

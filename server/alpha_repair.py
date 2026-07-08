@@ -22,7 +22,18 @@ _HUMP_CALL_RX = re.compile(r'\bhump\s*\(')
 _NUMERIC_ARG_RX = re.compile(r'^\s*[-+]?(?:\d+\.?\d*|\.\d+)\s*$')
 _GROUP_CALL_RX = re.compile(r'\bgroup_[a-z_]+\s*\(')
 _QUOTED_IDENT_RX = re.compile(r'''^(\s*)(['"])([A-Za-z_]\w*)\2(\s*)$''')
+_FILTER_NAMED_ARG_RX = re.compile(r',\s*filter\s*=\s*(?:true|false)', re.IGNORECASE)
 
+
+def _fix_common_typos(code: str) -> str:
+    # Deterministic typo fixes observed in live RC API rounds.
+    return re.sub(r'\bsignd_power\s*\(', 'signed_power(', code, flags=re.IGNORECASE)
+
+
+def _drop_filter_named_arg(code: str) -> str:
+    # RC API compiler has returned `Unknown attribute "filter" encountered`.
+    # Dropping the optional NaN-filter attribute is safer than spending a sim slot.
+    return _FILTER_NAMED_ARG_RX.sub('', code)
 
 def _strip_region_prefix(code: str) -> str:
     return _REGION_PREFIX_RX.sub(r'\1', code)
@@ -164,6 +175,12 @@ def repair(code: str, *, delay) -> tuple[str, list[str]]:
     applied: list[str] = []
     out = code
 
+    s = _fix_common_typos(out)
+    if s != out:
+        applied.append('common_typo'); out = s
+    s = _drop_filter_named_arg(out)
+    if s != out:
+        applied.append('drop_filter_attr'); out = s
     s = _strip_region_prefix(out)
     if s != out:
         applied.append('region_prefix'); out = s

@@ -3,12 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HYFE IQC — WQB Alpha Auto-Discovery</title>
-  <link rel="stylesheet" href="/style.css" />
+  <title>HYFE IQC — Evolution Observatory</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <!-- ⚠ Cloudflare 가 css/js 를 4시간 엣지캐시(max-age=14400 덮어씀) — 배포 시 반드시 ?v= 를 올릴 것 -->
+  <link rel="stylesheet" href="/style.css?v=7" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">HYFE <span class="accent">IQC</span></div>
+    <div class="brand">
+      <div class="brand-main">HYFE <span class="accent">IQC</span></div>
+      <div class="brand-sub">Genome Evolution Observatory</div>
+    </div>
+    <div class="top-live" id="top-live" hidden>
+      <span class="run-pill" id="run-pill"><span class="dot"></span><span id="run-pill-text">idle</span></span>
+      <span class="top-round">ROUND <strong id="top-round-num">—</strong></span>
+    </div>
     <div class="user-info" id="user-info" hidden>
       <span id="user-name"></span>
       <button id="btn-logout" class="btn-link">로그아웃</button>
@@ -25,36 +36,28 @@
 
       <!-- 로그인 폼 -->
       <form id="form-login" autocomplete="off">
-        <p class="subtitle">WQB 자격증명과 Gemini API 키를 입력하면 두 가지 모두 검증한 뒤 다음 화면으로 이동합니다.</p>
+        <p class="subtitle">WQB 자격증명을 입력하면 확인 후 대시보드로 이동합니다.</p>
         <label>WQB 이메일
           <input type="email" id="wqb_username" required placeholder="example@domain.com" />
         </label>
         <label>WQB 비밀번호
           <input type="password" id="wqb_password" required placeholder="••••••••" />
         </label>
-        <label>Gemini API 키 <span class="opt">(기존 계정은 비워두면 저장된 키 사용)</span>
-          <input type="text" id="gemini_api_key" placeholder="AIzaSy..." />
-          <small>새 키를 입력하면 저장된 키를 교체합니다. 기존 계정은 비워두면 저장된 키를 사용합니다.</small>
-        </label>
         <label class="toggle inline-toggle">
           <span>기기에서 자동 로그인 (7일)</span>
           <input type="checkbox" id="remember_device" checked />
         </label>
-        <button type="submit" id="btn-login">로그인 검증 시작</button>
+        <button type="submit" id="btn-login">로그인</button>
       </form>
 
       <!-- 회원가입 폼 -->
       <form id="form-register" autocomplete="off" hidden>
-        <p class="subtitle">WQB 자격증명과 Gemini API 키를 입력해 새 계정을 등록합니다.</p>
+        <p class="subtitle">WQB 자격증명을 검증해 새 계정을 등록합니다. 알파 생성은 Genome GA(유전 알고리즘)가 담당합니다.</p>
         <label>WQB 이메일
           <input type="email" id="reg_wqb_username" required placeholder="example@domain.com" />
         </label>
         <label>WQB 비밀번호
           <input type="password" id="reg_wqb_password" required placeholder="••••••••" />
-        </label>
-        <label>Gemini API 키 <span class="opt">(신규 가입 시 필수)</span>
-          <input type="text" id="reg_gemini_api_key" placeholder="AIzaSy..." required />
-          <small>Google AI Studio (<a href="https://aistudio.google.com/app/api-keys" target="_blank" rel="noopener">aistudio.google.com/app/api-keys</a>) 에서 발급한 키.</small>
         </label>
         <label>계정 유형
           <span class="account-type-radios">
@@ -84,58 +87,223 @@
       <span id="persona-status"></span>
     </div>
 
-    <section id="account-section" class="account-section">
-      <span class="account-section-label">현재 계정 유형: <strong id="account-type-current">—</strong></span>
-      <span id="account-upgrade-prompt"> — 일반 → Research Consultant로 전환:</span>
-      <button type="button" id="btn-upgrade-rc" class="btn-upgrade-rc">Research Consultant로 전환</button>
+    <!-- 제어 커맨드 바 -->
+    <section class="card-block" aria-label="실행 제어">
+      <div class="command-bar">
+        <div class="buttons">
+          <button id="btn-start" class="btn-primary">▶ 진화 실행</button>
+          <button id="btn-pause" class="btn-secondary" disabled>⏸ 일시정지</button>
+        </div>
+        <div class="status-block">
+          <div class="kv"><span class="k">상태</span><span class="v" id="state-text">idle</span></div>
+          <div class="kv"><span class="k">현재 라운드</span><span class="v" id="state-round">—</span></div>
+          <div class="kv"><span class="k">완료 라운드</span><span class="v" id="state-completed">0</span></div>
+          <div class="kv"><span class="k">오류 패턴</span><span class="v" id="state-errors">0</span></div>
+        </div>
+        <div class="delay-block">
+          <label for="delay-mode">Delay 테스트</label>
+          <select id="delay-mode">
+            <option value="0">Delay=0</option>
+            <option value="1">Delay=1</option>
+            <option value="mix">혼합(랜덤)</option>
+          </select>
+          <span id="delay-mode-status" class="delay-status" aria-live="polite"></span>
+        </div>
+      </div>
+      <div class="account-strip" id="account-section">
+        <span>계정 유형: <strong id="account-type-current">—</strong></span>
+        <span id="account-upgrade-prompt">— 일반 → Research Consultant로 전환:</span>
+        <button type="button" id="btn-upgrade-rc" class="btn-upgrade-rc">Research Consultant로 전환</button>
+        <span style="margin-left:auto" class="micro" id="mode-summary"></span>
+      </div>
     </section>
 
-    <section class="control-row">
-      <div class="status-block">
-        <div class="kv"><span class="k">상태:</span> <span class="v" id="state-text">idle</span></div>
-        <div class="kv"><span class="k">현재 라운드:</span> <span class="v" id="state-round">—</span></div>
-        <div class="kv"><span class="k">완료 라운드:</span> <span class="v" id="state-completed">0</span></div>
-        <div class="kv"><span class="k">누적 오류 패턴:</span> <span class="v" id="state-errors">0</span></div>
+    <!-- 스탯 타일 -->
+    <section class="stat-row" aria-label="핵심 지표">
+      <div class="stat-tile t-plain">
+        <span class="micro">완료 라운드</span>
+        <span class="value" id="tile-rounds">0</span>
+        <span class="sub">세대 사이클 누적</span>
       </div>
-      <div class="buttons">
-        <button id="btn-start" class="btn-primary">실행</button>
-        <button id="btn-pause" class="btn-secondary" disabled>일시정지</button>
+      <div class="stat-tile t-acc">
+        <span class="micro">엘리트 Seed</span>
+        <span class="value" id="tile-seed">0</span>
+        <span class="sub">교차/변이 모집단</span>
       </div>
-      <div class="delay-block">
-        <label for="delay-mode">Delay 테스트:</label>
-        <select id="delay-mode">
-          <option value="0">Delay=0</option>
-          <option value="1">Delay=1</option>
-          <option value="mix">혼합(랜덤)</option>
-        </select>
-        <span id="delay-mode-status" class="delay-status" aria-live="polite"></span>
+      <div class="stat-tile t-mut">
+        <span class="micro">Focus 대기</span>
+        <span class="value" id="tile-focus">0</span>
+        <span class="sub">정향변이 sub-round</span>
+      </div>
+      <div class="stat-tile t-xo">
+        <span class="micro">최고 세대</span>
+        <span class="value" id="tile-gen">g0</span>
+        <span class="sub">도달한 진화 깊이</span>
+      </div>
+      <div class="stat-tile t-acc">
+        <span class="micro">제출 성공</span>
+        <span class="value" id="tile-submitted">0</span>
+        <span class="sub">Submit 리스트 추가</span>
+      </div>
+      <div class="stat-tile t-warn">
+        <span class="micro">미추가</span>
+        <span class="value" id="tile-unsubmitted">0</span>
+        <span class="sub">게이트 미통과</span>
       </div>
     </section>
 
-    <section class="log-section">
-      <div class="log-header">
-        <h2>실시간 로그</h2>
-        <div class="log-tools">
+    <!-- 진화 궤적 -->
+    <section class="card-block" aria-label="진화 궤적">
+      <div class="card-head evo-head">
+        <div>
+          <h2>진화 궤적 <span class="micro">Evolution Trace</span></h2>
+        </div>
+        <div class="card-tools">
+          <div class="evo-legend" id="evo-legend">
+            <span class="lg"><span class="sw rand"></span>탐색 rand</span>
+            <span class="lg"><span class="sw mut"></span>변이 mut</span>
+            <span class="lg"><span class="sw xo"></span>교차 xo</span>
+            <span class="lg"><span class="sw etc"></span>개편 전</span>
+            <span class="lg"><span class="sw best"></span>라운드 최고</span>
+            <span class="lg"><span class="sw sub"></span>제출됨</span>
+          </div>
+          <div class="seg-toggle" id="evo-metric">
+            <button type="button" data-metric="sharpe" class="active">SHARPE</button>
+            <button type="button" data-metric="pass">PASS</button>
+          </div>
+          <select id="evo-range">
+            <option value="200">최근 25 라운드</option>
+            <option value="400" selected>최근 50 라운드</option>
+            <option value="800">최근 100 라운드</option>
+          </select>
+        </div>
+      </div>
+      <div class="evo-chart-wrap" id="evo-wrap">
+        <svg id="evo-chart" role="img" aria-label="라운드별 알파 성과 산점도"></svg>
+        <svg id="evo-comp" role="img" aria-label="라운드별 세대 구성"></svg>
+        <div class="evo-tip" id="evo-tip"></div>
+        <div class="evo-empty" id="evo-empty" hidden>아직 시뮬 데이터가 없습니다 — 진화를 실행하면 라운드별 궤적이 여기 그려집니다.</div>
+      </div>
+      <div class="evo-comp-label micro">세대 구성 — 라운드별 탐색·변이·교차 비율</div>
+    </section>
+
+    <!-- 파이프라인 + 세대 사다리 -->
+    <section class="grid-2">
+      <div class="card-block" aria-label="GA 파이프라인">
+        <div class="card-head">
+          <h2>GA 파이프라인 <span class="micro">Transition Flow</span></h2>
+        </div>
+        <div class="pipeline" id="pipeline">
+          <div class="pl-node pl-rand">
+            <span class="pl-ico">⚄</span>
+            <span class="pl-body">
+              <span class="pl-title">무작위 탐색 <span class="micro">explore</span></span>
+              <span class="pl-sub" id="pl-rand-sub">신규 유전체 생성 · 밴딧 —</span>
+            </span>
+            <span class="pl-count" id="pl-rand-count">—</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-plain">
+            <span class="pl-ico">⚙</span>
+            <span class="pl-body">
+              <span class="pl-title">시뮬레이션 <span class="micro">backtest</span></span>
+              <span class="pl-sub" id="pl-sim-sub">—</span>
+            </span>
+            <span class="pl-count" id="pl-sim-count">—</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-acc">
+            <span class="pl-ico">▦</span>
+            <span class="pl-body">
+              <span class="pl-title">게이트 <span class="micro">selection</span></span>
+              <span class="pl-sub" id="pl-gate-sub">—</span>
+            </span>
+            <span class="pl-count" id="pl-gate-count">—</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-acc">
+            <span class="pl-ico">◈</span>
+            <span class="pl-body">
+              <span class="pl-title">엘리트 Seed 풀 <span class="micro">elite pool</span></span>
+              <span class="pl-sub">PASS 상위 알파 → 유전체 역추출</span>
+            </span>
+            <span class="pl-count" id="pl-seed-count">0</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-xo">
+            <span class="pl-ico">✂</span>
+            <span class="pl-body">
+              <span class="pl-title">교차 / 변이 <span class="micro">crossover · mutate</span></span>
+              <span class="pl-sub">엘리트 유전자 재조합 → 다음 세대 자식</span>
+            </span>
+            <span class="pl-count" id="pl-xo-count">—</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-mut">
+            <span class="pl-ico">🎯</span>
+            <span class="pl-body">
+              <span class="pl-title">Focus 정향변이 <span class="micro">directed mutation</span></span>
+              <span class="pl-sub">FAIL 사유 기반 유전자 축 이동</span>
+            </span>
+            <span class="pl-count" id="pl-focus-count">0</span>
+          </div>
+          <div class="pl-edge"></div>
+          <div class="pl-node pl-acc">
+            <span class="pl-ico">⬆</span>
+            <span class="pl-body">
+              <span class="pl-title">제출 <span class="micro">submit</span></span>
+              <span class="pl-sub" id="pl-submit-sub">—</span>
+            </span>
+            <span class="pl-count" id="pl-submit-count">0</span>
+          </div>
+          <div class="pl-loop">↺ 결과·FAIL 사유가 다음 세대 생성에 피드백됩니다</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card-block" aria-label="세대 사다리">
+          <div class="card-head">
+            <h2>세대 사다리 <span class="micro">Generation Depth</span></h2>
+          </div>
+          <div class="genladder" id="genladder">
+            <div class="gl-note">데이터 로딩 중…</div>
+          </div>
+        </div>
+
+        <div class="card-block" aria-label="최신 세대 상세" style="margin-top:14px">
+          <div class="card-head">
+            <h2>최신 세대 상세 <span class="micro">Latest Population</span></h2>
+            <div class="card-tools"><span class="micro" id="pop-round-label"></span></div>
+          </div>
+          <div class="pop-table-wrap">
+            <table class="pop-table" id="pop-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>오리진</th><th>유전자</th><th>PASS</th><th>Sharpe</th><th>상태</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty-msg" id="pop-empty">아직 세대 데이터가 없습니다.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 라이브 피드 -->
+    <section class="card-block" aria-label="라이브 피드">
+      <div class="card-head">
+        <h2>라이브 피드 <span class="micro">Live Feed</span></h2>
+        <div class="card-tools log-tools">
+          <label class="toggle"><input type="checkbox" id="core-only" /> 핵심만</label>
           <label class="toggle"><input type="checkbox" id="autoscroll" checked /> 자동 스크롤</label>
           <button id="btn-clear-log" class="btn-link">화면 비우기</button>
         </div>
       </div>
-      <pre id="log-pane" class="log-pane" tabindex="0"></pre>
-    </section>
-
-    <section class="best-section">
-      <div class="best-header">
-        <h2>✅ Submit 리스트 추가</h2>
-        <button id="btn-clear-submits" class="btn-link">화면 비우기</button>
-      </div>
-      <table id="best-table">
-        <thead><tr><th>R</th><th>#</th><th>PASS</th><th>FAIL</th><th>상태</th><th>시각</th><th>코드</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-msg" id="best-empty">아직 Submit 리스트에 추가된 알파가 없습니다.</div>
+      <div id="log-pane" class="log-pane" tabindex="0"></div>
     </section>
   </main>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=7" defer></script>
 </body>
 </html>

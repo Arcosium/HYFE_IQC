@@ -4,227 +4,265 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#070b09" />
   <title>HYFE IQC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    /* HYFE IQC 모바일 — Evolution Observatory 압축판. 데스크톱 style.css 와 동일 팔레트. */
+    :root {
+      --bg: #070b09; --surface: #0e1512; --surface-2: #131c17; --surface-3: #182420;
+      --ink: #e9f1eb; --ink-dim: #96a89d; --ink-faint: #5d6f64;
+      --line: #223129; --line-strong: #2f4437;
+      --acc: #35e0a1; --acc-dim: #1e8f68; --acc-ink: #04130c;
+      --o-rand: #3987e5; --o-mut: #c98500; --o-xo: #d55181; --o-etc: #5d6f64;
+      --danger: #e66767; --warn: #e5c04b;
+      --sans: "IBM Plex Sans KR", "Pretendard", "Apple SD Gothic Neo", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "Menlo", monospace;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    [hidden] { display: none !important; }
+    html, body { margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: #0f1115;
-      color: #e6e9ee;
-      min-height: 100vh;
-      display: flex; flex-direction: column;
+      font-family: var(--sans);
+      background: var(--bg); color: var(--ink);
+      min-height: 100vh; display: flex; flex-direction: column;
+      font-size: 14px;
     }
-    header.topbar {
-      padding: 14px 18px;
-      display: flex; align-items: center; justify-content: space-between;
-      background: linear-gradient(180deg, #161922 0%, #11141b 100%);
-      border-bottom: 1px solid #1f2330;
+    body::before {
+      content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(500px 260px at 30% -6%, rgba(53,224,161,0.08), transparent 62%),
+        repeating-linear-gradient(0deg, rgba(233,241,235,0.015) 0 1px, transparent 1px 40px);
     }
-    header .brand { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
-    header .brand .accent { color: #5fa8ff; }
-    header .who { font-size: 12px; color: #93a0b5; }
-    header .btn-logout {
-      background: none; border: 1px solid #2a3142; color: #9aa6bb;
-      border-radius: 6px; padding: 4px 10px; font-size: 12px;
-    }
-    main { flex: 1; padding: 16px; }
+    header.topbar, main { position: relative; z-index: 1; }
 
-    /* 로그인 카드 */
+    header.topbar {
+      padding: 12px 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: linear-gradient(180deg, rgba(19,28,23,0.95), rgba(10,15,12,0.9));
+      border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; z-index: 10;
+    }
+    .brand { line-height: 1.1; }
+    .brand-main { font-size: 15px; font-weight: 700; letter-spacing: 0.03em; }
+    .brand-main .accent { color: var(--acc); }
+    .brand-sub { font-family: var(--mono); font-size: 8px; letter-spacing: 0.28em; color: var(--ink-faint); text-transform: uppercase; margin-top: 2px; }
+    .who { font-size: 11px; color: var(--ink-dim); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .btn-logout {
+      background: none; border: 1px solid var(--line-strong); color: var(--ink-dim);
+      border-radius: 4px; padding: 4px 10px; font-size: 12px; font-family: var(--sans);
+      white-space: nowrap; flex: none;
+    }
+    #user-row { display: flex; align-items: center; gap: 8px; }
+
+    main { flex: 1; padding: 14px 14px 34px; max-width: 560px; margin: 0 auto; width: 100%; }
+
+    .micro {
+      font-family: var(--mono); font-size: 9.5px; font-weight: 500;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-faint);
+    }
+
+    /* ── 로그인 카드 ── */
     .login-card {
-      max-width: 420px; margin: 24px auto;
-      background: #161922;
-      border: 1px solid #232838;
-      border-radius: 14px;
+      margin: 22px auto 0; max-width: 420px;
+      background: var(--surface);
+      border: 1px solid var(--line-strong); border-radius: 8px;
       padding: 22px 18px 18px;
-      box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.5);
     }
-    .login-card h1 { font-size: 22px; margin: 0 0 6px; }
-    .login-card .sub { color: #9aa6bb; font-size: 13px; margin-bottom: 18px; }
-    .login-card label {
-      display: block; font-size: 13px; color: #b6c0d3;
-      margin-top: 12px;
-    }
+    .login-card h1 { font-size: 20px; margin: 0 0 4px; }
+    .login-card .sub { color: var(--ink-dim); font-size: 12.5px; margin-bottom: 16px; line-height: 1.5; }
+    .login-card label { display: block; font-size: 12px; color: var(--ink-dim); margin-top: 12px; }
     .login-card input {
-      width: 100%; margin-top: 4px;
-      background: #0f1218; color: #e6e9ee;
-      border: 1px solid #2a3142; border-radius: 8px;
-      padding: 12px 12px;
+      width: 100%; margin-top: 5px;
+      background: var(--bg); color: var(--ink);
+      border: 1px solid var(--line-strong); border-radius: 4px;
+      padding: 12px;
       font-size: 16px;     /* iOS zoom 방지 */
+      font-family: var(--mono);
     }
-    .login-card input:focus { outline: 2px solid #2f78d6; border-color: transparent; }
+    .login-card input:focus { outline: none; border-color: var(--acc-dim); box-shadow: 0 0 0 3px rgba(53,224,161,0.12); }
     .login-card button[type=submit] {
       margin-top: 18px; width: 100%;
-      background: #2f78d6; color: white; border: none;
-      border-radius: 10px; padding: 14px;
-      font-size: 16px; font-weight: 600;
+      background: var(--acc); color: var(--acc-ink); border: none;
+      border-radius: 4px; padding: 14px;
+      font-size: 15px; font-weight: 700; font-family: var(--sans);
     }
     .login-card button:disabled { opacity: 0.5; }
-    .login-card .err {
-      margin-top: 12px; padding: 10px 12px;
-      border-radius: 8px; font-size: 13px;
-      background: #2a1a1f; color: #ff8d97; border: 1px solid #4d2730;
+    .err {
+      margin-top: 12px; padding: 10px 12px; border-radius: 4px; font-size: 12.5px;
+      background: rgba(230,103,103,0.09); color: var(--danger); border: 1px solid rgba(230,103,103,0.35);
     }
-    .login-card .err:empty { display: none; }
-    .login-card .full-link {
-      display: block; margin-top: 16px; padding: 12px 14px;
-      text-align: center; font-size: 14px; font-weight: 600;
-      color: #e6e9ee; background: #2a3142; border: 1px solid #3a4259;
-      border-radius: 10px; text-decoration: none;
+    .err:empty { display: none; }
+    .full-link {
+      display: block; margin-top: 14px; padding: 12px;
+      text-align: center; font-size: 13px; font-weight: 600;
+      color: var(--ink); background: var(--surface-3); border: 1px solid var(--line-strong);
+      border-radius: 4px; text-decoration: none;
     }
-    .login-card .full-link:active { background: #20263a; }
-    .desktop-btn-row {
-      margin: 18px 0 6px; padding: 14px 12px;
-      background: #1a2030; border: 1px solid #2c3550; border-radius: 10px;
-      text-align: center;
-    }
-    .desktop-btn-row a {
-      display: inline-block; padding: 10px 18px;
-      background: #2f78d6; color: #fff; font-weight: 700; font-size: 14px;
-      border-radius: 8px; text-decoration: none;
-    }
-    .desktop-btn-row a:active { background: #2563b3; }
-    .desktop-btn-row .desktop-hint {
-      display: block; margin-top: 8px; color: #93a0b5; font-size: 11px;
-    }
+    .full-link:active { background: var(--surface-2); }
 
-    /* 상태 카드 */
-    .status-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      max-width: 540px; margin: 0 auto;
+    /* ── 카드 공통 ── */
+    .mcard {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+      margin-bottom: 12px; overflow: hidden;
     }
-    .stat {
-      background: #161922;
-      border: 1px solid #232838;
-      border-radius: 12px;
-      padding: 18px 16px;
-      min-height: 92px;
-      display: flex; flex-direction: column; justify-content: space-between;
-    }
-    .stat .label {
-      font-size: 12px; color: #93a0b5; text-transform: uppercase; letter-spacing: 0.6px;
-    }
-    .stat .value {
-      font-size: 28px; font-weight: 700; margin-top: 6px;
-      font-variant-numeric: tabular-nums;
-    }
-    .stat .sub { font-size: 11px; color: #6f7c91; margin-top: 4px; }
-
-    .stat.submitted { border-color: #2c5331; background: linear-gradient(180deg, #142a18 0%, #161922 80%); }
-    .stat.submitted .value { color: #6dde85; }
-    .stat.unsubmitted { border-color: #5a3722; background: linear-gradient(180deg, #2a1a12 0%, #161922 80%); }
-    .stat.unsubmitted .value { color: #f0a06f; }
-    .stat.errors .value { color: #f0a06f; }
-    .stat.current .value { color: #5fa8ff; }
-
-    .running-tag {
-      display: inline-block; margin-left: 6px;
-      padding: 1px 8px; font-size: 10px;
-      border-radius: 999px;
-      background: #1d3a26; color: #6dde85;
-      vertical-align: middle;
-    }
-    .running-tag.idle { background: #2a2f3d; color: #93a0b5; }
-    .running-tag.paused { background: #3d2c1d; color: #f0a06f; }
-
-    .updated-row {
-      max-width: 540px; margin: 12px auto 0;
-      text-align: right; font-size: 11px; color: #6f7c91;
-    }
-
-    .footnote {
-      max-width: 540px; margin: 18px auto 0;
-      font-size: 11px; color: #6f7c91; line-height: 1.5;
-      text-align: center;
-    }
-    .footnote a { color: #7892b8; }
-
-    @media (min-width: 600px) {
-      .status-grid { grid-template-columns: repeat(4, 1fr); }
-    }
-
-    /* 제어 버튼 (시작 / 일시정지) */
-    .control-row {
-      max-width: 540px; margin: 0 auto 14px;
-      display: flex; gap: 10px;
-    }
-    .btn-ctrl {
-      flex: 1; padding: 14px;
-      border-radius: 10px; border: none;
-      font-size: 15px; font-weight: 600;
-      letter-spacing: 0.3px;
-    }
-    .btn-ctrl:disabled { opacity: 0.45; }
-    .btn-start { background: #2f78d6; color: white; }
-    .btn-start:active:not(:disabled) { background: #2563b3; }
-    .btn-pause { background: #2a3142; color: #c8d2e3; border: 1px solid #394157; }
-    .btn-pause:active:not(:disabled) { background: #20263a; }
-    .delay-row {
-      max-width: 540px; margin: 0 auto 14px;
+    .mcard-head {
       display: flex; align-items: center; gap: 8px;
-      font-size: 13px; color: #9fb0c9;
+      padding: 10px 13px; border-bottom: 1px solid var(--line);
     }
-    .delay-row select {
-      background: #2a3142; color: #e6edf6; border: 1px solid #394157;
-      border-radius: 8px; padding: 8px 10px; font-size: 14px;
-    }
-    .delay-row #delay-mode-status { font-size: 12px; color: #6f7e96; }
+    .mcard-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
+    .mcard-head .micro { margin-left: 2px; }
+    .mcard-head .tools { margin-left: auto; }
 
-    /* 최근 알파 테이블 */
-    .recent-section {
-      max-width: 540px; margin: 24px auto 0;
+    /* ── 히어로 (라운드 + run pill) ── */
+    .hero { padding: 16px 15px 14px; display: flex; align-items: center; gap: 14px; }
+    .hero .round-big { line-height: 1; }
+    .hero .round-big .n { font-family: var(--mono); font-size: 38px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .hero .round-big .cap { display: block; margin-bottom: 6px; }
+    .hero .hero-side { margin-left: auto; text-align: right; display: flex; flex-direction: column; gap: 7px; align-items: flex-end; }
+    .run-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+      padding: 4px 10px; border-radius: 999px;
+      border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--ink-dim);
     }
-    .recent-section h3 {
-      margin: 0; font-size: 13px; color: #93a0b5;
-      text-transform: uppercase; letter-spacing: 0.6px;
+    .run-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-faint); }
+    .run-pill.is-running { color: var(--acc); border-color: rgba(53,224,161,0.45); }
+    .run-pill.is-running .dot { background: var(--acc); animation: pulse 1.6s ease-in-out infinite; }
+    .run-pill.is-paused { color: var(--warn); border-color: rgba(229,192,75,0.4); }
+    .run-pill.is-paused .dot { background: var(--warn); }
+    @keyframes pulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(53,224,161,0.55); }
+      60% { box-shadow: 0 0 0 6px rgba(53,224,161,0); }
     }
-    .recent-head {
-      display: flex; align-items: center; justify-content: space-between;
-      margin: 0 0 8px;
+    .hero-sub { font-size: 11px; color: var(--ink-faint); max-width: 170px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .ctrl-row { display: flex; gap: 8px; padding: 0 15px 14px; }
+    .btn-ctrl {
+      flex: 1; padding: 13px; border-radius: 4px; border: none;
+      font-size: 14px; font-weight: 700; font-family: var(--sans); letter-spacing: 0.02em;
     }
-    .btn-clear-submits {
-      background: #2a3142; color: #9aa6bb; border: 1px solid #394157;
-      border-radius: 6px; padding: 5px 12px; font-size: 12px;
+    .btn-ctrl:disabled { opacity: 0.4; }
+    .btn-start { background: var(--acc); color: var(--acc-ink); }
+    .btn-pause { background: var(--surface-3); color: var(--ink); border: 1px solid var(--line-strong); }
+
+    /* ── 스탯 그리드 ── */
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+    .stat {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+      padding: 11px 12px 10px; position: relative; overflow: hidden;
+      display: flex; flex-direction: column; gap: 4px;
     }
-    .btn-clear-submits:active { background: #20263a; }
-    .btn-clear-submits:disabled { opacity: 0.5; }
-    #recent-table {
-      width: 100%; border-collapse: collapse;
-      background: #161922; border: 1px solid #232838; border-radius: 10px;
-      overflow: hidden; font-size: 12px;
-      font-variant-numeric: tabular-nums;
+    .stat::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--edge, transparent); }
+    .stat .value { font-family: var(--mono); font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--vink, var(--ink)); }
+    .stat.s-acc  { --edge: var(--acc); --vink: var(--acc); }
+    .stat.s-mut  { --edge: var(--o-mut); }
+    .stat.s-xo   { --edge: var(--o-xo); }
+    .stat.s-warn { --edge: var(--warn); --vink: var(--warn); }
+    .stat.s-plain{ --edge: var(--line-strong); }
+
+    /* ── 진화 차트 ── */
+    .chart-wrap { position: relative; padding: 8px 8px 2px; }
+    #evo-chart { display: block; width: 100%; height: 190px; }
+    #evo-comp { display: block; width: 100%; height: 30px; margin-top: 2px; }
+    .legend-row { display: flex; gap: 11px; flex-wrap: wrap; padding: 7px 13px 11px; }
+    .lg { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--ink-dim); }
+    .lg .sw { width: 8px; height: 8px; border-radius: 50%; }
+    .lg .sw.rand { background: var(--o-rand); } .lg .sw.mut { background: var(--o-mut); }
+    .lg .sw.xo { background: var(--o-xo); }
+    .lg .sw.best { width: 13px; height: 0; border-top: 2px solid var(--acc); border-radius: 0; }
+    .evo-tip {
+      position: absolute; z-index: 5; pointer-events: none;
+      max-width: 240px;
+      background: rgba(14,21,18,0.97); border: 1px solid var(--line-strong); border-radius: 4px;
+      padding: 8px 10px; font-size: 11.5px; line-height: 1.5;
+      box-shadow: 0 10px 26px rgba(0,0,0,0.5); display: none;
     }
-    #recent-table thead { background: #1d2230; }
-    #recent-table th, #recent-table td {
-      padding: 8px 6px; text-align: center;
-      border-bottom: 1px solid #1f2330;
+    .evo-tip .h { font-family: var(--mono); font-weight: 600; margin-bottom: 2px; }
+    .evo-tip .d { color: var(--ink-dim); }
+    .evo-tip .g { margin-top: 4px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); word-break: break-all; }
+    .evo-empty { padding: 30px 14px; text-align: center; color: var(--ink-faint); font-size: 12px; }
+
+    /* ── GA 상태 칩 ── */
+    .ga-chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 13px; }
+    .ga-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--mono); font-size: 11px;
+      border: 1px solid var(--line-strong); background: var(--surface-2);
+      color: var(--ink-dim); border-radius: 999px; padding: 5px 11px;
     }
-    #recent-table th { color: #93a0b5; font-weight: 600; font-size: 11px; }
-    #recent-table tbody tr:last-child td { border-bottom: none; }
-    .c-pass { color: #6dde85; }
-    .c-fail { color: #ff8d97; }
-    .c-err  { color: #f0a06f; }
-    .c-pend { color: #93a0b5; }
-    .badge-mini {
-      display: inline-block; padding: 1px 7px;
-      border-radius: 999px; font-size: 10px; font-weight: 600;
+    .ga-chip b { color: var(--acc); font-weight: 600; }
+
+    /* ── 라이브 피드 ── */
+    .feed {
+      background: #060a08;
+      padding: 10px 12px 12px;
+      font-family: var(--mono); font-size: 11px; line-height: 1.5;
+      color: #becfc4;
+      height: 340px; overflow-y: auto;
+      overscroll-behavior: contain;
     }
-    .badge-mini.sub  { background: #163b1c; color: #6dde85; border: 1px solid #2c5331; }
-    .badge-mini.rej  { background: #3a2519; color: #f0a06f; border: 1px solid #5a3722; }
-    .badge-mini.errt { background: #2a1a1f; color: #ff8d97; border: 1px solid #4d2730; }
-    .badge-mini.dot     { background: #2a3142; color: #93a0b5; border: 1px solid #394157; }
-    .badge-mini.partial { background: #3a2f19; color: #f5d97f; border: 1px solid #5a4a22; }
-    #recent-table tr.row-partial { background: rgba(245, 217, 127, 0.04); }
-    .recent-empty {
-      padding: 14px; text-align: center; color: #6f7c91; font-size: 12px;
+    .log-line { display: flex; gap: 9px; padding: 1.5px 0; }
+    .log-line .ts {
+      flex: none; width: 50px; text-align: right;
+      color: var(--ink-faint); font-size: 9.5px; line-height: 1.75; user-select: none;
+      white-space: nowrap;
     }
+    .log-line .msg { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .log-line.lvl-warn .msg { color: var(--warn); }
+    .log-line.lvl-error .msg { color: var(--danger); }
+    .log-line.lvl-pass .msg { color: var(--acc); font-weight: 600; }
+    .feed.core-only .log-line.lvl-info { display: none; }
+    .log-divider { display: flex; align-items: center; gap: 8px; margin: 8px 0 5px; }
+    .log-divider .ld-chip {
+      flex: none; font-size: 9px; font-weight: 600; letter-spacing: 0.09em;
+      border: 1px solid currentColor; border-radius: 999px; padding: 1.5px 8px; white-space: nowrap;
+    }
+    .log-divider .ld-sum {
+      flex: none; max-width: 55%;
+      color: var(--ink-dim); font-size: 9.5px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .log-divider .ld-line { flex: 1 1 8px; height: 1px; background: currentColor; opacity: 0.28; min-width: 8px; }
+    .log-divider.round-color-0 { color: #3987e5; }
+    .log-divider.round-color-1 { color: #35e0a1; }
+    .log-divider.round-color-2 { color: #e5c04b; }
+    .log-divider.round-color-3 { color: #d55181; }
+    .log-divider.round-color-4 { color: #9d8cf0; }
+    .log-divider.round-color-5 { color: #e88a52; }
+    .core-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; color: var(--ink-dim); font-family: var(--sans);
+    }
+    .core-toggle input { accent-color: var(--acc); width: 14px; height: 14px; margin: 0; }
+    .recent-empty { padding: 16px; text-align: center; color: var(--ink-faint); font-size: 12px; }
+
+    /* ── 하단 ── */
+    .delay-row { display: flex; align-items: center; gap: 8px; padding: 11px 13px; font-size: 12px; color: var(--ink-dim); }
+    .delay-row select {
+      background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-strong);
+      border-radius: 4px; padding: 8px 10px; font-size: 13px; font-family: var(--mono);
+    }
+    .delay-row .st { font-size: 10.5px; color: var(--ink-faint); }
+    .updated-row { text-align: right; font-size: 10.5px; color: var(--ink-faint); margin: 2px 2px 12px; font-family: var(--mono); }
+    .desktop-btn-row { text-align: center; margin-top: 6px; }
+    .desktop-btn-row a {
+      display: inline-block; padding: 11px 20px;
+      background: var(--surface-3); color: var(--ink); font-weight: 600; font-size: 13px;
+      border: 1px solid var(--line-strong); border-radius: 4px; text-decoration: none;
+    }
+    .desktop-hint { display: block; margin-top: 7px; color: var(--ink-faint); font-size: 10.5px; }
   </style>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">HYFE <span class="accent">IQC</span></div>
+    <div class="brand">
+      <div class="brand-main">HYFE <span class="accent">IQC</span></div>
+      <div class="brand-sub">Evolution Observatory</div>
+    </div>
     <div id="user-row" hidden>
       <span class="who" id="user-name"></span>
       <button class="btn-logout" id="btn-logout" type="button">로그아웃</button>
@@ -235,7 +273,7 @@
     <!-- ── 로그인 ── -->
     <section id="screen-login" class="login-card">
       <h1>로그인</h1>
-      <div class="sub">WQB 아이디 + 비밀번호로 진행 상황만 확인합니다.</div>
+      <div class="sub">WQB 아이디 + 비밀번호로 진화 현황을 확인합니다.</div>
       <form id="form-login" autocomplete="on">
         <label>WQB 이메일
           <input type="email" id="username" autocomplete="username" required />
@@ -251,77 +289,118 @@
 
     <!-- ── 진행 상황 ── -->
     <section id="screen-status" hidden>
-      <div class="control-row">
-        <button id="btn-start" class="btn-ctrl btn-start">▶ 실행</button>
-        <button id="btn-pause" class="btn-ctrl btn-pause" disabled>⏸ 일시정지</button>
-      </div>
-      <div class="delay-row">
-        <label for="delay-mode">Delay 테스트</label>
-        <select id="delay-mode">
-          <option value="0">Delay=0</option>
-          <option value="1">Delay=1</option>
-          <option value="mix">혼합(랜덤)</option>
-        </select>
-        <span id="delay-mode-status"></span>
-      </div>
-      <div class="status-grid">
-        <div class="stat current">
-          <div class="label">현재 라운드 <span id="run-tag" class="running-tag idle">idle</span></div>
-          <div class="value" id="cur-round">—</div>
-          <div class="sub" id="cur-status"></div>
-        </div>
-        <div class="stat">
-          <div class="label">완료 라운드</div>
-          <div class="value" id="completed-round">0</div>
-        </div>
-        <div class="stat submitted">
-          <div class="label">Added</div>
-          <div class="value" id="submitted-count">0</div>
-          <div class="sub">리스트 추가</div>
-        </div>
-        <div class="stat unsubmitted">
-          <div class="label">Not added</div>
-          <div class="value" id="unsubmitted-count">0</div>
-          <div class="sub">미추가</div>
-        </div>
-      </div>
-      <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
 
-      <section class="recent-section">
-        <div class="recent-head">
-          <h3>최근 리스트 추가 시도</h3>
-          <button type="button" id="btn-clear-submits" class="btn-clear-submits">화면 비우기</button>
+      <!-- 히어로: 현재 라운드 + 제어 -->
+      <div class="mcard">
+        <div class="hero">
+          <div class="round-big">
+            <span class="micro cap">현재 라운드</span>
+            <span class="n" id="cur-round">—</span>
+          </div>
+          <div class="hero-side">
+            <span class="run-pill" id="run-pill"><span class="dot"></span><span id="run-tag">idle</span></span>
+            <span class="hero-sub" id="cur-status"></span>
+          </div>
         </div>
-        <table id="recent-table">
-          <thead>
-            <tr>
-              <th>R/#</th>
-              <th class="c-pass">PASS</th>
-              <th class="c-fail">FAIL</th>
-              <th>상태</th>
-              <th>시각</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-        <div id="recent-empty" class="recent-empty" hidden>리스트 추가 시도가 아직 없습니다.</div>
-      </section>
+        <div class="ctrl-row">
+          <button id="btn-start" class="btn-ctrl btn-start">▶ 진화 실행</button>
+          <button id="btn-pause" class="btn-ctrl btn-pause" disabled>⏸ 일시정지</button>
+        </div>
+      </div>
+
+      <!-- 스탯 -->
+      <div class="stat-grid">
+        <div class="stat s-plain">
+          <span class="micro">완료 라운드</span>
+          <span class="value" id="completed-round">0</span>
+        </div>
+        <div class="stat s-acc">
+          <span class="micro">Added</span>
+          <span class="value" id="submitted-count">0</span>
+        </div>
+        <div class="stat s-warn">
+          <span class="micro">미추가</span>
+          <span class="value" id="unsubmitted-count">0</span>
+        </div>
+      </div>
+
+      <!-- 진화 궤적 -->
+      <div class="mcard">
+        <div class="mcard-head">
+          <h3>진화 궤적</h3><span class="micro">Sharpe / Round</span>
+        </div>
+        <div class="chart-wrap" id="chart-wrap">
+          <svg id="evo-chart"></svg>
+          <svg id="evo-comp"></svg>
+          <div class="evo-tip" id="evo-tip"></div>
+          <div class="evo-empty" id="evo-empty" hidden>아직 시뮬 데이터가 없습니다.</div>
+        </div>
+        <div class="legend-row">
+          <span class="lg"><span class="sw rand"></span>탐색</span>
+          <span class="lg"><span class="sw mut"></span>변이</span>
+          <span class="lg"><span class="sw xo"></span>교차</span>
+          <span class="lg"><span class="sw best"></span>라운드 최고</span>
+        </div>
+      </div>
+
+      <!-- GA 상태 -->
+      <div class="mcard">
+        <div class="mcard-head"><h3>유전 알고리즘</h3><span class="micro">GA State</span></div>
+        <div class="ga-chips">
+          <span class="ga-chip">엘리트 seed <b id="ga-seed">0</b></span>
+          <span class="ga-chip">focus 대기 <b id="ga-focus">0</b></span>
+          <span class="ga-chip">최고 세대 <b id="ga-gen">g0</b></span>
+          <span class="ga-chip">밴딧 <b id="ga-bandit">OFF</b></span>
+        </div>
+      </div>
+
+      <!-- 라이브 피드 -->
+      <div class="mcard">
+        <div class="mcard-head">
+          <h3>라이브 피드</h3><span class="micro">Live</span>
+          <div class="tools">
+            <label class="core-toggle"><input type="checkbox" id="core-only" checked /> 핵심만</label>
+          </div>
+        </div>
+        <div id="feed" class="feed core-only"></div>
+        <div id="feed-empty" class="recent-empty" hidden>로그가 아직 없습니다.</div>
+      </div>
+
+      <!-- Delay -->
+      <div class="mcard">
+        <div class="delay-row">
+          <label for="delay-mode">Delay 테스트</label>
+          <select id="delay-mode">
+            <option value="0">Delay=0</option>
+            <option value="1">Delay=1</option>
+            <option value="mix">혼합(랜덤)</option>
+          </select>
+          <span id="delay-mode-status" class="st"></span>
+        </div>
+      </div>
+
+      <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
 
       <div class="desktop-btn-row">
         <a href="/?desktop=1">🖥 데스크톱 버전으로 보기</a>
-        <span class="desktop-hint">상세 로그 / 워커 제어 / 모든 알파 보기</span>
+        <span class="desktop-hint">상세 로그 · 파이프라인 · 세대 사다리 · 워커 제어</span>
       </div>
     </section>
   </main>
 
   <script>
   (() => {
+    'use strict';
     const $ = (s) => document.querySelector(s);
     const screenLogin = $('#screen-login');
     const screenStatus = $('#screen-status');
     const userRow = $('#user-row');
     const userName = $('#user-name');
     let pollTimer = null;
+    let evoTimer = null;
+
+    const ORIGIN_COLOR = { rand: '#3987e5', mut: '#c98500', xo: '#d55181', etc: '#5d6f64' };
+    const ORIGIN_LABEL = { rand: '탐색', mut: '변이', xo: '교차', etc: '개편 전' };
 
     function show(loggedIn, who) {
       screenLogin.hidden = loggedIn;
@@ -346,28 +425,22 @@
     }
 
     function fmtRunTag(s) {
+      const pill = $('#run-pill');
       const tag = $('#run-tag');
       const running = !!s.running;
       const alive = !!s.thread_alive;
       const paused = !!s.paused || !!s.paused_in_memory;
-      tag.classList.remove('idle', 'paused');
-      if (running && alive && !paused) {
-        tag.textContent = '실행 중';
-      } else if (running && paused) {
-        tag.textContent = '일시정지';
-        tag.classList.add('paused');
-      } else if (alive) {
-        tag.textContent = '워커 살아있음';
-      } else {
-        tag.textContent = 'idle';
-        tag.classList.add('idle');
-      }
+      pill.classList.remove('is-running', 'is-paused');
+      if (running && alive && !paused) { tag.textContent = 'EVOLVING'; pill.classList.add('is-running'); }
+      else if (running && paused) { tag.textContent = 'PAUSED'; pill.classList.add('is-paused'); }
+      else if (alive) { tag.textContent = 'ALIVE'; }
+      else { tag.textContent = 'IDLE'; }
     }
 
     function applyStatus(s) {
       // focused sub-round 일 때 'N-M' 으로 표기 (예: 137-1).
       const lbl = s.current_round_label || (s.current_round != null ? String(s.current_round) : null);
-      $('#cur-round').textContent = lbl ? `#${lbl}` : '—';
+      $('#cur-round').textContent = lbl && lbl !== '—' ? `#${lbl}` : '—';
       $('#cur-status').textContent = s.current_status || '';
       $('#completed-round').textContent = String(s.last_round_num || 0);
       $('#submitted-count').textContent = String(s.submitted_count || 0);
@@ -384,85 +457,305 @@
       $('#updated-at').textContent = now.toLocaleTimeString('ko-KR', { hour12: false });
     }
 
-    function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-      ));
+    // ── 라이브 피드 (XSS 안전 — textContent 만) ──
+    const feedEl = $('#feed');
+    let lastLogId = 0;
+    let logInit = false;
+    const seenLogIds = new Set();
+
+    function fmtLogTime(ts) {
+      // 고정폭 HH:MM:SS — ko-KR 의 "15시 39분 8초" 는 열이 깨진다.
+      return ts ? new Date(ts * 1000).toTimeString().slice(0, 8) : '';
+    }
+    function classifyLine(text, level) {
+      const lvl = (level || '').toLowerCase();
+      if (lvl === 'pass') return 'lvl-pass';
+      if (lvl === 'warn') return 'lvl-warn';
+      if (lvl === 'error') return 'lvl-error';
+      const t = text || '';
+      if (/🏆|best 발견/.test(t)) return 'lvl-pass';
+      // 텍스트 휴리스틱 경고(개별 fail 결과 등)는 색만 warn — 핵심만 모드에선 숨긴다.
+      if (/⚠|🛑|ERROR|error|예외|실패|fail/i.test(t)) return 'lvl-warn lvl-info';
+      return 'lvl-info';
+    }
+    function buildLogEl(row) {
+      if (row.level === 'round_start' || row.level === 'round_end') {
+        const root = document.createElement('div');
+        root.className = 'log-divider round-color-' + (Math.abs(Number(row.round_num) || 0) % 6);
+        const raw = String(row.line || '');
+        const t = raw.replace(/═+/g, '').trim();
+        const m = /^ROUND\s+(\S+)\s*([^—]*?)\s*(?:—\s*(.*))?$/.exec(t);
+        const chip = document.createElement('span');
+        chip.className = 'ld-chip';
+        chip.textContent = m ? ('ROUND ' + m[1] + (m[2] ? ' ' + m[2].trim() : '')) : (t || '—');
+        const l1 = document.createElement('span'); l1.className = 'ld-line';
+        const l2 = document.createElement('span'); l2.className = 'ld-line';
+        root.appendChild(l1);
+        root.appendChild(chip);
+        if (m && m[3]) {
+          const sum = document.createElement('span');
+          sum.className = 'ld-sum';
+          sum.textContent = m[3].replace(/\s*\/\s*/g, ' · ');
+          root.appendChild(sum);
+        }
+        root.appendChild(l2);
+        root.title = fmtLogTime(row.ts) + '  ' + raw;
+        return root;
+      }
+      const line = document.createElement('div');
+      line.className = 'log-line ' + classifyLine(row.line || '', row.level || '');
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = fmtLogTime(row.ts);
+      const msg = document.createElement('span');
+      msg.className = 'msg';
+      msg.textContent = row.line || '';
+      line.appendChild(ts);
+      line.appendChild(msg);
+      return line;
     }
 
-    function fmtTime(ts) {
-      if (!ts) return '—';
-      try {
-        // 뷰어/서버 타임존 무관하게 항상 KST(Asia/Seoul) 로 표기.
-        return new Date(ts * 1000).toLocaleTimeString('en-GB', {
-          timeZone: 'Asia/Seoul', hour12: false,
-          hour: '2-digit', minute: '2-digit', second: '2-digit',
-        });
-      } catch (_) {
-        const d = new Date((ts + 9 * 3600) * 1000);  // UTC+9 수동 폴백
-        const z = (n) => String(n).padStart(2, '0');
-        return `${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;
+    async function refreshLogs() {
+      if (!feedEl) return;
+      if (!logInit) {
+        // 처음엔 최근 ~150줄만 tail — latest/비우기 지점은 status 가 알려준다.
+        const st = await api('/api/status');
+        if (!(st.ok && st.data && st.data.ok)) return;
+        lastLogId = Math.max(
+          Number(st.data.last_cleared_log_id || 0),
+          Number(st.data.latest_log_id || 0) - 150);
+        logInit = true;
       }
-    }
-    // XSS 안전: innerHTML 미사용 — 모든 동적 값은 textContent/.title 로만.
-    function mkCell(text, cls, title) {
-      const td = document.createElement('td');
-      td.textContent = (text == null ? '' : String(text));
-      if (cls) td.className = cls;
-      if (title) td.title = String(title);
-      return td;
-    }
-    function mkBadge(submitted, ss) {
-      const span = document.createElement('span');
-      let extra = 'dot', label = '—', title = ss || '리스트 추가 시도';
-      if (submitted) {                                  // 'Submit' 리스트 추가 성공
-        extra = 'sub'; label = '✅ 추가'; title = ss || 'Submit 리스트 추가';
-        const m = ss.match(/0?\.\d+/);
-        if (m && /corr/i.test(ss)) label = '✅ 추가 · corr ' + m[0];
-      } else if (ss.startsWith('skip_star')) {          // all-pass 아님 / corr>0.7 → 미추가
-        extra = 'dot'; label = '— 미추가';
-        const m = ss.match(/0?\.\d+/);
-        if (m && /corr/i.test(ss)) label = '— 미추가 · corr ' + m[0];
-        title = ss.slice(0, 90);
-      } else if (ss.startsWith('star_fail')) { extra = 'errt'; label = '⚠ 추가실패'; title = ss; }
-      else if (ss.startsWith('rejected:')) {            // (구버전 제출 기록 호환)
-        extra = 'rej'; label = '✗ 거절';
-        const body = ss.slice('rejected:'.length);
-        const m = body.match(/\d+\.\d+/);
-        if (m && /correlation/i.test(body)) label = '✗ 거절 · corr ' + m[0];
-        title = body.slice(0, 80);
-      } else if (ss.startsWith('fail:')) { extra = 'errt'; label = '⚠ 실패'; title = ss; }
-      else if (ss === 'disabled') { extra = 'dot'; label = '⛔ 비활성'; title = ss; }
-      else if (ss === 'not_found') { extra = 'errt'; label = '⚠ 못찾음'; title = ss; }
-      span.className = 'badge-mini ' + extra;
-      span.textContent = label;
-      span.title = title;
-      return span;
-    }
-    function renderRecent(rows) {
-      const tbody = document.querySelector('#recent-table tbody');
-      const empty = document.querySelector('#recent-empty');
-      tbody.replaceChildren();
-      if (!rows || rows.length === 0) {
-        empty.hidden = false;
-        document.querySelector('#recent-table').style.display = 'none';
+      const r = await api('/api/logs?since=' + lastLogId + '&limit=300');
+      if (!(r.ok && r.data && r.data.ok)) return;
+      const rows = r.data.logs || [];
+      if (!rows.length) {
+        $('#feed-empty').hidden = feedEl.childElementCount > 0;
         return;
       }
-      empty.hidden = true;
-      document.querySelector('#recent-table').style.display = '';
-      for (const a of rows) {
-        const tr = document.createElement('tr');
-        const ss = (a.submit_status || '');
-        tr.appendChild(mkCell(`R${a.round_num}/#${a.idx}`, null, (a.code || '').slice(0, 200)));
-        tr.appendChild(mkCell(a.pass_count || 0, 'c-pass'));
-        tr.appendChild(mkCell(a.fail_count || 0, 'c-fail'));
-        const bcell = document.createElement('td');
-        bcell.appendChild(mkBadge(!!a.submitted, ss));
-        tr.appendChild(bcell);
-        tr.appendChild(mkCell(fmtTime(a.ts), 'c-pend'));
-        tbody.appendChild(tr);
+      $('#feed-empty').hidden = true;
+      // 사용자가 위로 스크롤해 읽는 중이면 붙잡아두고, 바닥 근처면 따라간다.
+      const nearBottom = feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 60;
+      for (const row of rows) {
+        const id = Number(row.id);
+        if (Number.isFinite(id) && id > 0) {
+          if (seenLogIds.has(id)) continue;
+          seenLogIds.add(id);
+          if (id > lastLogId) lastLogId = id;
+        }
+        feedEl.appendChild(buildLogEl(row));
+      }
+      while (feedEl.childElementCount > 600) feedEl.removeChild(feedEl.firstChild);
+      if (nearBottom) feedEl.scrollTop = feedEl.scrollHeight;
+    }
+
+    const coreOnlyEl = $('#core-only');
+    if (coreOnlyEl) {
+      coreOnlyEl.addEventListener('change', () => {
+        feedEl.classList.toggle('core-only', coreOnlyEl.checked);
+        feedEl.scrollTop = feedEl.scrollHeight;
+      });
+    }
+
+    // ── 진화 미니차트 ──
+    let _dots = [];
+    function parseOrigin(desc) {
+      const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(desc || '');
+      if (!m) return { op: 'etc', gen: 0 };
+      return { op: m[1], gen: Number(m[2] || 0) };
+    }
+    function sharpeOf(a) {
+      if (a.sharpe != null && isFinite(Number(a.sharpe))) return Number(a.sharpe);
+      const v = parseFloat(a.metrics && a.metrics.sharpe);
+      return isFinite(v) ? v : null;
+    }
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      return el;
+    }
+
+    async function refreshEvo() {
+      const r = await api('/api/recent_alphas?limit=240');
+      if (!(r.ok && r.data && r.data.ok)) return;
+      const rows = (r.data.alphas || []).slice();
+      rows.reverse();
+      renderEvo(rows);
+      // GA 칩 — 데스크톱 status 의 ga 블록 재사용.
+      const r2 = await api('/api/status');
+      if (r2.ok && r2.data && r2.data.ok && r2.data.ga) {
+        $('#ga-seed').textContent = String(r2.data.ga.seed_pool || 0);
+        $('#ga-focus').textContent = String(r2.data.ga.focus_queue || 0);
+        $('#ga-bandit').textContent = r2.data.ga.bandit ? 'ON' : 'OFF';
       }
     }
+
+    function renderEvo(alphas) {
+      const svg = $('#evo-chart');
+      const comp = $('#evo-comp');
+      const empty = $('#evo-empty');
+      svg.replaceChildren();
+      comp.replaceChildren();
+      _dots = [];
+
+      // round_id 그룹 (focus sub-round 는 round_id 가 다름).
+      const map = new Map();
+      let maxGen = 0;
+      for (const a of alphas) {
+        const key = a.round_id != null ? String(a.round_id) : `${a.round_num}/${a.phase || 0}`;
+        if (!map.has(key)) map.set(key, { key, roundNum: Number(a.round_num || 0), phase: Number(a.phase || 0), alphas: [] });
+        map.get(key).alphas.push(a);
+        const o = parseOrigin(a.desc);
+        const gen = Math.max(Number(a.generation || 0), o.gen);
+        if (gen > maxGen) maxGen = gen;
+      }
+      $('#ga-gen').textContent = 'g' + maxGen;
+      const groups = [...map.values()].sort((x, y) => Number(x.key) - Number(y.key));
+      if (groups.length > 1) groups.shift();   // limit 절단으로 부분 fetch 된 최고(最古) 그룹 제거
+      empty.hidden = groups.length > 0;
+      if (!groups.length) return;
+
+      const W = svg.clientWidth || 340;
+      const H = svg.clientHeight || 190;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      const mL = 34, mR = 8, mT = 10, mB = 16;
+      const plotW = W - mL - mR, plotH = H - mT - mB;
+      const n = groups.length;
+      const bw = plotW / n;
+
+      let mn = 0, mx = 1;
+      for (const g of groups) for (const a of g.alphas) {
+        const v = sharpeOf(a);
+        if (v == null) continue;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      const lo = Math.max(-4, Math.floor(mn * 2) / 2);
+      const hi = Math.min(4, Math.ceil(mx * 2) / 2);
+      const y = (v) => mT + plotH - ((v - lo) / (hi - lo)) * plotH;
+      const xOf = (gi) => mL + (gi + 0.5) * bw;
+
+      for (let t = 0; t <= 4; t++) {
+        const v = lo + (hi - lo) * (t / 4);
+        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(v), y2: y(v), stroke: 'rgba(233,241,235,0.06)', 'stroke-width': 1 }));
+        const lbl = svgEl('text', { x: mL - 6, y: y(v) + 3, 'text-anchor': 'end', fill: '#5d6f64', 'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
+        lbl.textContent = v.toFixed(1);
+        svg.appendChild(lbl);
+      }
+      if (lo < 0 && hi > 0) {
+        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(0), y2: y(0), stroke: 'rgba(233,241,235,0.18)', 'stroke-width': 1, 'stroke-dasharray': '3 4' }));
+      }
+      const step = Math.max(1, Math.ceil(n / 6));
+      for (let i = 0; i < n; i += step) {
+        const g = groups[i];
+        if (g.phase > 0) continue;
+        const lbl = svgEl('text', { x: xOf(i), y: H - 3, 'text-anchor': 'middle', fill: '#5d6f64', 'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
+        lbl.textContent = 'R' + g.roundNum;
+        svg.appendChild(lbl);
+      }
+
+      const bestPts = [];
+      groups.forEach((g, gi) => {
+        let best = null;
+        for (const a of g.alphas) {
+          const v = sharpeOf(a);
+          if (v == null) continue;
+          if (best == null || v > best) best = v;
+        }
+        if (best != null) bestPts.push([xOf(gi), y(Math.max(lo, Math.min(hi, best)))]);
+      });
+      if (bestPts.length > 1) {
+        const dPath = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('');
+        svg.appendChild(svgEl('path', { d: dPath, fill: 'none', stroke: '#35e0a1', 'stroke-width': 2, 'stroke-linejoin': 'round', opacity: 0.9 }));
+      }
+
+      groups.forEach((g, gi) => {
+        const cnt = g.alphas.length;
+        g.alphas.forEach((a, ai) => {
+          const v = sharpeOf(a);
+          if (v == null) return;
+          const o = parseOrigin(a.desc);
+          const jitter = cnt > 1 ? ((ai / (cnt - 1)) - 0.5) * Math.min(bw * 0.5, 14) : 0;
+          const cx = xOf(gi) + jitter;
+          const cy = y(Math.max(lo, Math.min(hi, v)));
+          const submitted = !!a.submitted;
+          svg.appendChild(svgEl('circle', {
+            cx: cx.toFixed(1), cy: cy.toFixed(1),
+            r: submitted ? 3.6 : 2.5,
+            fill: ORIGIN_COLOR[o.op] || ORIGIN_COLOR.etc,
+            'fill-opacity': submitted ? 1 : 0.8,
+            stroke: submitted ? '#e9f1eb' : '#0e1512',
+            'stroke-width': submitted ? 1.3 : 0.8,
+          }));
+          _dots.push({ x: cx, y: cy, a, o, label: g.phase > 0 ? `${g.roundNum}·f${g.phase}` : String(g.roundNum) });
+        });
+      });
+
+      // 구성 스트립
+      const cW = comp.clientWidth || W;
+      const cH = comp.clientHeight || 30;
+      comp.setAttribute('viewBox', `0 0 ${cW} ${cH}`);
+      const cbw = (cW - mL - mR) / n;
+      const barW = Math.max(1.5, cbw - 1.5);
+      groups.forEach((g, gi) => {
+        const counts = { rand: 0, mut: 0, xo: 0, etc: 0 };
+        for (const a of g.alphas) counts[parseOrigin(a.desc).op]++;
+        const total = g.alphas.length || 1;
+        let yCursor = cH - 2;
+        for (const op of ['rand', 'mut', 'xo', 'etc']) {
+          if (!counts[op]) continue;
+          const h = (counts[op] / total) * (cH - 4);
+          yCursor -= h;
+          comp.appendChild(svgEl('rect', {
+            x: (mL + gi * cbw + 0.5).toFixed(1), y: yCursor.toFixed(1),
+            width: barW.toFixed(1), height: Math.max(1, h - 0.8).toFixed(1),
+            fill: ORIGIN_COLOR[op], 'fill-opacity': 0.75, rx: 1,
+          }));
+        }
+      });
+    }
+
+    // 탭(터치) 툴팁 — 가장 가까운 점.
+    (function initTip() {
+      const wrap = $('#chart-wrap');
+      const tip = $('#evo-tip');
+      const svg = $('#evo-chart');
+      function onTap(ev) {
+        if (!_dots.length) return;
+        const pt = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
+        const rect = svg.getBoundingClientRect();
+        const mx = pt.clientX - rect.left;
+        const my = pt.clientY - rect.top;
+        let best = null, bd = 26 * 26;
+        for (const d of _dots) {
+          const dx = d.x - mx, dy = d.y - my;
+          const dist = dx * dx + dy * dy;
+          if (dist < bd) { bd = dist; best = d; }
+        }
+        if (!best) { tip.style.display = 'none'; return; }
+        tip.replaceChildren();
+        const h = document.createElement('div');
+        h.className = 'h';
+        h.textContent = `R${best.label} #${best.a.idx} · ${ORIGIN_LABEL[best.o.op]}` + (best.o.gen ? ` g${best.o.gen}` : '');
+        const d1 = document.createElement('div');
+        d1.className = 'd';
+        const sh = sharpeOf(best.a);
+        d1.textContent = `Sharpe ${sh != null ? sh.toFixed(2) : '—'} · PASS ${best.a.pass_count || 0} · FAIL ${best.a.fail_count || 0}` + (best.a.submitted ? ' · ✅' : '');
+        const g = document.createElement('div');
+        g.className = 'g';
+        g.textContent = best.a.desc || '';
+        tip.appendChild(h); tip.appendChild(d1); tip.appendChild(g);
+        const wrapRect = wrap.getBoundingClientRect();
+        tip.style.display = 'block';
+        const tw = tip.offsetWidth || 200;
+        const px = best.x + (rect.left - wrapRect.left);
+        const py = best.y + (rect.top - wrapRect.top);
+        tip.style.left = Math.max(4, Math.min(px - tw / 2, wrapRect.width - tw - 6)) + 'px';
+        tip.style.top = Math.max(4, py - tip.offsetHeight - 12) + 'px';
+        setTimeout(() => { tip.style.display = 'none'; }, 3500);
+      }
+      wrap.addEventListener('click', onTap);
+    })();
 
     async function refresh() {
       const r = await api('/api/m_status');
@@ -474,21 +767,21 @@
       if (r.ok && r.data && r.data.ok) {
         applyStatus(r.data);
       }
-      try {
-        const r2 = await api('/api/m_submits?limit=30');
-        if (r2.ok && r2.data && r2.data.ok) {
-          renderRecent(r2.data.attempts || []);
-        }
-      } catch (_) {}
+      try { await refreshLogs(); } catch (_) {}
     }
 
     function startPolling() {
       stopPolling();
       refresh();
+      refreshEvo();
       pollTimer = setInterval(refresh, 5000);
+      evoTimer = setInterval(refreshEvo, 30000);
       try { initDelayMode(); } catch (e) { console.error('initDelayMode', e); }
     }
-    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (evoTimer) { clearInterval(evoTimer); evoTimer = null; }
+    }
 
     // ── Delay 테스트 모드 ──
     let _delayInit = false;
@@ -552,16 +845,6 @@
       if (!(r.ok && r.data && r.data.ok)) {
         alert('일시정지 실패: ' + (r.data && r.data.detail || JSON.stringify(r.data)));
       }
-      refresh();
-    });
-
-    $('#btn-clear-submits').addEventListener('click', async () => {
-      const b = $('#btn-clear-submits'); b.disabled = true;
-      try {
-        await api('/api/m_submits/clear', { method: 'POST' });
-        renderRecent([]);   // 즉시 비움 (다음 polling 때 비우기 지점 반영됨)
-      } catch (_) {}
-      b.disabled = false;
       refresh();
     });
 

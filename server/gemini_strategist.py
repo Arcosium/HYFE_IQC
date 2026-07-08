@@ -16,8 +16,10 @@ import time
 import logging
 from typing import Any, Callable
 
-from google import genai
-from google.genai import types as genai_types
+# 로컬 LLM seam — Gemini(google.genai) 대신 로컬 Ollama 로 생성(외부 API 미사용, 2026-06-24).
+# local_llm 이 genai/types 드롭인 shim 을 제공 → 아래 호출 코드는 그대로 둔다.
+from . import local_llm as genai
+from .local_llm import types as genai_types
 
 from . import datafield_palette
 from . import alpha_seeds
@@ -36,11 +38,34 @@ _FALLBACK_CHAIN_DEFAULT = (
 )
 
 
-def _model_chain() -> tuple[str, ...]:
+def _using_local_llm() -> bool:
+    return getattr(genai, '__name__', '').endswith('local_llm')
+
+
+def _explicit_model_chain() -> tuple[str, ...]:
     raw = os.environ.get('IQC_MODEL_CHAIN', '')
-    if raw:
-        return tuple(m.strip() for m in raw.split(',') if m.strip())
+    return tuple(m.strip() for m in raw.split(',') if m.strip())
+
+
+def _model_chain() -> tuple[str, ...]:
+    explicit = _explicit_model_chain()
+    if explicit:
+        return explicit
+    if _using_local_llm():
+        return (MODEL,)
     return _FALLBACK_CHAIN_DEFAULT
+
+
+def _effective_max_retries(max_retries: int | None) -> int | None:
+    if max_retries is None:
+        return None
+    if _using_local_llm() and not _explicit_model_chain() and max_retries == 3:
+        return 1
+    return max_retries
+
+
+def _next_model_msg(chain: tuple[str, ...]) -> str:
+    return '다음 모델' if len(chain) > 1 else '모델 체인 종료'
 
 
 SYSTEM_INSTRUCTION = """[역할]
@@ -920,6 +945,7 @@ def generate_strategies(
 
     client = genai.Client(api_key=api_key)
     chain = _model_chain()
+    max_retries = _effective_max_retries(max_retries)
 
     # 캐시 hit ratio 에 따라 temperature 적극 부스팅.
     # 0.05 부터 이미 부스트 시작 (캐시히트 너무 많이 나오는 현 상황 대응).
@@ -993,7 +1019,7 @@ def generate_strategies(
             except (json.JSONDecodeError, ValueError) as parse_err:
                 last_err = parse_err
                 if log_fn:
-                    log_fn(f'⚠ {m}: JSON 파싱 실패 — 다음 모델: {parse_err}')
+                    log_fn(f'⚠ {m}: JSON 파싱 실패 — {_next_model_msg(chain)}: {parse_err}')
                 continue
             except Exception as e:
                 last_err = e
@@ -1001,7 +1027,7 @@ def generate_strategies(
                 if 'cached_content' in err_str.lower() or 'cache' in err_str.lower():
                     _PROMPT_CACHE.pop(_prompt_cache_key(m, api_key), None)
                 if log_fn:
-                    log_fn(f'⚠ {m}: 호출 실패 — 다음 모델: {err_str[:120]}')
+                    log_fn(f'⚠ {m}: 호출 실패 — {_next_model_msg(chain)}: {err_str[:120]}')
                 continue
 
         if log_fn:
@@ -1124,6 +1150,7 @@ def generate_focused_strategies(
 
     client = genai.Client(api_key=api_key)
     chain = _model_chain()
+    max_retries = _effective_max_retries(max_retries)
 
     # focused 모드는 베이스 prompt 가 다르므로 cache 안 씀 (미스 거의 보장).
     user_prompt = _build_focused_prompt(
@@ -1182,12 +1209,12 @@ def generate_focused_strategies(
             except (json.JSONDecodeError, ValueError) as parse_err:
                 last_err = parse_err
                 if log_fn:
-                    log_fn(f'⚠ focused {m}: JSON 파싱 실패 — 다음 모델: {parse_err}')
+                    log_fn(f'⚠ focused {m}: JSON 파싱 실패 — {_next_model_msg(chain)}: {parse_err}')
                 continue
             except Exception as e:
                 last_err = e
                 if log_fn:
-                    log_fn(f'⚠ focused {m}: 호출 실패 — 다음 모델: {str(e)[:120]}')
+                    log_fn(f'⚠ focused {m}: 호출 실패 — {_next_model_msg(chain)}: {str(e)[:120]}')
                 continue
         if log_fn:
             log_fn(f'⚠ focused 전체 모델 체인 실패 (시도 {attempt}). last={str(last_err)[:120]}')
@@ -1288,6 +1315,7 @@ def generate_crossover_strategies(
 
     client = genai.Client(api_key=api_key)
     chain = _model_chain()
+    max_retries = _effective_max_retries(max_retries)
 
     # crossover 프롬프트는 매 호출마다 고유하므로 prompt cache 미사용.
     user_prompt = _build_crossover_prompt(parents, submitted_codes=submitted_codes)
@@ -1324,12 +1352,12 @@ def generate_crossover_strategies(
             except (json.JSONDecodeError, ValueError) as parse_err:
                 last_err = parse_err
                 if log_fn:
-                    log_fn(f'⚠ crossover {m}: JSON 파싱 실패 — 다음 모델: {parse_err}')
+                    log_fn(f'⚠ crossover {m}: JSON 파싱 실패 — {_next_model_msg(chain)}: {parse_err}')
                 continue
             except Exception as e:
                 last_err = e
                 if log_fn:
-                    log_fn(f'⚠ crossover {m}: 호출 실패 — 다음 모델: {str(e)[:120]}')
+                    log_fn(f'⚠ crossover {m}: 호출 실패 — {_next_model_msg(chain)}: {str(e)[:120]}')
                 continue
         if log_fn:
             log_fn(f'⚠ crossover 전체 모델 체인 실패 (시도 {attempt}). last={str(last_err)[:120]}')

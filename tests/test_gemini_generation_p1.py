@@ -32,6 +32,37 @@ class TestSystemInstructionRecalibration(unittest.TestCase):
         self.assertIn('❌', self.si)
 
 
+
+class TestLocalLlmModelChain(unittest.TestCase):
+    def test_local_llm_uses_single_default_model(self):
+        old = os.environ.pop('IQC_MODEL_CHAIN', None)
+        try:
+            self.assertEqual(gs._model_chain(), (gs.MODEL,))
+        finally:
+            if old is not None:
+                os.environ['IQC_MODEL_CHAIN'] = old
+
+    def test_explicit_model_chain_is_respected(self):
+        old = os.environ.get('IQC_MODEL_CHAIN')
+        os.environ['IQC_MODEL_CHAIN'] = 'a,b'
+        try:
+            self.assertEqual(gs._model_chain(), ('a', 'b'))
+        finally:
+            if old is None:
+                os.environ.pop('IQC_MODEL_CHAIN', None)
+            else:
+                os.environ['IQC_MODEL_CHAIN'] = old
+
+    def test_local_llm_default_retry_is_one(self):
+        old = os.environ.pop('IQC_MODEL_CHAIN', None)
+        try:
+            self.assertEqual(gs._effective_max_retries(3), 1)
+            self.assertEqual(gs._effective_max_retries(2), 2)
+        finally:
+            if old is not None:
+                os.environ['IQC_MODEL_CHAIN'] = old
+
+
 class TestSeedAndGroundingWiring(unittest.TestCase):
     def test_research_notes_disabled_returns_empty_without_api(self):
         from server import run_config

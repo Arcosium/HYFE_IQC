@@ -20,12 +20,14 @@ from typing import Any
 
 from . import db as _db
 from . import result_cache
-from . import gemini_strategist
+from . import genome_models
 from . import wqb_browser
 from . import run_config
 from . import wqb_data_service
 from . import settings_fp as _settings_fp
 from . import alpha_ast as _alpha_ast
+from . import alpha_repair as _alpha_repair
+from . import alpha_lint as _alpha_lint
 from .focus_priority import closeness_score as _closeness_score
 from .focus_priority import advance_focus_queue as _advance_focus_queue
 from .focus_priority import NEUTRAL_SCORE as _NEUTRAL_SCORE
@@ -243,40 +245,31 @@ class Worker(threading.Thread):
             self_corr_value = ''
             parent_settings = {}
 
-        feedback = _db.list_feedback(self.user_id)
         errors = _db.list_error_patterns(self.user_id, limit=100)
-        # 캐시 히트 다수 발생 시 Gemini 가 같은 코드를 또 만들고 있다는 뜻 — 회피 가이드 시드.
-        avoid_codes = _db.list_recent_distinct_codes(limit=80)
-        # 이미 제출된 알파 + Submit 거절/무응답으로 끝난 알파 코드 — Gemini 가
-        # self-correlation 충돌 회피하도록 가이드 & 사전 유사도 필터의 비교 기준.
-        # 거절된 영역(예: 0.94 self-corr)을 다시 만들어봐야 또 거절되므로 미리 피한다.
+        # 이미 제출된 알파 + Submit 거절/무응답으로 끝난 알파 코드 — Non-RC 사전 유사도
+        # 필터의 비교 기준. 거절된 영역(예: 0.94 self-corr)을 다시 만들어봐야 또
+        # 거절되므로 미리 피한다.
         submitted_codes = [a.get('code', '') for a in _db.list_submitted_alphas(self.user_id, limit=30)]
         submitted_codes += _db.list_rejected_alpha_codes(self.user_id, limit=40)
         submitted_codes = list(dict.fromkeys(c for c in submitted_codes if c))
-        # 직전 라운드 cache hit ratio — Gemini temperature 부스팅에 활용.
-        prev_cache_ratio = self._prev_cache_hit_ratio()
-        # smilee 정신: 이전 best 알파 → building block, operator/datafield 통계 → preference.
+        # GA 엘리트 seed 풀 — PASS 많은 알파를 유전체로 역추출해 교차/변이 재료로 쓴다.
         try:
             seeds = _db.best_alphas_for_seeding(self.user_id, top_n=5, min_pass_count=5)
-            pref_stats = _db.operator_preference_stats(self.user_id, lookback_alphas=200)
         except Exception as e:
-            self._log_quiet(round_num, f'⚠ seeds/pref_stats 조회 실패: {e}')
-            seeds, pref_stats = [], {}
-
-        # 탐색(비-focus) 라운드: 기존 30-알파 history / seeds / preference / 제출코드를 주입하지
-        # 않는다. 오류 캐시만 학습해 archetype 틀에 갇히지 않고 최대한 다양한 알파를 생성한다.
-        # (제출 자체를 하지 않으므로 submitted 기반 사전 유사도 필터도 자동 비활성화된다.
-        #  avoid_codes 만 유지해 '글자까지 동일한' 중복 생성=cache-hit 낭비를 막는다.)
-        # 단, 밴딧이 활성화된 경우에는 feedback/seeds/pref_stats/submitted_codes 를 유지해
-        # 학습 신호가 생성 단계로 흘러들어갈 수 있도록 한다.
-        _bandit_on = run_config.is_bandit_enabled()
-        if not is_focus and not _bandit_on:
-            feedback = []
+            self._log_quiet(round_num, f'⚠ seeds 조회 실패: {e}')
             seeds = []
-            pref_stats = {}
-            submitted_codes = []
+        seed_genomes: list[dict] = []
+        for sd in seeds:
+            try:
+                seed_genomes.append(genome_models.genome_from_alpha(
+                    sd.get('code', ''),
+                    settings={k: sd.get(k) for k in
+                              ('universe', 'neutralization', 'decay', 'truncation')},
+                ))
+            except Exception:
+                continue
 
-        new_feedback: list[dict] = []
+        _bandit_on = run_config.is_bandit_enabled()
         pass_total = 0
         err_total = 0
         cache_hit_total = 0
@@ -291,7 +284,8 @@ class Worker(threading.Thread):
             self._log(round_num, f'  Delay 모드=고정 → delay={forced_delay}')
 
         # 밴딧 arm 선택 — 비-focus 라운드에서만 실행, 밴딧 ON 시에만.
-        # select_slots 결과를 generate_strategies 에 전달해 settings 분산을 소프트 가이드.
+        # 선택된 arm 은 generate_population 의 slot_settings 로 넘어가 '무작위 탐색'
+        # 슬롯의 settings 유전자에 실제로 주입된다 (선택→플레이→보상 루프 복원).
         if _bandit_on and not is_focus:
             import random as _random
             from . import bandit as _bandit
@@ -304,19 +298,9 @@ class Worker(threading.Thread):
                 _epsilon = 0.2
             _stats = {a['arm_key']: a['mean'] for a in _db.bandit_stats(self.user_id)}
             _slot_settings = _bandit.select_slots(
-                _stats, n_slots=10, epsilon=_epsilon, explore_slots=3,
+                _stats, n_slots=8, epsilon=_epsilon, explore_slots=3,
                 rng=_random.Random(round_num),
             )
-            # 데이터 기반 prior 생성 — 생성 프롬프트에 소프트 가이드로 주입.
-            try:
-                _axis_res = {
-                    a: _db.axis_effectiveness(self.user_id, a)
-                    for a in ('universe', 'neutralization', 'decay')
-                }
-                _op_res = _db.operator_effectiveness(self.user_id)
-                _priors = _retrospect.format_effectiveness_priors(_axis_res, _op_res)
-            except Exception:
-                _priors = ''
             try:
                 _db.update_round_config(round_id, delay_mode=delay_mode,
                                         explore_exploit='3/7',
@@ -325,115 +309,107 @@ class Worker(threading.Thread):
                 pass
         else:
             _slot_settings = None
-            _priors = ''
-
-        # P5 SC-포화: 제출풀이 과다 사용한 신호 연산자를 생성 프롬프트에 경고로 주입,
-        # 비슷한 알파의 self-corr>0.7 벽을 회피하도록 다른 연산자 패밀리로 유도. fail-open.
-        try:
-            from . import knowledge_base
-            _sub_for_sat = [a.get('code', '') for a in _db.list_submitted_alphas(self.user_id, limit=50)]
-            _sat_warn = knowledge_base.render_saturation_warning(
-                knowledge_base.saturated_operators(_sub_for_sat))
-            if _sat_warn:
-                _priors = (_priors or '') + '\n\n' + _sat_warn
-                self._log_quiet(round_num, f'   (SC-포화 경고 주입: {len(_sat_warn)}자)')
-        except Exception as _e:
-            self._log_quiet(round_num, f'⚠ SC-포화 계산 예외(무시): {_e}')
 
         try:
+            model_label = (
+                'Research Consultant API Genome'
+                if account_type == 'research_consultant'
+                else 'Non-RC Playwright Genome'
+            )
+            # focus 라운드의 부모 유전체 — 큐에 저장된 정확한 유전체 우선, 없으면
+            # (레거시 큐 항목) 부모 code+settings 에서 역추출한다.
+            parent_genome = None
+            if is_focus:
+                parent_genome = (focus_entry or {}).get('parent_genome')
+                if not parent_genome and parent_code:
+                    try:
+                        parent_genome = genome_models.genome_from_alpha(
+                            parent_code, settings=parent_settings)
+                    except Exception:
+                        parent_genome = None
+
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
-                self._log(round_num, f'1) Gemini focused 8 알파 생성 [{kind_label}] (부모 #{parent_idx} 의 \"{fail_desc[:50]}\")...')
-                # correlation 모드는 직교화 가이드 위해 제출/거절 알파 코드를 함께 전달
-                # (submitted_codes 는 위에서 이미 제출+거절 합본으로 만들어 둠).
-                _submitted_for_corr = list(submitted_codes) if focus_kind == 'correlation' else []
-                strategies = gemini_strategist.generate_focused_strategies(
-                    api_key=api_key,
-                    round_num=round_num,
-                    phase=phase,
-                    parent_idx=parent_idx,
-                    parent_code=parent_code,
-                    parent_desc=parent_desc,
-                    fail_desc=fail_desc,
-                    parent_pass_items=parent_pass_items,
-                    parent_fail_items=parent_fail_items,
-                    focus_kind=focus_kind,
-                    self_corr_value=self_corr_value,
-                    submitted_codes=_submitted_for_corr,
-                    forced_delay=forced_delay,
-                    log_fn=lambda line: self._log_quiet(round_num, line),
-                )
-                # (c) settings 스윕 — 부모의 '정확한 공식'을 (universe×neutralization)
-                # 그리드로 결정적 재시뮬해 delay=0 의 유일한 추가 Sharpe 레버를 훑는다.
-                # Gemini 호출 0; 기존 조합은 아래 캐시 단계서 cache-hit 으로 공짜 처리.
-                # idx 101+ 로 부여해 Gemini 알파(1~10)와 충돌 회피. fail-open.
-                if FOCUS_SWEEP_N > 0 and focus_kind != 'correlation' and parent_code.strip():
-                    try:
-                        from . import settings_sweep
-                        _sweep = settings_sweep.sweep_candidates(
-                            parent_code, parent_settings,
-                            n=FOCUS_SWEEP_N, seed=round_num + phase, start_idx=101)
-                        if _sweep:
-                            strategies = list(strategies or []) + _sweep
-                            self._log(round_num,
-                                      f'  ⚙ settings 스윕 {len(_sweep)}개 주입 — 부모 #{parent_idx} '
-                                      f'동일 공식 × 다른 universe/neutralization (Gemini 호출 없음)')
-                    except Exception as _e:
-                        self._log_quiet(round_num, f'⚠ settings 스윕 예외(무시): {_e}')
+                self._log(round_num,
+                          f'1) 8 Genome 알파 생성 중 [{kind_label} — 정향변이] '
+                          f'(model={model_label}, 부모 #{parent_idx}, fix="{fail_desc[:50]}")...')
             else:
-                # P4 메타전략: 정체(연속 하락) + survivor>=2 이면 RECOMBINE(두 survivor 융합),
-                # 아니면 기존 EXPLORE. 어떤 예외든 EXPLORE 로 폴백(fail-open).
-                strategies = None
+                self._log(round_num,
+                          f'1) 8 Genome 알파 생성 중 (model={model_label}, '
+                          f'seed {len(seed_genomes)}개 교차/변이 + 탐색)...')
+
+            # RC 는 결과 캐시를 우회하므로 결정론 유지 시 paused/error 라운드 재시도가
+            # 동일 8개를 재시뮬·재제출한다 → round_id(시도마다 고유)를 salt 로 섞는다.
+            # Non-RC 는 결정론 유지가 캐시 히트로 이득이라 salt=0.
+            gen_salt = round_id if account_type == 'research_consultant' else 0
+
+            strategies = genome_models.generate_population(
+                account_type=account_type,
+                round_num=(round_num * 1000) + (phase * 100) + int(parent_idx or 0),
+                forced_delay=forced_delay,
+                errors=errors,
+                n=8,
+                parent_genome=parent_genome,
+                fail_items=(parent_fail_items if is_focus else None),
+                seed_genomes=seed_genomes,
+                slot_settings=(_slot_settings if (_bandit_on and not is_focus) else None),
+                salt=gen_salt,
+            )
+            if not strategies:
+                raise RuntimeError('Genome generated no strategies')
+
+            _origins = {'random': 0, 'mutate': 0, 'crossover': 0}
+            for _s in strategies:
+                _origins[_s.get('origin') or 'random'] = _origins.get(_s.get('origin') or 'random', 0) + 1
+            self._log(round_num,
+                      f'  세대 구성 — 탐색 {_origins.get("random", 0)} · '
+                      f'변이 {_origins.get("mutate", 0)} · 교차 {_origins.get("crossover", 0)}'
+                      + (f' (밴딧 arm {min(len(_slot_settings), _origins.get("random", 0))}개 주입)'
+                         if _slot_settings else ''))
+
+            # 사전 오류 방지 배선 — renderer 산출물에도 repair(오타/filter=)와 lint 를
+            # 통과시킨다. RC 는 "무조건 제출 시도" 정책이라 lint 경고여도 드롭하지 않고,
+            # Non-RC 만 확정 컴파일 에러 후보를 시뮬 전에 걸러 슬롯을 아낀다.
+            _lint_kept: list[dict] = []
+            for _s in strategies:
                 try:
-                    from . import alpha_search
-                    _scores = _db.recent_round_scores(self.user_id, n=8)
-                    _survivors = _db.survivor_alphas(self.user_id, n=6, min_pass=5)
-                    _mode = alpha_search.pick_mode(
-                        _scores, has_near_miss=False, survivor_count=len(_survivors))
-                    if _mode == 'RECOMBINE' and len(_survivors) >= 2:
-                        _p1 = _survivors[0]
-                        _p2 = max(
-                            _survivors[1:],
-                            key=lambda s: len(set(_p1.get('operators') or [])
-                                              ^ set(s.get('operators') or [])))
-                        self._log(round_num,
-                                  f'1) 🧬 RECOMBINE — survivor 2개 융합 '
-                                  f'(PASS {_p1.get("pass_count")} × {_p2.get("pass_count")})')
-                        strategies = gemini_strategist.generate_crossover_strategies(
-                            api_key=api_key, round_num=round_num, parents=[_p1, _p2],
-                            submitted_codes=submitted_codes, forced_delay=forced_delay,
-                            log_fn=lambda line: self._log_quiet(round_num, line))
-                except Exception as _e:
-                    self._log_quiet(round_num, f'⚠ RECOMBINE 경로 예외, EXPLORE 폴백: {_e}')
-                    strategies = None
-                if not strategies:
-                    self._log(round_num, '1) Gemini 8 알파 생성 호출 (탐색: 오류캐시만, history 없음)...')
-                    strategies = gemini_strategist.generate_strategies(
-                        api_key=api_key,
-                        round_num=round_num,
-                        feedback=feedback,
-                        errors=errors,
-                        avoid_codes=avoid_codes,
-                        submitted_codes=submitted_codes,
-                        seeds=seeds,
-                        pref_stats=pref_stats,
-                        cache_hit_ratio_hint=prev_cache_ratio,
-                        forced_delay=forced_delay,
-                        slot_settings=_slot_settings,
-                        effectiveness_priors=_priors,
-                        log_fn=lambda line: self._log_quiet(round_num, line),
-                    )
+                    _fixed, _actions = _alpha_repair.repair(_s['code'], delay=forced_delay)
+                    if _actions:
+                        _s['code'] = _fixed
+                        self._log_quiet(round_num,
+                                        f'⚠ #{_s["idx"]} repair 적용: {",".join(_actions)}')
+                    _issues = _alpha_lint.validate_alpha(_s['code'])
+                except Exception:
+                    _issues = []
+                if _issues and account_type != 'research_consultant':
+                    self._log(round_num,
+                              f'  ⊘ #{_s["idx"]} lint 거부: {"; ".join(_issues)[:80]}')
+                    continue
+                if _issues:
+                    self._log(round_num,
+                              f'  ⚠ #{_s["idx"]} lint 경고 (RC 정책상 계속): '
+                              f'{"; ".join(_issues)[:80]}')
+                _lint_kept.append(_s)
+            if _lint_kept:
+                strategies = _lint_kept
+            elif strategies:
+                self._log(round_num, '  ⚠ lint 가 전부 거부 — 전량 통과(renderer 점검 필요)')
+
+            # idx → 유전체 매핑 — focus 큐 상속과 세대(lineage) 기록에 사용.
+            genome_by_idx: dict[int, dict] = {
+                int(s['idx']): (s.get('genome') or {}) for s in strategies
+            }
 
             if self._stop_event.is_set():
                 _db.finish_round(round_id, self.user_id, round_num,
                                   status='paused', pass_count=0, err_count=0,
-                                  cache_hits=0, summary='Gemini 후 pause 요청')
+                                  cache_hits=0, summary='알파 생성 후 pause 요청')
                 return
 
             # 사전 유사도 검사 — 이미 제출된 알파와 string/operator/field 가중평균 0.7 이상이면
             # WQB 가 self-correlation 으로 reject 할 가능성 높음. 시뮬 보내기 전 차단.
             # (출처: zhutoutoutousan/worldquant-miner template_similarity.py 포팅)
-            if submitted_codes:
+            if submitted_codes and account_type != 'research_consultant':
                 from . import alpha_similarity as _sim
                 kept: list[dict] = []
                 rejected_pre = 0
@@ -453,7 +429,7 @@ class Worker(threading.Thread):
                     _db.finish_round(round_id, self.user_id, round_num,
                                       status='done', pass_count=0, err_count=0,
                                       cache_hits=0,
-                                      summary='Gemini 알파 모두 기제출과 유사도 0.7+ → 다음 라운드')
+                                      summary='생성 알파 모두 기제출과 유사도 0.7+ → 다음 라운드')
                     # focus 모드면 큐 pop 안 하면 동일 부모 무한 반복 위험 — 강제 pop.
                     if is_focus:
                         try:
@@ -467,27 +443,29 @@ class Worker(threading.Thread):
                     return
 
             # 구조적 탈상관 + 복잡도 사전게이트 (Jaccard 유사도 필터 다음 단계).
-            # 기제출/거절 알파와 AST 서브트리가 겹치는 near-dup, 과복잡 알파를 시뮬 전에 제거.
-            try:
-                from . import presim_gate
-                # focus 라운드는 구조적 overlap 드롭을 끈다(FOCUS_OVERLAP_DROP, 기본 0=OFF) —
-                # focus 는 부모를 일부러 변형하므로 닮는 게 정상이고, 끄지 않으면 생성의 50~80%
-                # 가 'near-duplicate' 로 버려져 Gemini 호출이 낭비된다. 탐색 라운드는 기본 임계 유지.
-                _gate_opts = {'overlap_drop': FOCUS_OVERLAP_DROP} if is_focus else None
-                _kept, _dropped = presim_gate.screen(
-                    strategies, existing_codes=(submitted_codes or [])[:60],
-                    opts=_gate_opts)
-                for _d in _dropped:
-                    self._log(round_num,
-                              f'  ⊘ #{_d.get("idx")} 사전게이트 드롭: {_d.get("reason")}')
-                if _kept:
-                    strategies = _kept
-                elif _dropped:
-                    # 전부 드롭되면 시뮬 0개가 되므로 전량 통과시키고 경고(임계값 점검).
-                    self._log(round_num,
-                              '  ⚠ 사전게이트가 전부 드롭 — 전량 통과(threshold 점검 필요)')
-            except Exception as _e:
-                self._log_quiet(round_num, f'⚠ 사전게이트 예외(무시하고 진행): {_e}')
+            # RC는 "생성 후보를 API 백테스트 후 무조건 제출 시도" 정책이 우선이므로
+            # 사전 드롭 게이트를 타지 않는다. Non-RC만 self-corr 절약 목적으로 사용한다.
+            if account_type != 'research_consultant':
+                try:
+                    from . import presim_gate
+                    # focus 라운드는 구조적 overlap 드롭을 끈다(FOCUS_OVERLAP_DROP, 기본 0=OFF) —
+                    # focus 는 부모를 일부러 변형하므로 닮는 게 정상이고, 끄지 않으면 생성의 50~80%
+                    # 가 'near-duplicate' 로 버려져 Gemini 호출이 낭비된다. 탐색 라운드는 기본 임계 유지.
+                    _gate_opts = {'overlap_drop': FOCUS_OVERLAP_DROP} if is_focus else None
+                    _kept, _dropped = presim_gate.screen(
+                        strategies, existing_codes=(submitted_codes or [])[:60],
+                        opts=_gate_opts)
+                    for _d in _dropped:
+                        self._log(round_num,
+                                  f'  ⊘ #{_d.get("idx")} 사전게이트 드롭: {_d.get("reason")}')
+                    if _kept:
+                        strategies = _kept
+                    elif _dropped:
+                        # 전부 드롭되면 시뮬 0개가 되므로 전량 통과시키고 경고(임계값 점검).
+                        self._log(round_num,
+                                  '  ⚠ 사전게이트가 전부 드롭 — 전량 통과(threshold 점검 필요)')
+                except Exception as _e:
+                    self._log_quiet(round_num, f'⚠ 사전게이트 예외(무시하고 진행): {_e}')
 
             _db.update_round_status(round_id, 'simulating')
 
@@ -518,7 +496,7 @@ class Worker(threading.Thread):
                 if key in seen:
                     continue
                 seen.add(key)
-                cached = result_cache.lookup(self.user_id, s['code'], fp)
+                cached = None if account_type == 'research_consultant' else result_cache.lookup(self.user_id, s['code'], fp)
                 if cached:
                     cached_results.append(result_cache.materialize(s, cached, round_num))
                 else:
@@ -633,6 +611,8 @@ class Worker(threading.Thread):
                             stop_event=self._stop_event,
                             log_fn=None,
                             proc_holder=self._batch_proc_holder,
+                            partial_fn=_on_partial,
+                            forced_delay=forced_delay,
                         )
                         if not all(_is_setup_error(r.get('error_text') or '') for r in retry):
                             results = retry
@@ -645,8 +625,7 @@ class Worker(threading.Thread):
                 if not aborted:
                     # 라운드 시뮬 결과 — 한 줄 요약. 알파별 줄은 partial_fn 스트림이 이미 송출함.
                     # partial 미수신된 알파 (예: subprocess KILL) 만 여기서 보충.
-                    r_pass = sum(1 for r in results
-                                 if int(r.get('pass_count') or 0) >= PASS_THRESHOLD)
+                    r_pass = sum(1 for r in results if _is_best_alpha(r))
                     r_err = sum(1 for r in results if r.get('error_text'))
                     self._log(round_num,
                               f'  ── 시뮬 결과 — '
@@ -705,7 +684,9 @@ class Worker(threading.Thread):
                     'settings': settings_by_idx.get(int(r['idx']), {}),
                     'delay': forced_delay,
                     'self_corr': r.get('self_corr'),
-                    'generation': r.get('generation', 0),
+                    # 세대(lineage)는 시뮬 결과가 아니라 생성 시 유전체가 안다.
+                    'generation': int((genome_by_idx.get(int(r['idx'])) or {})
+                                      .get('generation') or 0),
                     'parent_alpha_id': r.get('parent_alpha_id'),
                 }
                 _db.insert_alpha(self.user_id, round_id, round_num, alpha_entry)
@@ -899,9 +880,11 @@ class Worker(threading.Thread):
                                 'parent_fail_items': fail_descs[:4],
                                 'focus_kind': 'fail',
                                 'self_corr_value': '',
-                                # 부모 settings 를 실어 보내 다음 focus 라운드의 settings 스윕이
-                                # 부모의 smoothing(decay 등)을 계승하고 자기 조합은 건너뛰게 한다.
+                                # 부모 settings 를 실어 보내 다음 focus 라운드의 정향변이가
+                                # 부모의 smoothing(decay 등)을 계승하게 한다.
                                 'parent_settings': settings_by_idx.get(int(a.get('idx') or 0), {}),
+                                # 정확한 부모 유전체 — focus 라운드 정향변이의 출발점.
+                                'parent_genome': genome_by_idx.get(int(a.get('idx') or 0)),
                             })
                     _db.set_focus_queue(self.user_id, new_q)
                     self._log(round_num,
@@ -915,21 +898,6 @@ class Worker(threading.Thread):
                               status='error', pass_count=pass_total,
                               err_count=err_total, cache_hits=cache_hit_total,
                               summary=f'예외: {str(e)[:300]}')
-
-    def _prev_cache_hit_ratio(self) -> float:
-        """직전 라운드의 cache_hits / (시도 알파 수). 1.0 에 가까우면 거의 모든 알파가 캐시에서
-        해결됨 → Gemini 가 같은 코드를 또 생성한 것. temperature 부스트로 다양성 강제."""
-        rounds = _db.list_rounds(self.user_id, limit=1)
-        if not rounds:
-            return 0.0
-        r = rounds[0]
-        ch = int(r.get('cache_hits') or 0)
-        # 한 라운드당 시도 알파 수 ≈ pass_count + err_count + cache_hits 추정.
-        # 정확히는 alphas insert 카운트가 맞지만, summary 로 충분.
-        attempts = ch + int(r.get('pass_count') or 0) + int(r.get('err_count') or 0)
-        if attempts <= 0:
-            return 0.0
-        return ch / attempts
 
     # ── 로깅 ──────────────────────────────────────────────────
     def _log(self, round_num: int, line: str, level: str = 'info') -> None:
@@ -946,6 +914,10 @@ class Worker(threading.Thread):
         """
         s = (line or '').strip()
         if not s:
+            return
+        # 로컬 LLM에는 prompt cache가 없으므로 이 메시지는 정상 폴백이다.
+        if 'prompt cache 실패' in s and 'no prompt cache' in s:
+            LOG.info('[round %d] %s', round_num, s[:300])
             return
         # 워닝/오류 표식이 있는 줄만 UI 노출.
         if s[:2] in ('⚠ ', '⚠'):
@@ -1056,7 +1028,7 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
     total = len(p_list) + len(f_list) + len(e_list)
     sub_st = (submit_status or '').strip()
 
-    # 별표(저장) 상태 + self-correlation 값 표기.
+    # 별표(저장, Non-RC) / 제출(RC) 상태 + self-correlation 값 표기.
     star_note = ''
     if sub_st.startswith('starred'):
         star_note = f'  ⭐ 별표 저장 ({sub_st[len("starred"):].strip().strip("()") or "self-corr ?"})'
@@ -1064,6 +1036,18 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
         star_note = f'  ☆ 미저장 — {sub_st[len("skip_star:"):].strip()}'
     elif sub_st.startswith('star_fail'):
         star_note = f'  ⚠ 리스트 제출 실패 ({sub_st[len("star_fail"):].strip().strip("()")})'
+    elif sub_st == 'submitted':                      # RC 공식 API 제출 성공
+        star_note = '  🚀 제출 성공'
+    elif sub_st.startswith('submit_http_429'):
+        star_note = '  ⏳ 제출 대기열 초과(429) — deadline 내 슬롯 미확보'
+    elif sub_st.startswith('submit_pending_timeout'):
+        star_note = '  ⏳ 제출 결과 확인 시간 초과 (WQB 쪽에서 계속 진행 중일 수 있음)'
+    elif sub_st.startswith('submit_skipped'):
+        star_note = '  ⏸ 제출 생략 (pause)'
+    elif sub_st.startswith('submit_http_'):
+        star_note = f'  ⚠ 제출 HTTP 오류 ({sub_st[len("submit_http_"):][:40]})'
+    elif sub_st.startswith('submit_error'):
+        star_note = f'  ⚠ 제출 오류 ({sub_st.split(":", 1)[-1].strip()[:40]})'
     elif sub_st.startswith('rejected') or sub_st.startswith('fail:'):  # 구버전 제출 기록 호환
         star_note = f'  📝 {sub_st.split(":", 1)[-1].strip()[:80]}'
 

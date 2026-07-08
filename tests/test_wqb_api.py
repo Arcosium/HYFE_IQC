@@ -72,6 +72,66 @@ def test_harvest_alpha_none_value_becomes_empty_str():
     it = h['is_status']['pass'][0]
     assert it['value'] == '' and it['cutoff'] == ''
 
+
+def test_harvest_alpha_ignores_auxiliary_checks():
+    sess = FakeSession()
+    sess.queue[('GET', '/alphas/AB1')] = [FakeResp(200, {
+        'is': {'checks': [
+            {'name': 'LOW_SHARPE', 'result': 'PASS', 'value': 2.1, 'limit': 1.25},
+            {'name': 'HT_TURNOVER', 'result': 'PASS', 'value': 0.3, 'limit': 0.7},
+            {'name': 'MATCHES_PYRAMID', 'result': 'PASS', 'value': None, 'limit': None},
+        ]}})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False)
+    h = c.harvest_alpha('AB1')
+    assert [x['name'] for x in h['is_status']['pass']] == ['LOW_SHARPE']
+
+
+def test_submit_alpha_posts_alpha_submit_endpoint():
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(201, text='ok')]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is True and status == 'submitted'
+    assert sess.calls[0][0] == 'POST' and sess.calls[0][1].endswith('/alphas/A1/submit')
+
+
+def test_full_settings_accepts_snake_case_handling_keys():
+    out = wqb_api.WqbApiClient._full_settings({
+        'delay': 1, 'nan_handling': 'ON', 'unit_handling': 'OFF'
+    })
+    assert out['nanHandling'] == 'ON'
+    assert out['unitHandling'] == 'OFF'
+
+
+
+def test_submit_alpha_polls_retry_after_until_final_json(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: sleeps.append(s))
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
+    sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(200, {'is': {'checks': [
+        {'name': 'LOW_SHARPE', 'result': 'PASS'},
+    ]}})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is True and status == 'submitted'
+    assert sleeps == [0.5]
+    assert [call[0] for call in sess.calls] == ['POST', 'GET']
+
+
+def test_submit_alpha_final_failed_checks_are_rejected(monkeypatch):
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: None)
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
+    sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(200, {'is': {'checks': [
+        {'name': 'SELF_CORRELATION', 'result': 'FAIL'},
+    ]}})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is False
+    assert status.startswith('rejected:SELF_CORRELATION')
+
+
 def test_submit_returns_location():
     sess = FakeSession()
     sess.queue[('POST', '/simulations')] = [FakeResp(201, headers={'Location': 'https://api.worldquantbrain.com/simulations/SIM1'})]
@@ -143,3 +203,83 @@ def test_poll_bounded_by_walltime_when_requests_stall(monkeypatch):
     res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
                  deadline_s=3, interval_s=0.0, sleep=lambda _: None)
     assert res['status'] == 'TIMEOUT'
+
+
+def test_submit_alpha_retries_429_with_retry_after_then_succeeds(monkeypatch):
+    """제출 429(계정당 1건 슬롯)는 즉시 포기하지 않고 Retry-After 를 존중해 재시도한다."""
+    sleeps = []
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: sleeps.append(s))
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [
+        FakeResp(429, headers={'Retry-After': '2'}),
+        FakeResp(201, text='ok'),
+    ]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is True and status == 'submitted'
+    assert sleeps == [2.0]
+    assert [call[0] for call in sess.calls] == ['POST', 'POST']  # 재시도도 POST
+
+
+def test_submit_alpha_429_gives_up_after_deadline(monkeypatch):
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: None)
+    clk = {'t': 0.0}
+    def _mono():
+        clk['t'] += 100.0
+        return clk['t']
+    monkeypatch.setattr(wqb_api._time, 'monotonic', _mono)
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(429)] * 10
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1', deadline_s=150)
+    assert ok is False
+    assert status == 'submit_http_429: too_many_requests'
+
+
+def test_submit_alpha_respects_stop_event():
+    import threading
+    ev = threading.Event(); ev.set()
+    sess = FakeSession()  # 큐 비어있음 — 네트워크에 닿으면 KeyError 로 실패
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1', stop_event=ev)
+    assert ok is False and status == 'submit_skipped:paused'
+    assert sess.calls == []
+
+
+def test_read_self_correlation_polls_retry_after(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: sleeps.append(s))
+    sess = FakeSession()
+    sess.queue[('GET', '/alphas/A1/correlations/self')] = [
+        FakeResp(200, headers={'Retry-After': '1'}),
+        FakeResp(200, {'max': 0.42}),
+    ]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    assert c.read_self_correlation('A1') == 0.42
+    assert sleeps == [1.0]
+
+
+def test_core_check_allowlist_and_bookkeeping_denylist():
+    for nm in ('LOW_SHARPE', 'LOW_FITNESS', 'HIGH_TURNOVER', 'SELF_CORRELATION'):
+        assert wqb_api._is_core_check(nm) is True
+    for nm in ('HT_ANYTHING', 'MATCHES_PYRAMID', 'MATCHES_THEMES', ''):
+        assert wqb_api._is_core_check(nm) is False
+    # 처음 보는 이름은 (호환) core 로 세되 로깅만 한다.
+    assert wqb_api._is_core_check('SOME_NEW_CHECK') is True
+
+
+def test_submit_alpha_403_with_failed_checks_classified_as_rejected():
+    """라이브 R84 관찰: 체크 미달 알파의 submit 은 403 + is.checks JSON 으로 거절된다.
+    raw JSON 덤프가 아니라 rejected:<체크명> 으로 분류해야 한다."""
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(403, {
+        'is': {'checks': [
+            {'name': 'LOW_SHARPE', 'result': 'FAIL', 'limit': 1.58, 'value': -0.0},
+            {'name': 'LOW_FITNESS', 'result': 'FAIL', 'limit': 1.0, 'value': -0.0},
+            {'name': 'LOW_TURNOVER', 'result': 'PASS', 'limit': 0.01, 'value': 0.1},
+        ]}})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is False
+    assert status.startswith('rejected:LOW_SHARPE; LOW_FITNESS')
+    assert 'http_403' in status

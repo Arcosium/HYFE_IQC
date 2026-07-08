@@ -41,6 +41,10 @@ class ApiBackend:
         self._client = client or wqb_api.WqbApiClient(username, password)
         self.concurrency = (_default_concurrency() if concurrency is None
                             else max(1, min(10, int(concurrency))))
+        # WQB 는 계정당 제출을 한 번에 하나만 처리한다 — 동시 시뮬 스레드들이 완료
+        # 직후 각자 submit 을 때리면 첫 번째만 성공하고 나머지는 429 로 죽는다.
+        # 제출은 이 락으로 직렬화한다 ("무조건 제출 시도" 정책의 실효성 보장).
+        self._submit_lock = threading.Lock()
 
     def simulate_batch(self, batch, *, wqb_username=None, wqb_password=None,
                        log_fn=None, proc_holder=None, partial_fn=None,
@@ -135,9 +139,39 @@ class ApiBackend:
         if corr is not None:
             metrics['self_correlation'] = str(corr)
 
+        submit_ok = False
+        submit_status = ''
+        acquired = False
+        try:
+            # 락 대기 중에도 pause 에 반응해야 하므로 1초 단위로 재시도한다.
+            while not acquired:
+                acquired = self._submit_lock.acquire(timeout=1.0)
+                if not acquired and stop_event is not None and stop_event.is_set():
+                    submit_status = 'submit_skipped:paused'
+                    break
+            # 락을 잡았어도 그 사이 pause 됐으면 제출하지 않는다 (pause 시 라운드
+            # 결과는 폐기되므로 제출만 나가면 기록-실제가 어긋난다).
+            if acquired and stop_event is not None and stop_event.is_set():
+                submit_status = 'submit_skipped:paused'
+            elif acquired:
+                submit_ok, submit_status = self._client.submit_alpha(
+                    alpha_id, stop_event=stop_event)
+        except Exception as e:
+            submit_status = f'submit_error:{e}'
+        finally:
+            if acquired:
+                self._submit_lock.release()
+
         p_n = len(is_status.get('pass', []))
         f_n = len(is_status.get('fail', []))
         e_n = len(is_status.get('error', []))
+        pn_n = len(is_status.get('pending', []))
+        total_core = p_n + f_n + e_n
+        if 0 < total_core < PASS_THRESHOLD and pn_n == 0:
+            # core check 총수가 임계보다 적으면 이 계정 tier 에선 PASS>=threshold 가
+            # 도달 불가능하다 — 임계 재조정 근거로 남긴다 (게이트 자체는 엄격 유지).
+            LOG.warning('alpha %s: core IS checks %d < PASS_THRESHOLD %d — '
+                        'HYFE_IQC_PASS_THRESHOLD 재검토 필요', alpha_id, total_core, PASS_THRESHOLD)
         is_pass = (p_n >= PASS_THRESHOLD and f_n == 0 and e_n == 0)
         mode = 'pass' if is_pass else 'fail'
 
@@ -145,7 +179,7 @@ class ApiBackend:
             'idx': idx, 'code': code, 'desc': desc,
             'pass_count': p_n, 'pass_items': is_status.get('pass', []),
             'fail_count': f_n, 'fail_items': is_status.get('fail', []),
-            'submitted': False, 'submit_status': '', 'error_text': '',
+            'submitted': bool(submit_ok), 'submit_status': submit_status, 'error_text': '',
             'metrics': metrics, 'is_status': is_status, 'mode': mode,
         }
 
@@ -154,7 +188,7 @@ class ApiBackend:
                 partial_fn({
                     'idx': idx, 'status': mode, 'error_text': '',
                     'is_status': is_status, 'metrics': metrics,
-                    'submit_status': '', 'submitted': False,
+                    'submit_status': submit_status, 'submitted': bool(submit_ok),
                 })
             except Exception as e:
                 LOG.warning('partial_fn err: %s', e)

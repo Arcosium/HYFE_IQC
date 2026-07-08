@@ -116,7 +116,31 @@ def _status_payload(uid: int) -> dict[str, Any]:
     s['errors_count'] = _db.total_errors_count(uid)
     s['latest_log_id'] = _db.latest_log_id(uid)
     s['last_cleared_log_id'] = _db.get_last_cleared_log_id(uid)
-    s['account_type'] = _db.get_account_type(uid)
+    account_type = _db.get_account_type(uid)
+    is_rc = account_type == 'research_consultant'
+    s['account_type'] = account_type
+    s['genome_model'] = 'rc-api-genome' if is_rc else 'standard-playwright-genome'
+    s['backtester_mode'] = 'WQB API concurrent' if is_rc else 'Playwright browser'
+    s['save_policy'] = (
+        'RC: completed alpha마다 API 제출 시도 (직렬화 + 429 재시도)'
+        if is_rc else
+        'Non-RC: 7 basic PASS + self-correlation ≤ 0.7 알파만 저장'
+    )
+    # GA(유전 알고리즘) 상태 — UI Evolution 패널이 소비.
+    try:
+        seed_pool = len(_db.best_alphas_for_seeding(uid, top_n=5, min_pass_count=5))
+    except Exception:
+        seed_pool = 0
+    try:
+        focus_len = len(_db.get_focus_queue(uid))
+    except Exception:
+        focus_len = 0
+    bandit_on = _run_config.is_bandit_enabled()
+    s['ga'] = {'seed_pool': seed_pool, 'focus_queue': focus_len, 'bandit': bandit_on}
+    s['ga_policy'] = (
+        f'엘리트 seed {seed_pool}개 교차/변이 + 탐색'
+        if seed_pool else '무작위 탐색 (엘리트 seed 수집 전)'
+    )
     return s
 
 
@@ -210,19 +234,15 @@ def static_files(path: str):
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    """기존 사용자 전용 로그인.
+    """기존 사용자 전용 로그인 — 아이디/비밀번호만 확인한다.
 
-    DB 에 등록된 사용자만 통과. 비밀번호 일치 후 Gemini 키를 다음 우선순위로 확정:
-      1) 입력한 키가 유효 → 채택(변경 시 DB 갱신)
-      2) 입력 키가 없거나 무효지만 저장된 키가 유효 → 저장 키로 폴백
-         → 새 기기에서 ID+비밀번호만으로 로그인 가능
-      3) 입력·저장 둘 다 무효 → 새 키 발급 요구
+    Gemini 키 검증은 2026-07-03 제거 (알파 생성이 Genome GA 로 전환되어 LLM 키 불필요).
+    body 에 gemini_api_key 가 와도 무시한다 (구 클라이언트 호환).
     신규 가입은 /api/register 를 사용할 것.
     """
     body = request.get_json(silent=True) or {}
     wqb_username = (body.get('wqb_username') or '').strip()
     wqb_password = (body.get('wqb_password') or '').strip()
-    gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
 
     if not (wqb_username and wqb_password):
@@ -240,51 +260,23 @@ def api_login():
                     '저장된 자격증명과 일치하지 않습니다. WQB 비밀번호를 변경했다면 '
                     '관리자에게 record 초기화를 요청하세요.', 401)
 
-    # ── 비밀번호 일치 — Gemini 키 우선순위 확정 ──
     uid = int(existing['id'])
-    stored_key = existing.get('gemini_api_key') or ''
-
-    # 1) 입력한 키가 유효하면 채택 (변경됐으면 갱신).
-    if gemini_api_key:
-        g = _auth.validate_gemini_key(gemini_api_key)
-        if g.get('ok'):
-            LOG.info('login fast-path (existing, 입력 키 OK): %s', wqb_username)
-            if gemini_api_key != stored_key:
-                _db.update_user_secrets(uid, gemini_api_key=gemini_api_key)
-            else:
-                _db.update_user_secrets(uid)  # last_login_at touch
-            return _issue_session(uid, wqb_username, remember)
-        LOG.info('login fast-path (existing, 입력 키 무효:%s) — 저장 키로 폴백: %s',
-                 g.get('reason'), wqb_username)
-
-    # 2) 저장된 키로 폴백 (입력 키와 다를 때만 재검증 가치 있음).
-    if stored_key and stored_key != gemini_api_key:
-        gs = _auth.validate_gemini_key(stored_key)
-        if gs.get('ok'):
-            LOG.info('login fast-path (existing, 저장 키 폴백 OK): %s', wqb_username)
-            _db.update_user_secrets(uid)  # last_login_at touch
-            return _issue_session(uid, wqb_username, remember)
-
-    # 3) 입력 키도 저장 키도 무효 → 새 키 필요.
-    LOG.info('login fail (existing, 유효 Gemini 키 없음 — 입력·저장 모두 무효): %s',
-             wqb_username)
-    return _err('gemini_invalid',
-                'Gemini API 키가 만료/무효합니다. 새 키를 발급받아 입력해 주세요 '
-                '(https://aistudio.google.com/app/api-keys).', 401)
+    _db.update_user_secrets(uid)  # last_login_at touch
+    return _issue_session(uid, wqb_username, remember)
 
 
 @app.route('/api/register', methods=['POST'])
 def api_register():
-    """신규 사용자 전용 가입.
+    """신규 사용자 전용 가입 — WQB 자격증명만 검증한다.
 
-    이미 등록된 username 이면 409. Gemini API 키 필수. account_type 화이트리스트
-    적용(standard/research_consultant, 그 외는 standard 로 강등).
+    이미 등록된 username 이면 409. account_type 화이트리스트 적용
+    (standard/research_consultant, 그 외는 standard 로 강등).
+    Gemini API 키는 2026-07-03부터 받지 않는다 (Genome GA 전환으로 불필요).
     기존 사용자 로그인은 /api/login 을 사용할 것.
     """
     body = request.get_json(silent=True) or {}
     wqb_username = (body.get('wqb_username') or '').strip()
     wqb_password = (body.get('wqb_password') or '').strip()
-    gemini_api_key = (body.get('gemini_api_key') or '').strip()
     remember = bool(body.get('remember', True))
     account_type = (body.get('account_type') or 'standard').strip()
     if account_type not in ('standard', 'research_consultant'):
@@ -297,10 +289,6 @@ def api_register():
         return _err('already_registered',
                     '이미 가입된 계정입니다. 로그인해 주세요.', 409)
 
-    if not gemini_api_key:
-        return _err('missing_fields',
-                    '신규 가입에는 Gemini API 키가 필요합니다.', 400)
-
     # chromium subprocess 보호용 in-flight 락 (같은 username 이 동시에
     # 두 번 풀 검증을 트리거하지 않도록).
     with _LOGIN_LOCK_LOCK:
@@ -311,8 +299,8 @@ def api_register():
         _LOGIN_IN_FLIGHT.add(wqb_username)
 
     try:
-        LOG.info('register attempt (full validation): %s', wqb_username)
-        result = _auth.validate_login(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
+        LOG.info('register attempt (WQB validation): %s', wqb_username)
+        result = _auth.validate_login(wqb_username, wqb_password, account_type=account_type)
     finally:
         with _LOGIN_LOCK_LOCK:
             _LOGIN_IN_FLIGHT.discard(wqb_username)
@@ -322,7 +310,7 @@ def api_register():
                  wqb_username, result.get('reason'), result.get('detail'))
         return jsonify(result), 401
 
-    uid = _db.upsert_user(wqb_username, wqb_password, gemini_api_key, account_type=account_type)
+    uid = _db.upsert_user(wqb_username, wqb_password, '', account_type=account_type)
     return _issue_session(uid, wqb_username, remember)
 
 
@@ -353,7 +341,7 @@ def api_m_login():
 
 def _issue_session(uid: int, wqb_username: str, remember: bool) -> Response:
     """세션 발급 + 쿠키 세팅 + 응답."""
-    token = _db.create_session(uid)
+    token = «REDACTED»
     resp = jsonify({'ok': True, 'reason': 'ok', 'user_id': uid,
                     'wqb_username': wqb_username})
     cookie_kwargs = dict(
@@ -405,7 +393,7 @@ def api_wqb_persona_status():
     account_type = _db.get_account_type(uid)
     # 1) 저장된 세션이 살아있으면 biometric 불필요 — POST /authentication 호출 없이 반환.
     try:
-        from .wqb_api import WqbApiClient
+        from .wqb_api import WqbApiClient, _is_public_persona_url
         c = WqbApiClient(u, p)
         if c._load_session() and c._session_valid():
             return jsonify({'persona_required': False, 'authenticated': True,
@@ -413,23 +401,51 @@ def api_wqb_persona_status():
         # 1.5) 미완료 persona challenge(.pending)가 있으면 그 URL 을 POST 없이 반환.
         #      사용자가 브라우저에서 완료 후 '완료' 버튼을 누르면 그때 complete_persona()
         #      가 단 한 번 POST 한다. 여기서 POST 하면 throttle 재무장 루프가 된다.
+        #      persona_url 이 빈 값(일시 해석 실패)이어도 pending 이 존재하는 한 새
+        #      challenge 를 발급하지 않는다 — UI 가 "링크 준비 중" 을 띄우고 재시도.
         pend = c.pending_persona()
-        if pend:
+        if pend is not None:
+            pu = pend.get('persona_url', '')
+            if not _is_public_persona_url(pu):
+                pu = ''
             return jsonify({'persona_required': True,
-                            'persona_url': pend.get('persona_url', ''),
+                            'persona_url': pu,
                             'inquiry': pend.get('inquiry', ''),
                             'account_type': account_type})
     except Exception:
         pass
-    # 2) 세션도 pending 도 없음 → 인증 1회 호출(신규 challenge 발급). persona / rate-limit 분기.
-    v = _auth.validate_wqb_api(u, p)
-    if v.get('reason') == 'wqb_persona_required':
-        return jsonify({'persona_required': True, 'persona_url': v.get('persona_url', ''),
-                        'inquiry': v.get('inquiry', ''), 'account_type': account_type})
-    if v.get('reason') == 'wqb_rate_limited':
-        return jsonify({'persona_required': False, 'rate_limited': True,
-                        'detail': v.get('detail', ''), 'account_type': account_type})
-    return jsonify({'persona_required': False, 'ok': bool(v.get('ok')),
+    # 2) 세션도 pending 도 없음 → WqbApiClient 로 인증 1회 호출해 신규
+    # challenge 를 발급한다. 이 경로는 challenge 쿠키를 .pending 에 저장해야
+    # 완료 버튼에서 같은 WQB 세션으로 finalize 할 수 있다.
+    try:
+        c = WqbApiClient(u, p)
+        if c.authenticate():
+            return jsonify({'persona_required': False, 'authenticated': True,
+                            'account_type': account_type})
+        if c.persona_required:
+            pend = c.pending_persona() or {}
+            persona_url = pend.get('persona_url') or ''
+            if not _is_public_persona_url(persona_url):
+                persona_url = ''
+            inquiry = pend.get('inquiry', '')
+            if not inquiry and persona_url:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    q = parse_qs(urlparse(persona_url).query)
+                    inquiry = (q.get('inquiry') or q.get('inquiry-id') or [''])[0]
+                except Exception:
+                    inquiry = ''
+            return jsonify({'persona_required': True,
+                            'persona_url': persona_url,
+                            'inquiry': inquiry,
+                            'account_type': account_type})
+        if getattr(c, 'last_auth_status_code', None) == 429:
+            return jsonify({'persona_required': False, 'rate_limited': True,
+                            'detail': 'WQB API 인증 호출 한도(분당 5회) 초과 — 1분 후 다시 시도하세요.',
+                            'account_type': account_type})
+    except Exception:
+        pass
+    return jsonify({'persona_required': False, 'ok': False,
                     'account_type': account_type})
 
 
@@ -456,7 +472,7 @@ def api_wqb_persona_complete():
 def api_logout():
     token = request.cookies.get(SESSION_COOKIE) or ''
     if token:
-        _db.delete_session(token)
+        «REDACTED»
     resp = jsonify({'ok': True})
     resp.delete_cookie(SESSION_COOKIE, path='/')
     return resp
@@ -471,10 +487,12 @@ def api_me():
     if not u:
         return _err('unauthorized', 'user not found', 401)
     s = _db.get_user_status(uid)
+    account_type = _db.get_account_type(uid)
     return jsonify({
         'ok': True,
         'user_id': uid,
         'wqb_username': u['wqb_username'],
+        'account_type': account_type,
         **s,
     })
 
@@ -720,6 +738,9 @@ def main():
     # import 부작용 제거 → 시작 시 1회 명시 수행 (fail-fast + 테스트 가능).
     _db.init()
     _ensure_house_rc_account()
+    interrupted = _db.interrupt_open_rounds()
+    if interrupted:
+        LOG.info('interrupted stale open rounds on startup: %d', interrupted)
     _auto_resume_workers()
     port = int(os.environ.get('HYFE_IQC_PORT', '8088'))
     # 코드 기본값도 안전하게 루프백 (run.sh/systemd 없이 직접 실행해도 공개망

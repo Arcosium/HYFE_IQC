@@ -11,6 +11,7 @@ EXPECTED_KEYS = {
 class FakeClient:
     def __init__(self, *a, **k):
         self.submit_calls = []
+        self.alpha_submit_calls = []
 
     def authenticate(self): return True
 
@@ -27,6 +28,10 @@ class FakeClient:
 
     def read_self_correlation(self, aid): return 0.3
 
+    def submit_alpha(self, aid, **kw):
+        self.alpha_submit_calls.append(aid)
+        return True, 'submitted'
+
     def cancel(self, url): pass
 
 
@@ -40,7 +45,9 @@ def test_simulate_batch_contract():
     assert r0['idx'] == 1 and r0['pass_count'] == 7 and r0['error_text'] == ''
     assert set(r0) == EXPECTED_KEYS
     assert r0['mode'] == 'pass'
+    assert r0['submitted'] is True and r0['submit_status'] == 'submitted'
     assert seen and seen[0]['idx'] == 1 and seen[0]['status'] == 'pass'
+    assert seen[0]['submitted'] is True and seen[0]['submit_status'] == 'submitted'
 
 
 def test_simulate_batch_error_status():
@@ -75,6 +82,7 @@ def test_simulate_batch_fail_mode_below_threshold():
     res = be.simulate_batch([{'idx': 9, 'code': 'x', 'desc': '', 'settings': {}}],
                             wqb_username='e', wqb_password='p')
     assert res[0]['mode'] == 'fail' and res[0]['pass_count'] == 6
+    assert res[0]['submitted'] is True and res[0]['submit_status'] == 'submitted'
 
 
 def test_simulate_batch_rate_limited(monkeypatch):
@@ -118,6 +126,21 @@ def test_submit_retry_waits_for_slot_then_succeeds(monkeypatch):
     be = wb.ApiBackend('e', 'p', client=SlotFreesClient(), concurrency=4)
     res = be.simulate_batch(_batch(3), wqb_username='e', wqb_password='p')
     assert all(r['mode'] == 'pass' for r in res), [r['error_text'] for r in res]
+
+
+def test_rc_api_always_attempts_alpha_submit_after_completed_sim():
+    class RejectSubmitClient(FakeClient):
+        def submit_alpha(self, aid, **kw):
+            self.alpha_submit_calls.append(aid)
+            return False, 'submit_http_400: already submitted'
+
+    client = RejectSubmitClient()
+    be = wb.ApiBackend('e', 'p', client=client)
+    res = be.simulate_batch([{'idx': 11, 'code': 'rank(close)', 'desc': '', 'settings': {}}],
+                            wqb_username='e', wqb_password='p')
+    assert client.alpha_submit_calls, 'RC backend did not attempt /alphas/{id}/submit'
+    assert res[0]['submitted'] is False
+    assert res[0]['submit_status'].startswith('submit_http_400')
 
 
 def test_apibackend_persona_required_message():
@@ -251,3 +274,66 @@ def test_dispatch_routes_by_account_type(monkeypatch):
     wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
                        wqb_username='e', wqb_password='p', account_type='standard')
     assert called.get('browser') and not called.get('api')
+
+
+def test_alpha_submits_are_serialized_across_threads():
+    """WQB 는 계정당 제출을 한 번에 하나만 처리한다 — 동시 시뮬 스레드가 여럿이어도
+    submit_alpha 호출은 절대 겹치면 안 된다 (겹치면 첫 번째 외 전부 429 로 죽는
+    라이브 회귀). max in-flight == 1 을 검증한다."""
+    import threading, time
+
+    peak = {'cur': 0, 'max': 0}
+    lk = threading.Lock()
+
+    class ConcurrencySpyClient(FakeClient):
+        def submit_alpha(self, aid, **kw):
+            with lk:
+                peak['cur'] += 1
+                peak['max'] = max(peak['max'], peak['cur'])
+            time.sleep(0.03)
+            with lk:
+                peak['cur'] -= 1
+            self.alpha_submit_calls.append(aid)
+            return True, 'submitted'
+
+    client = ConcurrencySpyClient()
+    be = wb.ApiBackend('e', 'p', client=client, concurrency=4)
+    res = be.simulate_batch(_batch(4), wqb_username='e', wqb_password='p')
+    assert len(client.alpha_submit_calls) == 4  # 전부 제출 시도됨
+    assert peak['max'] == 1, f"동시 submit {peak['max']}건 — 직렬화 깨짐"
+    assert all(r['submitted'] for r in res)
+
+
+def test_submit_lock_wait_respects_stop_event():
+    """제출 락을 기다리는 중 pause 되면 submit 을 생략하고 즉시 빠져나온다."""
+    import threading, time
+
+    class SlowSubmitClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.ev = threading.Event()
+
+        def submit_alpha(self, aid, **kw):
+            self.alpha_submit_calls.append(aid)
+            self.ev.set()          # 첫 스레드가 락 안에 들어왔음을 알림
+            time.sleep(0.5)        # 락을 오래 점유
+            return True, 'submitted'
+
+    client = SlowSubmitClient()
+    be = wb.ApiBackend('e', 'p', client=client, concurrency=2)
+    stop = threading.Event()
+
+    def _pause_soon():
+        client.ev.wait(timeout=5)
+        time.sleep(0.05)
+        stop.set()
+
+    t = threading.Thread(target=_pause_soon)
+    t.start()
+    res = be.simulate_batch(_batch(2), wqb_username='e', wqb_password='p',
+                            stop_event=stop)
+    t.join()
+    # 락을 잡았던 알파는 제출 완료, 기다리던 알파는 submit_skipped:paused.
+    statuses = sorted(r['submit_status'] for r in res)
+    assert 'submitted' in statuses
+    assert any(s.startswith('submit_skipped') for s in statuses)

@@ -738,13 +738,17 @@ def get_user_status(user_id: int) -> dict[str, Any]:
         last_round_num = int(u['last_round_num'] or 0)
         # 진행 중 라운드 조회 — phase 포함.
         r = conn.execute(
-            'SELECT round_num, status, phase FROM rounds WHERE user_id=? AND ended_at IS NULL '
-            'ORDER BY id DESC LIMIT 1', (user_id,),
+            'SELECT round_num, status, phase, parent_idx FROM rounds '
+            'WHERE user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1',
+            (user_id,),
         ).fetchone()
     cur_round = int(r['round_num']) if r else None
     cur_phase = int(r['phase']) if r else 0
+    cur_parent_idx = int(r['parent_idx']) if r and r['parent_idx'] else 0
     if cur_round is None:
         cur_label = '—'
+    elif cur_phase > 0 and cur_parent_idx > 0:
+        cur_label = f'{cur_round}-{cur_parent_idx}-{cur_phase}'
     elif cur_phase > 0:
         cur_label = f'{cur_round}-{cur_phase}'
     else:
@@ -848,6 +852,16 @@ def set_focus_queue(conn, user_id: int, queue: list[dict[str, Any]]) -> None:
 @_with_conn
 def update_round_status(conn, round_id: int, status: str) -> None:
     conn.execute('UPDATE rounds SET status=? WHERE id=?', (status, round_id))
+
+
+@_with_conn
+def interrupt_open_rounds(conn, summary: str = '서버 재시작으로 미완료 라운드 정리') -> int:
+    now = time.time()
+    cur = conn.execute(
+        'UPDATE rounds SET status=?, ended_at=?, summary=? WHERE ended_at IS NULL',
+        ('interrupted', now, summary),
+    )
+    return cur.rowcount or 0
 
 
 def update_round_config(round_id: int, **fields) -> None:
@@ -1078,7 +1092,8 @@ def best_alphas_for_seeding(user_id: int, top_n: int = 5,
     init()
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
-            'SELECT code, desc, pass_count, metrics, round_num, idx '
+            'SELECT code, desc, pass_count, metrics, round_num, idx, '
+            'universe, neutralization, decay, truncation '
             'FROM alphas WHERE user_id=? AND pass_count >= ? '
             'ORDER BY pass_count DESC, id DESC LIMIT ?',
             (user_id, min_pass_count, top_n * 4),

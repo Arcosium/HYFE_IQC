@@ -30,6 +30,7 @@ DATAFIELDS_CSV = os.path.join(_THIS_DIR, 'IQC_brain_datafields.csv')
 _IDENT_RX = re.compile(r'\b[A-Za-z_][A-Za-z0-9_]*\b')
 # 과학적 표기법: 1e-6, 2.5E+3, 1e6 등.
 _SCI_RX = re.compile(r'\b\d+\.?\d*[eE][+-]?\d+\b')
+_ASSIGN_LHS_RX = re.compile(r'(?:^|;)\s*([A-Za-z_]\w*)\s*=')
 
 # type 컬럼이 'vector' 인 datafield 집합의 mtime 캐시 (파일 안 바뀌면 재파싱 안 함).
 _VECTOR_FIELDS_CACHE: tuple[float, set[str]] | None = None
@@ -100,6 +101,12 @@ def validate_alpha(code: str) -> list[str]:
     # 괄호 균형
     if not _balanced_parens(code):
         issues.append('unbalanced parentheses')
+
+    # WQB FASTEXPR 는 한 수식 안에서 같은 임시 변수를 재정의하면 컴파일 에러.
+    lhs_names = _ASSIGN_LHS_RX.findall(code)
+    dupes = sorted({name for name in lhs_names if lhs_names.count(name) > 1})
+    if dupes:
+        issues.append('redefined variables: ' + ', '.join(dupes[:5]))
 
     # 식별자 검사: 화이트리스트 거부는 폐기 (위 docstring 참고). raw vector 필드만 차단 —
     # vector 타입은 vec_avg/vec_sum 등 vec_* 로 감싸야 행렬 연산이 되며, raw 로 쓰면
