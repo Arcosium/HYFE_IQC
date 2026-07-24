@@ -148,6 +148,21 @@ html, body {
 .card-block.collapsible .card-head:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
 
 /* ════════════════════════════════ 로그인 ═══════════════════════════════ */
+/* 로그인 스크린은 전면 오버레이(fixed)라 상단 마스트헤드가 가려진다 —
+   카드 안에 마스트헤드를 다시 그린다(레퍼런스 kimhyunho 마스트헤드 축약형). */
+.login-mast { text-align: center; margin-bottom: 26px; }
+.login-brand {
+  font-family: var(--serif); font-weight: 900; font-size: 30px;
+  letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink);
+}
+.login-brand .accent { color: var(--red); }
+.login-sub {
+  font-family: var(--mono); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.28em; text-transform: uppercase; color: var(--ink-faint);
+  margin-top: 7px;
+}
+.double-rule.login-rule { margin: 18px 0 0; }
+
 #screen-login {
   position: fixed; inset: 0; z-index: 1000;
   display: flex; align-items: center; justify-content: center;

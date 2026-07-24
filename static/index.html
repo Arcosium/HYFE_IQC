@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;900&family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <!-- ⚠ Cloudflare 가 css/js 를 4시간 엣지캐시(max-age=14400 덮어씀) — 배포 시 반드시 ?v= 를 올릴 것 -->
-  <link rel="stylesheet" href="/style.css?v=21" />
+  <link rel="stylesheet" href="/style.css?v=22" />
 </head>
 <body>
   <header class="topbar">
@@ -32,6 +32,11 @@
   <!-- ── 로그인 화면 ── -->
   <main id="screen-login" class="screen">
     <div class="card">
+      <div class="login-mast">
+        <div class="login-brand">Genomic<span class="accent">WQB</span></div>
+        <div class="login-sub">Genome Evolution Observatory</div>
+        <hr class="double-rule login-rule">
+      </div>
       <div class="tab-toggle">
         <button type="button" id="tab-login-btn" class="tab-btn active">로그인</button>
         <button type="button" id="tab-register-btn" class="tab-btn">회원가입</button>
