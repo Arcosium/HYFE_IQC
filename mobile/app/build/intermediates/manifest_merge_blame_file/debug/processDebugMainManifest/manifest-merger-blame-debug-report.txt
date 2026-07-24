@@ -1,0 +1,202 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="uk.aive.genomicwqb"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:5:5-67
+11-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:5:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:6:5-79
+12-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:6:22-76
+13
+14    <!-- API 33+ 알림 표시 (런타임 요청) -->
+15    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+15-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:9:5-77
+15-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:9:22-74
+16
+17    <!-- 바이오 인증 감시용 포그라운드 서비스 — 앱이 닫혀도 폴링이 살아 있어야 한다 -->
+18    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+18-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:12:5-77
+18-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:12:22-74
+19    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+19-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:13:5-87
+19-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:13:22-84
+20    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+20-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:14:5-81
+20-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:14:22-78
+21
+22    <permission
+22-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:22:5-24:47
+23        android:name="uk.aive.genomicwqb.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+23-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:23:9-81
+24        android:protectionLevel="signature" />
+24-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:24:9-44
+25
+26    <uses-permission android:name="uk.aive.genomicwqb.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+26-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:26:5-97
+26-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:26:22-94
+27
+28    <application
+28-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:16:5-59:19
+29        android:allowBackup="true"
+29-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:17:9-35
+30        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+30-->[androidx.core:core:1.13.1] /home/arcosium/.gradle/caches/8.10.2/transforms/b215b40f44deee4c41cd68f9d7f539fa/transformed/core-1.13.1/AndroidManifest.xml:28:18-86
+31        android:debuggable="true"
+32        android:extractNativeLibs="false"
+33        android:icon="@mipmap/ic_launcher"
+33-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:18:9-43
+34        android:label="@string/app_name"
+34-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:19:9-41
+35        android:roundIcon="@mipmap/ic_launcher_round"
+35-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:20:9-54
+36        android:supportsRtl="true"
+36-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:21:9-35
+37        android:theme="@style/Theme.GenomicWQB"
+37-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:22:9-48
+38        android:usesCleartextTraffic="false" >
+38-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:23:9-45
+39        <activity
+39-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:26:9-44:20
+40            android:name="uk.aive.genomicwqb.MainActivity"
+40-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:27:13-41
+41            android:configChanges="orientation|screenSize|keyboard|keyboardHidden"
+41-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:29:13-83
+42            android:exported="true"
+42-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:28:13-36
+43            android:launchMode="singleTask"
+43-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:30:13-44
+44            android:theme="@style/Theme.GenomicWQB.Splash" >
+44-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:31:13-59
+45            <intent-filter>
+45-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:33:13-36:29
+46                <action android:name="android.intent.action.MAIN" />
+46-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:34:17-69
+46-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:34:25-66
+47
+48                <category android:name="android.intent.category.LAUNCHER" />
+48-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:35:17-77
+48-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:35:27-74
+49            </intent-filter>
+50            <intent-filter android:autoVerify="true" >
+50-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:38:13-43:29
+50-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:38:28-53
+51                <action android:name="android.intent.action.VIEW" />
+51-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:39:17-69
+51-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:39:25-66
+52
+53                <category android:name="android.intent.category.DEFAULT" />
+53-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:40:17-76
+53-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:40:27-73
+54                <category android:name="android.intent.category.BROWSABLE" />
+54-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:41:17-78
+54-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:41:27-75
+55
+56                <data
+56-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:42:17-76
+57                    android:host="iqc.ai-ve.uk"
+57-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:42:46-73
+58                    android:scheme="https" />
+58-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:42:23-45
+59            </intent-filter>
+60        </activity>
+61
+62        <service
+62-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:46:9-49:56
+63            android:name="uk.aive.genomicwqb.PersonaWatchService"
+63-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:47:13-48
+64            android:exported="false"
+64-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:48:13-37
+65            android:foregroundServiceType="dataSync" />
+65-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:49:13-53
+66
+67        <receiver
+67-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:51:9-58:20
+68            android:name="uk.aive.genomicwqb.BootReceiver"
+68-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:52:13-41
+69            android:enabled="true"
+69-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:54:13-35
+70            android:exported="true" >
+70-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:53:13-36
+71            <intent-filter>
+71-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:55:13-57:29
+72                <action android:name="android.intent.action.BOOT_COMPLETED" />
+72-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:56:17-79
+72-->/home/arcosium/projects/GenomicWQB/mobile/app/src/main/AndroidManifest.xml:56:25-76
+73            </intent-filter>
+74        </receiver>
+75
+76        <provider
+76-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:24:9-32:20
+77            android:name="androidx.startup.InitializationProvider"
+77-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:25:13-67
+78            android:authorities="uk.aive.genomicwqb.androidx-startup"
+78-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:26:13-68
+79            android:exported="false" >
+79-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:27:13-37
+80            <meta-data
+80-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:29:13-31:52
+81                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+81-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:30:17-75
+82                android:value="androidx.startup" />
+82-->[androidx.emoji2:emoji2:1.3.0] /home/arcosium/.gradle/caches/8.10.2/transforms/f6faf0c7376022e7a0a8625b191b784c/transformed/emoji2-1.3.0/AndroidManifest.xml:31:17-49
+83            <meta-data
+83-->[androidx.lifecycle:lifecycle-process:2.6.2] /home/arcosium/.gradle/caches/8.10.2/transforms/9f232d67a843071b872547c9f338ed9e/transformed/lifecycle-process-2.6.2/AndroidManifest.xml:29:13-31:52
+84                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+84-->[androidx.lifecycle:lifecycle-process:2.6.2] /home/arcosium/.gradle/caches/8.10.2/transforms/9f232d67a843071b872547c9f338ed9e/transformed/lifecycle-process-2.6.2/AndroidManifest.xml:30:17-78
+85                android:value="androidx.startup" />
+85-->[androidx.lifecycle:lifecycle-process:2.6.2] /home/arcosium/.gradle/caches/8.10.2/transforms/9f232d67a843071b872547c9f338ed9e/transformed/lifecycle-process-2.6.2/AndroidManifest.xml:31:17-49
+86            <meta-data
+86-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:29:13-31:52
+87                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+87-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:30:17-85
+88                android:value="androidx.startup" />
+88-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:31:17-49
+89        </provider>
+90
+91        <receiver
+91-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:34:9-52:20
+92            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+92-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:35:13-76
+93            android:directBootAware="false"
+93-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:36:13-44
+94            android:enabled="true"
+94-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:37:13-35
+95            android:exported="true"
+95-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:38:13-36
+96            android:permission="android.permission.DUMP" >
+96-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:39:13-57
+97            <intent-filter>
+97-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:40:13-42:29
+98                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+98-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:17-91
+98-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:41:25-88
+99            </intent-filter>
+100            <intent-filter>
+100-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:43:13-45:29
+101                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+101-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:17-85
+101-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:44:25-82
+102            </intent-filter>
+103            <intent-filter>
+103-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:46:13-48:29
+104                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+104-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:17-88
+104-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:47:25-85
+105            </intent-filter>
+106            <intent-filter>
+106-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:49:13-51:29
+107                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+107-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:17-95
+107-->[androidx.profileinstaller:profileinstaller:1.3.1] /home/arcosium/.gradle/caches/8.10.2/transforms/4279925f757707ac7175407bfe3d7388/transformed/profileinstaller-1.3.1/AndroidManifest.xml:50:25-92
+108            </intent-filter>
+109        </receiver>
+110    </application>
+111
+112</manifest>

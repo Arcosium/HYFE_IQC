@@ -1,0 +1,203 @@
+{
+ "performance": {
+  "currentLevel": "GOLD",
+  "bestLevel": "GOLD",
+  "currentQuarter": {
+   "name": "2026-Q3",
+   "startDate": "2026-07-01",
+   "endDate": "2026-09-30"
+  },
+  "current": {
+   "level": null,
+   "geniusLevel": "GOLD",
+   "quarter": {
+    "name": "2026-Q3",
+    "startDate": "2026-07-01",
+    "endDate": "2026-09-30"
+   },
+   "alphaCount": 2,
+   "pyramidCount": 0,
+   "combinedSelectedAlphaPerformance": null,
+   "combinedAlphaPerformance": null,
+   "operatorCount": 7,
+   "operatorAvg": 6.0,
+   "fieldCount": 3,
+   "fieldAvg": 3.0,
+   "communityActivity": 0.5,
+   "maxSimulationStreak": 16,
+   "extras": [],
+   "combinedPowerPoolAlphaPerformance": null,
+   "combinedOsmosisPerformance": null
+  },
+  "previous": {
+   "level": "GOLD",
+   "geniusLevel": "GOLD",
+   "quarter": {
+    "name": "2026-Q2",
+    "startDate": "2026-04-01",
+    "endDate": "2026-06-30"
+   },
+   "alphaCount": 0,
+   "pyramidCount": 0,
+   "combinedSelectedAlphaPerformance": null,
+   "combinedAlphaPerformance": null,
+   "operatorCount": 0,
+   "operatorAvg": 0.0,
+   "fieldCount": 0,
+   "fieldAvg": 0.0,
+   "communityActivity": 0,
+   "maxSimulationStreak": 34,
+   "extras": [],
+   "combinedPowerPoolAlphaPerformance": null,
+   "combinedOsmosisPerformance": null
+  },
+  "history": [
+   {
+    "level": null,
+    "geniusLevel": "GOLD",
+    "quarter": {
+     "name": "2026-Q3",
+     "startDate": "2026-07-01",
+     "endDate": "2026-09-30"
+    },
+    "alphaCount": 2,
+    "pyramidCount": 0,
+    "combinedSelectedAlphaPerformance": null,
+    "combinedAlphaPerformance": null,
+    "operatorCount": 7,
+    "operatorAvg": 6.0,
+    "fieldCount": 3,
+    "fieldAvg": 3.0,
+    "communityActivity": 0.5,
+    "maxSimulationStreak": 16,
+    "extras": []
+   },
+   {
+    "level": "GOLD",
+    "geniusLevel": "GOLD",
+    "quarter": {
+     "name": "2026-Q2",
+     "startDate": "2026-04-01",
+     "endDate": "2026-06-30"
+    },
+    "alphaCount": 0,
+    "pyramidCount": 0,
+    "combinedSelectedAlphaPerformance": null,
+    "combinedAlphaPerformance": null,
+    "operatorCount": 0,
+    "operatorAvg": 0.0,
+    "fieldCount": 0,
+    "fieldAvg": 0.0,
+    "communityActivity": 0,
+    "maxSimulationStreak": 34,
+    "extras": []
+   }
+  ]
+ },
+ "leaderboard": {
+  "rank": 5449,
+  "user": "HK92380",
+  "extras": [],
+  "geniusLevel": "GOLD",
+  "bestLevel": "GOLD",
+  "alphaCount": 2,
+  "pyramidCount": 0,
+  "combinedAlphaPerformance": 0.0,
+  "combinedPowerPoolAlphaPerformance": 0.0,
+  "combinedSelectedAlphaPerformance": 0.0,
+  "combinedOsmosisPerformance": 0.0,
+  "operatorCount": 7,
+  "operatorAvg": 6.0,
+  "fieldCount": 3,
+  "fieldAvg": 3.0,
+  "communityActivity": 0.5,
+  "maxSimulationStreak": 16,
+  "country": "KR"
+ },
+ "osmosis": [
+  {
+   "region": "USA",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "USA",
+   "delay": 0,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "GLB",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "EUR",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "EUR",
+   "delay": 0,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "ASI",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "CHN",
+   "delay": 0,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "CHN",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "AMR",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "AMR",
+   "delay": 0,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "IND",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  },
+  {
+   "region": "MEA",
+   "delay": 1,
+   "pointsAllocated": 0,
+   "alphas": 0,
+   "scalable": false
+  }
+ ]
+}

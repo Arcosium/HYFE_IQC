@@ -1,0 +1,30 @@
+R_DEF: Internal format may change without notice
+local
+color accent
+color accent_light
+color bg_primary
+color bg_secondary
+color ic_launcher_background
+color text_primary
+color text_secondary
+color white
+drawable ic_launcher_foreground
+drawable ic_notif
+drawable ic_offline
+drawable progress_bar
+id btnRetry
+id errorContainer
+id progressBar
+id swipeRefresh
+id webView
+layout activity_main
+mipmap ic_launcher
+mipmap ic_launcher_foreground
+mipmap ic_launcher_round
+string app_name
+string error_message
+string error_title
+string offline_icon_desc
+string retry
+style Theme.GenomicWQB
+style Theme.GenomicWQB.Splash

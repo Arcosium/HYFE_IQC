@@ -39,7 +39,10 @@ _TOK_RX = re.compile(
     r'|(?P<RPAREN>\))'
     r'|(?P<COMMA>,)'
     r'|(?P<SEMI>;)'
-    r'|(?P<OP>[+\-*/^<>=&|!%])'
+    # '?' 와 ':' 는 FASTEXPR 삼항연산자(cond ? a : b). 여기 없으면 토크나이저가 그 두
+    # 문자를 **조용히 버려서** `x>1?a:b` 가 [x,1,a,b] 로 납작해진다 — 파스 트리가 원식과
+    # 달라진다(2026-07-14, regime 유전자 도입으로 삼항이 정식 산출물이 되며 발견).
+    r'|(?P<OP>[+\-*/^<>=&|!%?:])'
     r'|(?P<WS>\s+)'               # whitespace — consumed but not emitted
 )
 
@@ -274,9 +277,34 @@ def operators_used(code: str) -> set:
         return set()
 
 
+def call_arities(code: str) -> list:
+    """Return [(op_name, arg_count), ...] for every function-call node.
+    arg_count = number of top-level args to that call. Tolerant: [] on failure.
+    #2 프리플라이트 arity 검증(operator_catalog.arity 와 대조)용."""
+    try:
+        tree = parse(code)
+        if tree is None:
+            return []
+        out = []
+        for node in _walk(tree):
+            if isinstance(node, dict) and node.get('type') == 'call':
+                out.append((node.get('name'), len(node.get('args') or [])))
+        return out
+    except Exception:
+        return []
+
+
 def fields_used(code: str) -> set:
     """Return set of NAME tokens used as operands that are NOT operators and
-    whose name has length >= 2. Tolerant: returns {} on failure."""
+    whose name has length >= 2. Tolerant: returns {} on failure.
+
+    명명인자 키(`std=4`, `filter=True`, `hump=0.03`)와 그룹명(`sector` 등)은
+    **데이터필드가 아니다**. 파서는 `std=4` 를 name('std') + OP('=') + number 로
+    쪼개므로 그대로 두면 'std' 가 필드로 잡히고, presim_gate 의 팔레트 검사가
+    "unknown datafield: std" 로 알파를 통째로 드롭한다. 이 제외 규칙은 원래
+    apply_field_hygiene 에만 있었는데(=아래 _HYGIENE_* 상수), 필드 추출 자체의
+    성질이므로 여기로 내린다 — 두 호출자가 같은 진실을 쓴다.
+    """
     try:
         from . import operator_catalog
     except ImportError:
@@ -288,11 +316,14 @@ def fields_used(code: str) -> set:
         tree = parse(code)
         if tree is None:
             return set()
+        exclude = (set(_HYGIENE_ASSIGN_RX.findall(code))
+                   | _HYGIENE_GROUP_NAMES | _HYGIENE_LITERALS)
         result: set[str] = set()
         for node in _walk(tree):
             if node.get('type') == 'name':
                 n = node['value']
-                if len(n) >= 2 and not operator_catalog.is_operator(n):
+                if len(n) >= 2 and n not in exclude \
+                        and not operator_catalog.is_operator(n):
                     result.add(n)
         return result
     except Exception:

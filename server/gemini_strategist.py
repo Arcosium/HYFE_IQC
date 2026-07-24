@@ -24,7 +24,7 @@ from .local_llm import types as genai_types
 from . import datafield_palette
 from . import alpha_seeds
 
-LOG = logging.getLogger('hyfe.gemini')
+LOG = logging.getLogger('genomicwqb.gemini')
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 OPERATORS_CSV = os.path.join(_THIS_DIR, 'brain_operators.csv')

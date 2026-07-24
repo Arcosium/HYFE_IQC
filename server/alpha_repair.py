@@ -6,6 +6,7 @@ lint 의 drop-only 정책을 보완 — 사소한 기계적 결함을 1회 수�
 """
 from __future__ import annotations
 
+import difflib
 import re
 
 from . import operator_catalog
@@ -166,6 +167,72 @@ def _add_missing_lookback(code: str, window: int) -> str:
             continue                       # op() 빈 인자는 미수정
         result = result[:close_idx] + f',{window}' + result[close_idx:]
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #4 가이드 리페어 — 시뮬 실패 에러 메시지를 파싱해 표적 1회 수리.
+#   위 repair() 는 '사전 패턴'(에러 없이도 적용), 아래는 '사후 에러→표적 수리'다.
+#   커버리지가 근본적으로 넓다: 관측된 실패를 바로 고쳐 재큐한다(worker 가 1회 재시뮬).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# "Unknown attribute \"filter\"" → 해당 named attr 제거 (drop_filter_named_arg 의 일반화).
+_ATTR_ERR_RX = re.compile(r'''unknown\s+attribute\s+["']?([A-Za-z_]\w+)''', re.IGNORECASE)
+
+# 존재하지 않는 datafield 를 지목하는 에러들 — 지목된 식별자를 캡처.
+_FIELD_ERR_PATTERNS = [
+    re.compile(r'''["']([A-Za-z_]\w{1,})["']\s*(?:is\s+not\s+a\s+valid\s+(?:field|variable|datafield)'''
+               r'''|doesn'?t\s+exist|does\s+not\s+exist|not\s+found)''', re.IGNORECASE),
+    re.compile(r'''\b([A-Za-z_]\w{1,})\s+(?:doesn'?t|does\s+not)\s+exist''', re.IGNORECASE),
+    re.compile(r'''(?:unknown|unrecognized|invalid|no\s+such)\s+(?:field|datafield|variable|identifier)'''
+               r'''\s*[:\-]?\s*["']?([A-Za-z_]\w{1,})''', re.IGNORECASE),
+]
+
+
+def _extract_missing_field(error_text: str):
+    for rx in _FIELD_ERR_PATTERNS:
+        m = rx.search(error_text)
+        if m:
+            tok = m.group(1)
+            # 연산자 이름이면 field 오류가 아님(예: 'rank' 언급) → 스냅 대상 아님.
+            if tok and not operator_catalog.is_operator(tok):
+                return tok
+    return None
+
+
+def repair_from_error(code: str, error_text: str, *, field_pool=None,
+                      cutoff: float = 0.8) -> tuple:
+    """시뮬 실패 에러를 표적 수리. (repaired_code_or_None, label) 반환. 멱등/보수적.
+
+    - Unknown attribute → 해당 `, attr=...` 제거.
+    - 존재하지 않는 field → field_pool 에서 최근접(difflib ratio ≥ cutoff) 필드로 스냅.
+      field_pool 이 없으면 field 스냅은 skip.
+    수리 불가/모호 → (None, '') (worker 는 원 결과 유지·재큐 안 함).
+    """
+    if not isinstance(code, str) or not code.strip() or not error_text:
+        return (None, '')
+    et = str(error_text)
+
+    # 1) Unknown attribute → 제거
+    ma = _ATTR_ERR_RX.search(et)
+    if ma:
+        attr = ma.group(1)
+        new = re.sub(r',\s*' + re.escape(attr) + r'\s*=\s*[^,)]+', '', code)
+        if new != code:
+            return (new, f'drop_attr:{attr}')
+
+    # 2) 없는 field → 최근접 스냅
+    bad = _extract_missing_field(et)
+    if bad and field_pool:
+        pool = [str(f) for f in field_pool if f]
+        pool_lc = [f.lower() for f in pool]
+        near = difflib.get_close_matches(bad.lower(), pool_lc, n=1, cutoff=cutoff)
+        if near and near[0] != bad.lower():
+            snapped = pool[pool_lc.index(near[0])]
+            new = re.sub(r'\b' + re.escape(bad) + r'\b', snapped, code)
+            if new != code:
+                return (new, f'field_snap:{bad}->{snapped}')
+
+    return (None, '')
 
 
 def repair(code: str, *, delay) -> tuple[str, list[str]]:

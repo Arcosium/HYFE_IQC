@@ -31,11 +31,14 @@ _CSV_PATH = os.path.normpath(_CSV_PATH)
 # ---------------------------------------------------------------------------
 
 def _all_csv_rows() -> list[dict]:
-    rows = []
-    with open(_CSV_PATH, 'r', encoding='utf-8') as fh:
-        for row in csv.DictReader(fh):
-            rows.append(row)
-    return rows
+    """팔레트가 실제로 읽는 소스와 **같은 것**을 본다 = 라이브 CSV ∪ 정적 CSV.
+
+    ⚠ 예전엔 정적 CSV 만 읽었는데, 그건 라이브 CSV 가 없던 시절에만 맞는 가정이었다.
+      라이브 수집(scripts/refresh_datafields.py)이 한 번 돌면 팔레트는 두 파일의
+      합집합을 쓰므로, 정적 CSV 만 기대하는 테스트는 환경에 따라 깨진다
+      (2026-07-21 D0 팔레트 도입 때 실제로 깨졌다).
+    """
+    return dp._all_rows()
 
 
 def _palette_field_names(text: str) -> list[str]:
@@ -250,8 +253,13 @@ class TestLateCSVCoverage:
     """
 
     def _sorted_index(self, name: str) -> int:
-        """Return the index of `name` in the alphabetically-sorted field list."""
-        sorted_names = sorted(row['name'] for row in _all_csv_rows())
+        """Return the index of `name` in the alphabetically-sorted field list.
+
+        ⚠ **이름 기준으로 중복 제거**해야 한다. 합집합 소스에는 같은 필드가 D0·D1
+          두 행으로 들어 있어서, 중복을 안 지우면 여기서 센 위치와 build_palette 의
+          회전 오프셋이 어긋난다(2026-07-21 D0 팔레트 도입 때 실제로 어긋났다).
+        """
+        sorted_names = sorted({row['name'] for row in _all_csv_rows()})
         try:
             return sorted_names.index(name)
         except ValueError:

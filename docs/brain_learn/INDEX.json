@@ -1,0 +1,695 @@
+[
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "read-first-starter-pack",
+  "title": "*Read this First * - Starter Pack",
+  "file": "discover-brain__01__read-first-starter-pack.md",
+  "chars": 22462,
+  "lastModified": "2026-06-15T08:57:22.601732-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "about-brain-platform",
+  "title": "Introduction to Alphas",
+  "file": "discover-brain__02__about-brain-platform.md",
+  "chars": 7350,
+  "lastModified": "2025-09-12T03:33:37.870415-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "introduction-brain-expression-language",
+  "title": "Introduction to BRAIN Expression Language",
+  "file": "discover-brain__03__introduction-brain-expression-language.md",
+  "chars": 2892,
+  "lastModified": "2025-03-12T05:14:01.490538-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "intermediate-pack-part-1",
+  "title": "Intermediate Pack - Understand Results [1/2]",
+  "file": "discover-brain__04__intermediate-pack-part-1.md",
+  "chars": 6313,
+  "lastModified": "2025-09-08T05:22:10.878298-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "intermediate-pack-part-2",
+  "title": "Intermediate Pack - Improve your Alpha [2/2]",
+  "file": "discover-brain__05__intermediate-pack-part-2.md",
+  "chars": 6101,
+  "lastModified": "2025-03-12T05:10:08.846145-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "getting-started-high-turnover-alphas",
+  "title": "Getting Started with High Turnover Alphas",
+  "file": "discover-brain__06__getting-started-high-turnover-alphas.md",
+  "chars": 8289,
+  "lastModified": "2026-03-27T10:11:01.638647-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "10-steps-start-brain-platform",
+  "title": "10 Steps to Start on BRAIN",
+  "file": "discover-brain__07__10-steps-start-brain-platform.md",
+  "chars": 1887,
+  "lastModified": "2025-03-12T05:07:54.001684-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "challenge-help",
+  "title": "WorldQuant Challenge",
+  "file": "discover-brain__08__challenge-help.md",
+  "chars": 3314,
+  "lastModified": "2025-03-12T05:07:12.194953-04:00"
+ },
+ {
+  "tutorial": "discover-brain",
+  "category": "Getting Started",
+  "page": "getting-started-vector_neut-operator",
+  "title": "Getting Started with vector_neut Operator",
+  "file": "discover-brain__09__getting-started-vector_neut-operator.md",
+  "chars": 1741,
+  "lastModified": "2025-06-03T00:04:25.167537-04:00"
+ },
+ {
+  "tutorial": "create-alphas",
+  "category": "Getting Started",
+  "page": "running-your-first-alpha",
+  "title": "Simulate your first Alpha",
+  "file": "create-alphas__01__running-your-first-alpha.md",
+  "chars": 6436,
+  "lastModified": "2026-03-09T06:50:21.997260-04:00"
+ },
+ {
+  "tutorial": "create-alphas",
+  "category": "Getting Started",
+  "page": "simulation-settings",
+  "title": "How to choose the Simulation Settings",
+  "file": "create-alphas__02__simulation-settings.md",
+  "chars": 8885,
+  "lastModified": "2025-11-05T03:49:33.672757-05:00"
+ },
+ {
+  "tutorial": "create-alphas",
+  "category": "Getting Started",
+  "page": "how-brain-platform-works",
+  "title": "⭐ How BRAIN works",
+  "file": "create-alphas__03__how-brain-platform-works.md",
+  "chars": 13319,
+  "lastModified": "2025-09-08T05:31:37.418082-04:00"
+ },
+ {
+  "tutorial": "examples",
+  "category": "Getting Started",
+  "page": "19-alpha-examples",
+  "title": "⭐ Alpha Examples for Beginners",
+  "file": "examples__01__19-alpha-examples.md",
+  "chars": 4794,
+  "lastModified": "2026-03-11T06:37:41.550288-04:00"
+ },
+ {
+  "tutorial": "examples",
+  "category": "Getting Started",
+  "page": "sample-alpha-concepts",
+  "title": "⭐ Alpha Examples for Bronze Users 🥉",
+  "file": "examples__02__sample-alpha-concepts.md",
+  "chars": 2931,
+  "lastModified": "2026-03-11T07:08:03.328919-04:00"
+ },
+ {
+  "tutorial": "examples",
+  "category": "Getting Started",
+  "page": "example-expression-alphas",
+  "title": "⭐ Alpha Examples for Silver Users🥈",
+  "file": "examples__03__example-expression-alphas.md",
+  "chars": 6860,
+  "lastModified": "2026-03-11T07:30:51.867324-04:00"
+ },
+ {
+  "tutorial": "interpret-results",
+  "category": "Interpreting Results",
+  "page": "alpha-submission",
+  "title": "Clear these tests before submitting an Alpha",
+  "file": "interpret-results__01__alpha-submission.md",
+  "chars": 17482,
+  "lastModified": "2025-12-01T06:25:03.090749-05:00"
+ },
+ {
+  "tutorial": "interpret-results",
+  "category": "Interpreting Results",
+  "page": "understanding-pnl-realization-horizon",
+  "title": "Understanding PnL Realization Horizon",
+  "file": "interpret-results__02__understanding-pnl-realization-horizon.md",
+  "chars": 3714,
+  "lastModified": "2026-04-08T05:13:55.474954-04:00"
+ },
+ {
+  "tutorial": "interpret-results",
+  "category": "Interpreting Results",
+  "page": "parameters-simulation-results",
+  "title": "Parameters in the Simulation results",
+  "file": "interpret-results__03__parameters-simulation-results.md",
+  "chars": 11103,
+  "lastModified": "2025-04-04T04:35:07.278227-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "data",
+  "title": "Understanding Data in BRAIN: Key Concepts and Tips",
+  "file": "understanding-data__01__data.md",
+  "chars": 5929,
+  "lastModified": "2025-03-12T05:55:58.677840-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "how-use-data-explorer",
+  "title": "How to use the Data Explorer",
+  "file": "understanding-data__02__how-use-data-explorer.md",
+  "chars": 3732,
+  "lastModified": "2025-03-12T05:53:18.035922-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "vector-datafields",
+  "title": "Vector Data Fields 🥉",
+  "file": "understanding-data__03__vector-datafields.md",
+  "chars": 4468,
+  "lastModified": "2025-03-12T05:57:46.498103-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "group-data-fields",
+  "title": "Group Data Fields 🥈",
+  "file": "understanding-data__04__group-data-fields.md",
+  "chars": 3206,
+  "lastModified": "2025-01-08T05:33:05.322350-05:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-earnings4-dataset",
+  "title": "Getting Started with earnings4 dataset (Effect of Earnings Announcement Model)",
+  "file": "understanding-data__05__getting-started-earnings4-dataset.md",
+  "chars": 10919,
+  "lastModified": "2026-06-01T06:15:07.338617-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-option6-implied-volatility-iv",
+  "title": "Getting Started with Option6 Implied volatility (IV)",
+  "file": "understanding-data__06__getting-started-option6-implied-volatility-iv.md",
+  "chars": 7526,
+  "lastModified": "2026-06-15T23:55:25.566566-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-model17-iqc2026s2",
+  "title": "Getting Started with Model17 (Research Analyst Estimate Factors)",
+  "file": "understanding-data__07__getting-started-model17-iqc2026s2.md",
+  "chars": 8722,
+  "lastModified": "2026-06-16T00:03:50.890211-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-model77",
+  "title": "Model77 dataset",
+  "file": "understanding-data__08__getting-started-model77.md",
+  "chars": 2814,
+  "lastModified": "2025-11-04T02:29:13.503955-05:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-model53-dataset",
+  "title": "Getting Started with model53 dataset",
+  "file": "understanding-data__09__getting-started-model53-dataset.md",
+  "chars": 2927,
+  "lastModified": "2025-05-26T14:34:05.198644-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-sentiment1-dataset",
+  "title": "Sentiment1 dataset",
+  "file": "understanding-data__10__getting-started-sentiment1-dataset.md",
+  "chars": 1616,
+  "lastModified": "2026-04-14T02:38:12.341332-04:00"
+ },
+ {
+  "tutorial": "understanding-data",
+  "category": "Data",
+  "page": "getting-started-comprehensive-fundamentals-dataset-fundamental7",
+  "title": "Getting Started with fundamental7 dataset",
+  "file": "understanding-data__11__getting-started-comprehensive-fundamentals-dataset-fundamental7.md",
+  "chars": 2243,
+  "lastModified": "2025-06-10T06:57:33.888122-04:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "list-must-read-posts-how-improve-your-alphas-are-submitted",
+  "title": "Must-read posts: How to improve your Alphas🥉",
+  "file": "advanced-topics__01__list-must-read-posts-how-improve-your-alphas-are-submitted.md",
+  "chars": 2223,
+  "lastModified": "2025-10-30T01:37:12.590157-04:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "neut-cons",
+  "title": "Neutralization 🥉",
+  "file": "advanced-topics__02__neut-cons.md",
+  "chars": 6506,
+  "lastModified": "2025-10-30T01:39:54.812033-04:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "neut-users",
+  "title": "Double Neutralization",
+  "file": "advanced-topics__03__neut-users.md",
+  "chars": 2162,
+  "lastModified": "2025-10-30T01:42:01.001138-04:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-d0",
+  "title": "D0",
+  "file": "advanced-topics__04__getting-started-d0.md",
+  "chars": 4136,
+  "lastModified": "2025-11-04T02:30:06.401262-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-risk-neutralized-alphas",
+  "title": "Risk Neutralized Alphas",
+  "file": "advanced-topics__05__getting-started-risk-neutralized-alphas.md",
+  "chars": 7843,
+  "lastModified": "2025-11-04T02:31:59.811219-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-risk-neutralized-metrics",
+  "title": "Risk Neutralization: Default setting",
+  "file": "advanced-topics__06__getting-started-risk-neutralized-metrics.md",
+  "chars": 2355,
+  "lastModified": "2025-11-04T02:31:04.683695-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-crowding-risk-neutralized-alphas",
+  "title": "Crowding Risk-Neutralized Alphas",
+  "file": "advanced-topics__07__getting-started-crowding-risk-neutralized-alphas.md",
+  "chars": 2035,
+  "lastModified": "2025-11-04T02:32:58.440036-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-ram-risk-neutralized-alphas",
+  "title": "RAM Risk-Neutralized Alphas",
+  "file": "advanced-topics__08__getting-started-ram-risk-neutralized-alphas.md",
+  "chars": 2720,
+  "lastModified": "2025-11-04T02:32:44.930831-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-statistical-risk-neutralized-alphas",
+  "title": "Statistical Risk-Neutralized Alphas",
+  "file": "advanced-topics__09__getting-started-statistical-risk-neutralized-alphas.md",
+  "chars": 4487,
+  "lastModified": "2025-11-04T02:32:32.455124-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "getting-started-investability-constrained-metrics",
+  "title": "Investability Constrained Metrics",
+  "file": "advanced-topics__10__getting-started-investability-constrained-metrics.md",
+  "chars": 5442,
+  "lastModified": "2025-11-04T02:32:14.611009-05:00"
+ },
+ {
+  "tutorial": "advanced-topics",
+  "category": "Getting Started",
+  "page": "fast-d1-documentation",
+  "title": "Fast D1 Documentation",
+  "file": "advanced-topics__11__fast-d1-documentation.md",
+  "chars": 6268,
+  "lastModified": "2026-01-15T02:26:37.732416-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "global-region",
+  "title": "Global Alphas [Gold]",
+  "file": "regions-and-universes__01__global-region.md",
+  "chars": 4052,
+  "lastModified": "2025-11-04T02:34:01.955501-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-topsp500-universe-usa-region",
+  "title": "Getting Started with USA TOPSP500 universe [Gold]",
+  "file": "regions-and-universes__02__getting-started-topsp500-universe-usa-region.md",
+  "chars": 1456,
+  "lastModified": "2026-04-23T07:45:51.134868-04:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "usa-top2000-asi-minvol10m-asi-top500-glb-minvol10m-universe",
+  "title": "Getting Started with USA TOP2000, ASI MINVOL10M, ASI TOP500, GLB MINVOL10M Universe",
+  "file": "regions-and-universes__03__usa-top2000-asi-minvol10m-asi-top500-glb-minvol10m-universe.md",
+  "chars": 653,
+  "lastModified": "2026-04-23T07:44:51.590412-04:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-illiquid-universes",
+  "title": "Getting started on Illiquid Universes [Gold]",
+  "file": "regions-and-universes__04__getting-started-illiquid-universes.md",
+  "chars": 1341,
+  "lastModified": "2025-01-08T07:58:11.376704-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-hkgkortwn",
+  "title": "Getting started on HKG/KOR/TWN [Grand Master]",
+  "file": "regions-and-universes__05__getting-started-hkgkortwn.md",
+  "chars": 1416,
+  "lastModified": "2026-02-13T09:57:25.680648-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-eur-top2500-universe",
+  "title": "EUR TOP2500 Universe",
+  "file": "regions-and-universes__06__getting-started-eur-top2500-universe.md",
+  "chars": 1445,
+  "lastModified": "2025-11-04T02:35:32.827518-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-amr-alphas",
+  "title": "AMR Alphas [Master]",
+  "file": "regions-and-universes__07__getting-started-amr-alphas.md",
+  "chars": 1664,
+  "lastModified": "2026-02-13T09:56:25.939999-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-jpn-alphas",
+  "title": "Getting Started with JPN Alphas [Master]",
+  "file": "regions-and-universes__08__getting-started-jpn-alphas.md",
+  "chars": 3331,
+  "lastModified": "2026-02-13T09:58:23.248139-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "china-region-consultants",
+  "title": "Getting Started: China Research for Consultants [Gold]",
+  "file": "regions-and-universes__09__china-region-consultants.md",
+  "chars": 5499,
+  "lastModified": "2025-06-02T02:36:59.225739-04:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-glb-topdiv3000-universe",
+  "title": "GLB TOPDIV3000 Universe",
+  "file": "regions-and-universes__10__getting-started-glb-topdiv3000-universe.md",
+  "chars": 1792,
+  "lastModified": "2026-01-07T00:37:09.463800-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-mea-region",
+  "title": "Getting Started with the MEA Region",
+  "file": "regions-and-universes__11__getting-started-mea-region.md",
+  "chars": 1772,
+  "lastModified": "2026-04-30T12:27:46.633059-04:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-eur-topcs1600-universe",
+  "title": "Getting Started with the EUR TOPCS1600 Universe",
+  "file": "regions-and-universes__12__getting-started-eur-topcs1600-universe.md",
+  "chars": 2085,
+  "lastModified": "2026-02-09T06:39:06.492786-05:00"
+ },
+ {
+  "tutorial": "regions-and-universes",
+  "category": "Regions and Universes",
+  "page": "getting-started-india-alphas",
+  "title": "India Alphas",
+  "file": "regions-and-universes__13__getting-started-india-alphas.md",
+  "chars": 1088,
+  "lastModified": "2025-11-04T02:31:39.331672-05:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "get-started",
+  "title": "Starting Guide for Research Consultants",
+  "file": "consultant-information__01__get-started.md",
+  "chars": 2770,
+  "lastModified": "2025-11-04T02:38:47.552711-05:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "getting-started-power-pool-alphas",
+  "title": "Power Pool Alphas",
+  "file": "consultant-information__02__getting-started-power-pool-alphas.md",
+  "chars": 5959,
+  "lastModified": "2026-05-19T08:55:53.278328-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "getting-started-finding-consultant-alphas-read-first",
+  "title": "Finding Consultant Alphas",
+  "file": "consultant-information__03__getting-started-finding-consultant-alphas-read-first.md",
+  "chars": 18577,
+  "lastModified": "2025-11-18T10:21:25.763937-05:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "multi-alpha-simulation",
+  "title": "Consultant Simulation Features",
+  "file": "consultant-information__04__multi-alpha-simulation.md",
+  "chars": 3663,
+  "lastModified": "2025-08-27T04:04:02.635767-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "consultant-features",
+  "title": "Consultant Features",
+  "file": "consultant-information__05__consultant-features.md",
+  "chars": 13945,
+  "lastModified": "2026-03-19T01:21:55.747360-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "consultant-submission-tests",
+  "title": "Consultant Submission Tests",
+  "file": "consultant-information__06__consultant-submission-tests.md",
+  "chars": 12217,
+  "lastModified": "2026-07-20T00:34:49.558579-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "visualization-tool",
+  "title": "Visualization Tool",
+  "file": "consultant-information__07__visualization-tool.md",
+  "chars": 3549,
+  "lastModified": "2024-03-24T16:45:39.384441-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "consultant-dos-and-donts",
+  "title": "Consultant Dos and Don'ts",
+  "file": "consultant-information__08__consultant-dos-and-donts.md",
+  "chars": 5162,
+  "lastModified": "2024-07-02T10:01:25.914891-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "getting-started-brain-python-alphas",
+  "title": "Brain Python Alphas",
+  "file": "consultant-information__09__getting-started-brain-python-alphas.md",
+  "chars": 24483,
+  "lastModified": "2026-06-17T02:50:22.177780-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "how-translate-fast-expression-alpha-python-alpha",
+  "title": "How to translate Fast Expression Alpha into Python Alpha",
+  "file": "consultant-information__10__how-translate-fast-expression-alpha-python-alpha.md",
+  "chars": 8997,
+  "lastModified": "2026-06-19T23:48:43.726944-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "brains-new-advisory-program",
+  "title": "Research Advisory Program",
+  "file": "consultant-information__11__brains-new-advisory-program.md",
+  "chars": 1850,
+  "lastModified": "2024-10-04T15:32:18.609549-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "your-advisor-minki-lee",
+  "title": "Your Advisor - Minki Lee",
+  "file": "consultant-information__12__your-advisor-minki-lee.md",
+  "chars": 4060,
+  "lastModified": "2026-06-26T05:16:41.646781-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "osmosis-allocation-guide-consultants",
+  "title": "Osmosis Allocation Guide for Consultants",
+  "file": "consultant-information__13__osmosis-allocation-guide-consultants.md",
+  "chars": 10482,
+  "lastModified": "2026-07-08T03:01:42.240553-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "single-dataset-alphas",
+  "title": "❗ Single Dataset Alphas",
+  "file": "consultant-information__14__single-dataset-alphas.md",
+  "chars": 3146,
+  "lastModified": "2025-08-26T03:39:14.716871-04:00"
+ },
+ {
+  "tutorial": "consultant-information",
+  "category": "Consultant Information",
+  "page": "brain-genius",
+  "title": "💡 Brain Genius",
+  "file": "consultant-information__15__brain-genius.md",
+  "chars": 11276,
+  "lastModified": "2026-05-19T08:46:16.111980-04:00"
+ },
+ {
+  "tutorial": "brain-api",
+  "category": "Consultant Information",
+  "page": "understanding-simulation-limits",
+  "title": "❗Understanding simulation limits",
+  "file": "brain-api__01__understanding-simulation-limits.md",
+  "chars": 7623,
+  "lastModified": "2025-12-04T23:17:20.021695-05:00"
+ },
+ {
+  "tutorial": "brain-api",
+  "category": "Consultant Information",
+  "page": "brain-api",
+  "title": "BRAIN API",
+  "file": "brain-api__02__brain-api.md",
+  "chars": 20829,
+  "lastModified": "2026-01-11T05:08:25.939580-05:00"
+ },
+ {
+  "tutorial": "brain-api",
+  "category": "Consultant Information",
+  "page": "how-can-you-avoid-duplicate-simulations",
+  "title": "How can you avoid duplicate simulations?",
+  "file": "brain-api__03__how-can-you-avoid-duplicate-simulations.md",
+  "chars": 6656,
+  "lastModified": "2026-01-21T01:03:07.613232-05:00"
+ },
+ {
+  "tutorial": "brain-api",
+  "category": "Consultant Information",
+  "page": "documentation-ace-api-library-gold",
+  "title": "Documentation for ACE API Library [Gold]",
+  "file": "brain-api__04__documentation-ace-api-library-gold.md",
+  "chars": 1020,
+  "lastModified": "2025-03-07T04:24:41.918309-05:00"
+ },
+ {
+  "tutorial": "superalpha",
+  "category": "SuperAlpha",
+  "page": "superalpha-overview",
+  "title": "What is a SuperAlpha?",
+  "file": "superalpha__01__superalpha-overview.md",
+  "chars": 7660,
+  "lastModified": "2025-09-08T05:39:22.905616-04:00"
+ },
+ {
+  "tutorial": "superalpha",
+  "category": "SuperAlpha",
+  "page": "getting-started-global-superalphas",
+  "title": "Global SuperAlphas",
+  "file": "superalpha__02__getting-started-global-superalphas.md",
+  "chars": 2905,
+  "lastModified": "2025-11-04T02:39:54.299570-05:00"
+ },
+ {
+  "tutorial": "themes",
+  "category": "Consultant Info",
+  "page": "overview-themes",
+  "title": "Overview of Themes",
+  "file": "themes__01__overview-themes.md",
+  "chars": 1378,
+  "lastModified": "2024-12-27T02:16:40.335644-05:00"
+ },
+ {
+  "tutorial": "themes",
+  "category": "Consultant Info",
+  "page": "multiplier-rules",
+  "title": "Multiplier Rules",
+  "file": "themes__02__multiplier-rules.md",
+  "chars": 1791,
+  "lastModified": "2024-06-03T03:30:35.804439-04:00"
+ },
+ {
+  "tutorial": "themes",
+  "category": "Consultant Info",
+  "page": "consgrpdefault",
+  "title": "Theme Calendar",
+  "file": "themes__03__consgrpdefault.md",
+  "chars": 3625,
+  "lastModified": "2024-06-24T22:50:42.798598-04:00"
+ }
+]

@@ -1,0 +1,1084 @@
+[
+ {
+  "id": "analyst",
+  "name": "Analyst",
+  "datasetCount": 36,
+  "fieldCount": 26589,
+  "alphaCount": 1797306,
+  "userCount": 48615,
+  "valueScore": 4.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "MEA",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "analyst-analyst-estimates",
+    "name": "Analyst Estimates",
+    "datasetCount": 25,
+    "fieldCount": 24348,
+    "alphaCount": 1675300,
+    "userCount": 48522,
+    "valueScore": 3.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "analyst-analyst-ratings",
+    "name": "Analyst Ratings",
+    "datasetCount": 2,
+    "fieldCount": 8,
+    "alphaCount": 3771,
+    "userCount": 879,
+    "valueScore": 8.0,
+    "region": [
+     "ASI",
+     "IND"
+    ]
+   },
+   {
+    "id": "analyst-crowdsourced-estimates",
+    "name": "Crowdsourced Estimates",
+    "datasetCount": 5,
+    "fieldCount": 1390,
+    "alphaCount": 88770,
+    "userCount": 5236,
+    "valueScore": 6.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "EUR",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "analyst-esg",
+    "name": "ESG",
+    "datasetCount": 4,
+    "fieldCount": 843,
+    "alphaCount": 55732,
+    "userCount": 4359,
+    "valueScore": 7.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "broker",
+  "name": "Broker",
+  "datasetCount": 1,
+  "fieldCount": 12,
+  "alphaCount": 3073,
+  "userCount": 911,
+  "valueScore": 10.0,
+  "region": [
+   "ASI"
+  ],
+  "children": [
+   {
+    "id": "broker-broker-estimates",
+    "name": "Broker Estimates",
+    "datasetCount": 1,
+    "fieldCount": 12,
+    "alphaCount": 3073,
+    "userCount": 911,
+    "valueScore": 10.0,
+    "region": [
+     "ASI"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "earnings",
+  "name": "Earnings",
+  "datasetCount": 9,
+  "fieldCount": 850,
+  "alphaCount": 120586,
+  "userCount": 6603,
+  "valueScore": 4.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "EUR",
+   "GLB",
+   "IND",
+   "MEA",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "earnings-earnings-estimates",
+    "name": "Earnings Estimates",
+    "datasetCount": 9,
+    "fieldCount": 850,
+    "alphaCount": 120586,
+    "userCount": 6603,
+    "valueScore": 3.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "fundamental",
+  "name": "Fundamental",
+  "datasetCount": 38,
+  "fieldCount": 26342,
+  "alphaCount": 1671858,
+  "userCount": 88303,
+  "valueScore": 4.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "MEA",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "fundamental-china-fundamental-data",
+    "name": "China Fundamental Data",
+    "datasetCount": 1,
+    "fieldCount": 613,
+    "alphaCount": 0,
+    "userCount": 0,
+    "valueScore": 0.0,
+    "region": [
+     "CHN"
+    ]
+   },
+   {
+    "id": "fundamental-footnotes",
+    "name": "Footnotes",
+    "datasetCount": 1,
+    "fieldCount": 766,
+    "alphaCount": 152047,
+    "userCount": 36383,
+    "valueScore": 2.0,
+    "region": [
+     "USA"
+    ]
+   },
+   {
+    "id": "fundamental-fundamental-data",
+    "name": "Fundamental Data",
+    "datasetCount": 27,
+    "fieldCount": 23362,
+    "alphaCount": 1512263,
+    "userCount": 86891,
+    "valueScore": 3.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "fundamental-fundamental-models",
+    "name": "Fundamental Models",
+    "datasetCount": 9,
+    "fieldCount": 1601,
+    "alphaCount": 74191,
+    "userCount": 6260,
+    "valueScore": 6.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "imbalance",
+  "name": "Imbalance",
+  "datasetCount": 1,
+  "fieldCount": 2,
+  "alphaCount": 61354,
+  "userCount": 4121,
+  "valueScore": 5.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "EUR",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "imbalance-imbalance-models",
+    "name": "Imbalance Models",
+    "datasetCount": 1,
+    "fieldCount": 2,
+    "alphaCount": 61354,
+    "userCount": 4121,
+    "valueScore": 4.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "EUR",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "insiders",
+  "name": "Insiders",
+  "datasetCount": 6,
+  "fieldCount": 203,
+  "alphaCount": 52795,
+  "userCount": 3007,
+  "valueScore": 7.0,
+  "region": [
+   "AMR",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "insiders-insider-data",
+    "name": "Insider Data",
+    "datasetCount": 6,
+    "fieldCount": 203,
+    "alphaCount": 52795,
+    "userCount": 3007,
+    "valueScore": 5.0,
+    "region": [
+     "AMR",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "institutions",
+  "name": "Institutions",
+  "datasetCount": 4,
+  "fieldCount": 93,
+  "alphaCount": 122815,
+  "userCount": 4182,
+  "valueScore": 6.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "institutions-ownership-models",
+    "name": "Ownership Models",
+    "datasetCount": 4,
+    "fieldCount": 93,
+    "alphaCount": 122815,
+    "userCount": 4182,
+    "valueScore": 5.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "macro",
+  "name": "Macro",
+  "datasetCount": 6,
+  "fieldCount": 183,
+  "alphaCount": 60616,
+  "userCount": 3921,
+  "valueScore": 8.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "macro-macroeconomic-activities",
+    "name": "Macroeconomic Activities",
+    "datasetCount": 6,
+    "fieldCount": 183,
+    "alphaCount": 60616,
+    "userCount": 3921,
+    "valueScore": 7.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "model",
+  "name": "Model",
+  "datasetCount": 121,
+  "fieldCount": 43791,
+  "alphaCount": 1934090,
+  "userCount": 26395,
+  "valueScore": 7.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "MEA",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "model-consumer-models",
+    "name": "Consumer Models",
+    "datasetCount": 2,
+    "fieldCount": 133,
+    "alphaCount": 3802,
+    "userCount": 816,
+    "valueScore": 9.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-estimates-models",
+    "name": "Estimates Models",
+    "datasetCount": 27,
+    "fieldCount": 11969,
+    "alphaCount": 323594,
+    "userCount": 7434,
+    "valueScore": 6.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-mlai-models",
+    "name": "ML/AI Models",
+    "datasetCount": 23,
+    "fieldCount": 11327,
+    "alphaCount": 704562,
+    "userCount": 8186,
+    "valueScore": 5.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-momentum-models",
+    "name": "Momentum Models",
+    "datasetCount": 1,
+    "fieldCount": 9,
+    "alphaCount": 1939,
+    "userCount": 291,
+    "valueScore": 10.0,
+    "region": [
+     "AMR"
+    ]
+   },
+   {
+    "id": "model-nlp-models",
+    "name": "NLP Models",
+    "datasetCount": 7,
+    "fieldCount": 245,
+    "alphaCount": 34838,
+    "userCount": 3460,
+    "valueScore": 7.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-reversion-models",
+    "name": "Reversion Models",
+    "datasetCount": 3,
+    "fieldCount": 3539,
+    "alphaCount": 3314,
+    "userCount": 804,
+    "valueScore": 9.0,
+    "region": [
+     "ASI",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-revisions-models",
+    "name": "Revisions Models",
+    "datasetCount": 3,
+    "fieldCount": 2281,
+    "alphaCount": 416799,
+    "userCount": 7169,
+    "valueScore": 4.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-risk-based-models",
+    "name": "Risk Based Models",
+    "datasetCount": 14,
+    "fieldCount": 1785,
+    "alphaCount": 110936,
+    "userCount": 6735,
+    "valueScore": 6.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-risk-models",
+    "name": "Risk Models",
+    "datasetCount": 3,
+    "fieldCount": 200,
+    "alphaCount": 55949,
+    "userCount": 11834,
+    "valueScore": 3.0,
+    "region": [
+     "USA"
+    ]
+   },
+   {
+    "id": "model-sentiment",
+    "name": "Sentiment",
+    "datasetCount": 3,
+    "fieldCount": 30,
+    "alphaCount": 3224,
+    "userCount": 772,
+    "valueScore": 8.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-technical-models",
+    "name": "Technical Models",
+    "datasetCount": 18,
+    "fieldCount": 9295,
+    "alphaCount": 326589,
+    "userCount": 12385,
+    "valueScore": 5.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-valuation-models",
+    "name": "Valuation Models",
+    "datasetCount": 16,
+    "fieldCount": 2868,
+    "alphaCount": 556827,
+    "userCount": 14375,
+    "valueScore": 3.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "model-volatility-models",
+    "name": "Volatility Models",
+    "datasetCount": 1,
+    "fieldCount": 110,
+    "alphaCount": 189,
+    "userCount": 80,
+    "valueScore": 9.0,
+    "region": [
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "news",
+  "name": "News",
+  "datasetCount": 35,
+  "fieldCount": 3765,
+  "alphaCount": 389638,
+  "userCount": 34659,
+  "valueScore": 3.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "news-news",
+    "name": "News",
+    "datasetCount": 16,
+    "fieldCount": 2316,
+    "alphaCount": 248399,
+    "userCount": 31237,
+    "valueScore": 2.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "news-news-sentiment",
+    "name": "News Sentiment",
+    "datasetCount": 19,
+    "fieldCount": 1449,
+    "alphaCount": 152949,
+    "userCount": 12475,
+    "valueScore": 2.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "option",
+  "name": "Option",
+  "datasetCount": 13,
+  "fieldCount": 4863,
+  "alphaCount": 324725,
+  "userCount": 36608,
+  "valueScore": 6.0,
+  "region": [
+   "AMR",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "option-option",
+    "name": "Option",
+    "datasetCount": 4,
+    "fieldCount": 1370,
+    "alphaCount": 48171,
+    "userCount": 2609,
+    "valueScore": 8.0,
+    "region": [
+     "AMR",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "option-option-analytics",
+    "name": "Option Analytics",
+    "datasetCount": 4,
+    "fieldCount": 413,
+    "alphaCount": 87240,
+    "userCount": 21792,
+    "valueScore": 3.0,
+    "region": [
+     "USA"
+    ]
+   },
+   {
+    "id": "option-option-volatility",
+    "name": "Option Volatility",
+    "datasetCount": 5,
+    "fieldCount": 3080,
+    "alphaCount": 236871,
+    "userCount": 33689,
+    "valueScore": 4.0,
+    "region": [
+     "AMR",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "other",
+  "name": "Other",
+  "datasetCount": 83,
+  "fieldCount": 21002,
+  "alphaCount": 406819,
+  "userCount": 16143,
+  "valueScore": 9.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "other-aiml-data",
+    "name": "AI/ML Data",
+    "datasetCount": 35,
+    "fieldCount": 12798,
+    "alphaCount": 174564,
+    "userCount": 10462,
+    "valueScore": 8.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "other-analyst-models",
+    "name": "Analyst Models",
+    "datasetCount": 13,
+    "fieldCount": 1195,
+    "alphaCount": 115521,
+    "userCount": 11883,
+    "valueScore": 7.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "other-dividend-models",
+    "name": "Dividend Models",
+    "datasetCount": 6,
+    "fieldCount": 5068,
+    "alphaCount": 22023,
+    "userCount": 2708,
+    "valueScore": 9.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "other-employee-data",
+    "name": "Employee Data",
+    "datasetCount": 7,
+    "fieldCount": 474,
+    "alphaCount": 80317,
+    "userCount": 4508,
+    "valueScore": 5.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "other-etf-models",
+    "name": "ETF Models",
+    "datasetCount": 3,
+    "fieldCount": 166,
+    "alphaCount": 4213,
+    "userCount": 878,
+    "valueScore": 10.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "USA"
+    ]
+   },
+   {
+    "id": "other-event-data",
+    "name": "Event Data",
+    "datasetCount": 19,
+    "fieldCount": 1301,
+    "alphaCount": 42618,
+    "userCount": 3276,
+    "valueScore": 8.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "pv",
+  "name": "Price Volume",
+  "datasetCount": 42,
+  "fieldCount": 21008,
+  "alphaCount": 4386416,
+  "userCount": 89700,
+  "valueScore": 2.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "MEA",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "pv-price-volume",
+    "name": "Price Volume",
+    "datasetCount": 29,
+    "fieldCount": 17726,
+    "alphaCount": 4316299,
+    "userCount": 89163,
+    "valueScore": 1.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "MEA",
+     "USA"
+    ]
+   },
+   {
+    "id": "pv-relationship",
+    "name": "Relationship",
+    "datasetCount": 13,
+    "fieldCount": 3282,
+    "alphaCount": 228948,
+    "userCount": 20988,
+    "valueScore": 4.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "risk",
+  "name": "Risk",
+  "datasetCount": 11,
+  "fieldCount": 2011,
+  "alphaCount": 540325,
+  "userCount": 7110,
+  "valueScore": 3.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "risk-risk-factors",
+    "name": "Risk Factors",
+    "datasetCount": 3,
+    "fieldCount": 693,
+    "alphaCount": 430202,
+    "userCount": 6365,
+    "valueScore": 2.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   },
+   {
+    "id": "risk-risk-models",
+    "name": "Risk Models",
+    "datasetCount": 8,
+    "fieldCount": 1318,
+    "alphaCount": 125967,
+    "userCount": 5583,
+    "valueScore": 4.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "sentiment",
+  "name": "Sentiment",
+  "datasetCount": 12,
+  "fieldCount": 2757,
+  "alphaCount": 101939,
+  "userCount": 6192,
+  "valueScore": 8.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "sentiment-sentiment",
+    "name": "Sentiment",
+    "datasetCount": 12,
+    "fieldCount": 2757,
+    "alphaCount": 101939,
+    "userCount": 6192,
+    "valueScore": 7.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "shortinterest",
+  "name": "Short Interest",
+  "datasetCount": 13,
+  "fieldCount": 390,
+  "alphaCount": 59661,
+  "userCount": 3352,
+  "valueScore": 9.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "IND",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "shortinterest-short-sale-models",
+    "name": "Short Sale Models",
+    "datasetCount": 13,
+    "fieldCount": 390,
+    "alphaCount": 59661,
+    "userCount": 3352,
+    "valueScore": 9.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "IND",
+     "USA"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "socialmedia",
+  "name": "Social Media",
+  "datasetCount": 6,
+  "fieldCount": 271,
+  "alphaCount": 116572,
+  "userCount": 27563,
+  "valueScore": 2.0,
+  "region": [
+   "AMR",
+   "ASI",
+   "CHN",
+   "EUR",
+   "GLB",
+   "USA"
+  ],
+  "children": [
+   {
+    "id": "socialmedia-social-media",
+    "name": "Social Media",
+    "datasetCount": 6,
+    "fieldCount": 271,
+    "alphaCount": 116572,
+    "userCount": 27563,
+    "valueScore": 1.0,
+    "region": [
+     "AMR",
+     "ASI",
+     "CHN",
+     "EUR",
+     "GLB",
+     "USA"
+    ]
+   }
+  ]
+ }
+]

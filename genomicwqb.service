@@ -1,0 +1,32 @@
+# systemd 유닛 — sudo 로 /etc/systemd/system/genomicwqb.service 에 복사 후 enable.
+# (2026-07-09 HYFE_IQC → GenomicWQB 리네이밍. 공개 주소는 iqc.ai-ve.uk 그대로.)
+
+[Unit]
+Description=GenomicWQB — WQB Alpha Auto-Discovery Web App
+After=network-online.target
+Wants=network-online.target
+# 재시작 횟수 제한 해제: 빠른 크래시-루프(기본 10초 내 5회)에 systemd 가
+# 영구 포기하면 502 가 고착된다. 죽으면 무조건 다시 띄운다.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=arcosium
+Group=arcosium
+WorkingDirectory=/home/arcosium/projects/GenomicWQB
+ExecStart=/usr/bin/python3 -m server.app
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# 외부 접근 정책 — Cloudflare Tunnel 만 사용하면 127.0.0.1 (가장 안전).
+Environment=HYFE_IQC_HOST=127.0.0.1
+Environment=HYFE_IQC_PORT=8088
+Environment=IQC_PY=/usr/bin/python3.12
+# 자격증명 암호화 키. 미설정 시 data/.fernet.key 자동 생성.
+# Environment=HYFE_IQC_FERNET_KEY=...
+# 앱이 자체적으로 logs/server.log 를 쓰므로 stdout/stderr 는 journal 로 보낸다.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

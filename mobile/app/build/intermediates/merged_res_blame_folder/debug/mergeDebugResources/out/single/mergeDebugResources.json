@@ -1,0 +1,90 @@
+[
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/drawable_ic_offline.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/drawable/ic_offline.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xhdpi_ic_launcher_foreground.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/drawable_progress_bar.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/drawable/progress_bar.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/drawable_ic_launcher_foreground.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/drawable/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/drawable_ic_notif.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/drawable/ic_notif.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-mdpi_ic_launcher_foreground.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-mdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xhdpi_ic_launcher.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-mdpi_ic_launcher_round.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-mdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/layout_activity_main.xml.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/layout/activity_main.xml"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxhdpi_ic_launcher_round.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-mdpi_ic_launcher.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-mdpi/ic_launcher.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxxhdpi_ic_launcher_foreground.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxxhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxxhdpi_ic_launcher_round.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxxhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xhdpi_ic_launcher_round.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxhdpi_ic_launcher.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-hdpi_ic_launcher_round.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-hdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxxhdpi_ic_launcher.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxxhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-hdpi_ic_launcher_foreground.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-hdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-xxhdpi_ic_launcher_foreground.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-xxhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "uk.aive.genomicwqb.app-debug-37:/mipmap-hdpi_ic_launcher.png.flat",
+        "source": "uk.aive.genomicwqb.app-main-39:/mipmap-hdpi/ic_launcher.png"
+    }
+]

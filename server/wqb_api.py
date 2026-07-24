@@ -1,22 +1,111 @@
-"""WorldQuant BRAIN 공식 API 클라이언트 (Research Consultant 경로).
-계약은 _wqb_pw_worker.py 에서 검증된 형태를 그대로 미러링한다."""
+"""WorldQuant BRAIN 공식 API 클라이언트.
+
+인증은 이메일+비밀번호 HTTP Basic → JWT 쿠키('t'). **별도 API 키는 없다.**
+(RC 전용이 아니다 — 계정 능력은 auth.probe_wqb_backend 가 실측한다.)
+시뮬 백엔드는 이 API 단일이다 (2026-07-13 Playwright/브라우저 경로 제거).
+"""
 from __future__ import annotations
+import base64
 import hashlib
 import json
 import logging
 import os
+import threading
 import time as _time
 import requests
 from requests.auth import HTTPBasicAuth
 
-LOG = logging.getLogger('hyfe.wqb_api')
+from . import criteria as _criteria
+
+LOG = logging.getLogger('genomicwqb.wqb_api')
 BASE = 'https://api.worldquantbrain.com'
 
 # (connect, read) 타임아웃 — 시뮬 경로 requests 가 WQB 소켓에서 무한 대기하는 것을 차단.
 # read=45s 는 정상 응답엔 충분하고, 매달린 연결은 끊어 poll 루프가 전진하게 한다.
 _HTTP_TIMEOUT = (10, 45)
 _API_ACCEPT = 'application/json;version=2.0'
-_SUBMIT_ALPHA_DEADLINE_S = float(os.environ.get('HYFE_IQC_ALPHA_SUBMIT_DEADLINE_S', '180'))
+# 180 → 480 (2026-07-23): 제출 확인은 SELF/PROD correlation 계산을 기다리는 구간이라
+# 3분을 자주 넘긴다. 7/23 라이브에서 전 체크 PASS 알파(Sharpe 1.59)가 180초 타임아웃으로
+# 유실됐다. 제출은 하루 4건뿐이라 스레드가 몇 분 더 기다리는 비용은 무시할 만하다.
+_SUBMIT_ALPHA_DEADLINE_S = float(os.environ.get('HYFE_IQC_ALPHA_SUBMIT_DEADLINE_S', '480'))
+# 일일 시뮬 쿼터 잔여가 이 밑이면 경고 로그 (WQB 플랫폼도 1000 에서 경고한다).
+_SIM_QUOTA_WARN = float(os.environ.get('IQC_SIM_QUOTA_WARN', '1000'))
+
+# ── 시뮬 폴링 (2026-07-21 재조정) ────────────────────────────────────────────
+# 라이브 에러의 75%(400건 중 299건)가 'sim TIMEOUT: poll deadline' 이었다 — WQB 가
+# 실패시킨 게 아니라 우리가 720초에 포기한 것이다. D0·TOP3000·10년 IS 시뮬은 대기열까지
+# 포함하면 12분을 넘기는 게 정상이라, 마감을 30분으로 올리고 정체 감지로 보완한다.
+_POLL_DEADLINE_S = float(os.environ.get('IQC_SIM_POLL_DEADLINE_S', '1800'))
+# 진행이 이 시간 동안 전혀 없으면 마감 전이라도 포기(슬롯 반환). 대기열에서 오래 머무는
+# 것과 진짜 멈춘 것을 구분하기 위한 값이라 마감의 절반 정도로 넉넉히 잡는다.
+_POLL_STALL_S = float(os.environ.get('IQC_SIM_POLL_STALL_S', '900'))
+# Retry-After 가 없을 때의 기본 간격. 있으면 그쪽이 이긴다(BRAIN API 문서의 계약).
+_POLL_INTERVAL_S = float(os.environ.get('IQC_SIM_POLL_INTERVAL_S', '5'))
+_POLL_RETRY_AFTER_MAX_S = 60.0
+
+
+def _clamp_retry_after(v: float, floor_s: float) -> float:
+    """Retry-After 를 [floor, 60s] 로 clamp. 서버가 0/음수/과대값을 줘도 폴링이
+    폭주하거나 멈추지 않게 한다."""
+    if v <= 0:
+        return floor_s
+    return max(floor_s, min(v, _POLL_RETRY_AFTER_MAX_S))
+
+# 선제갱신 임계: 토큰 만료까지 남은 시간이 이보다 크면 세션을 신뢰하고 네트워크 검증을
+# 건너뛴다(fast-path). 15분 여유는 한 라운드 시뮬이 만료를 넘겨 401 로 실패하는 것을 막는다.
+_REAUTH_THRESHOLD_S = float(os.environ.get('HYFE_IQC_REAUTH_THRESHOLD_S', str(15 * 60)))
+# 상대(초 잔여) vs 절대(epoch) 만료값 구분 임계 — 10년(초). 이보다 작으면 '지금+잔여초'.
+_REL_EXPIRY_CUTOFF = 3.15e8
+
+# 미완료 persona challenge 를 '살아있다'고 보는 기간. 이 안에서는 authenticate() 가 새
+# challenge 를 발급하지 않고 기존 것을 재사용한다 — POST /authentication 은 매번 새 inquiry 를
+# 만들고 WQB 는 직전 inquiry 를 폐기하므로, 사용자가 그 링크로 인증하는 도중이면 페이지가 죽는다.
+_PERSONA_PENDING_TTL_S = float(os.environ.get('IQC_PERSONA_PENDING_TTL_S', str(30 * 60)))
+
+# ── 선제 갱신 (바이오 인증 회피의 핵심) ───────────────────────────────────────
+# WQB 의 JWT 는 발급 후 **정확히 4시간** 살고(실측), 클레임에 amr:['pwd','face'] 가 박힌다.
+# 지금까지는 토큰이 **죽은 뒤에야** 재인증을 시도했다 — 죽은 세션에서 Basic 으로 새로
+# 로그인하면 WQB 는 당연히 얼굴 인증(Persona)을 다시 요구한다. 즉 기존 설계는 4시간마다
+# 최악의 경로를 밟도록 보장돼 있었다.
+#
+# 가설: **아직 살아있는 세션**으로 재인증하면(쿠키를 지우지 않은 채 POST /authentication)
+# WQB 는 이미 face 검증된 세션임을 알고 새 토큰을 그냥 내준다. 그렇다면 만료 전에 계속
+# 갱신하는 것만으로 얼굴 인증이 사실상 0회가 된다.
+# 이 가설이 틀리면(=persona 가 또 오면) 손해는 없다: 살아있는 쿠키를 지우지 않으므로
+# 세션은 그대로 유지되고, 어차피 만료 때 해야 했을 인증을 조금 일찍 알게 될 뿐이다.
+# 토큰 1개당 갱신 시도는 **1회로 제한**한다(BIOMETRICS_THROTTLED 재무장 방지).
+_REFRESH_LEAD_S = float(os.environ.get('IQC_REFRESH_LEAD_S', str(30 * 60)))
+SESSION_KEEPALIVE = os.environ.get('IQC_SESSION_KEEPALIVE', '1') != '0'
+
+
+def _jwt_claims(token: str) -> dict:
+    """JWT payload 를 검증 없이 디코드 (만료·인증수단 확인용, 네트워크 0회).
+
+    서명 검증은 하지 않는다 — 우리는 토큰을 신뢰할지 판단하는 게 아니라 **언제 죽는지**
+    알고 싶을 뿐이고, 그 값이 틀려도 최악은 불필요한 재검증 1회다.
+    """
+    try:
+        seg = str(token or '').split('.')[1]
+        pad = seg + '=' * (-len(seg) % 4)
+        obj = json.loads(base64.urlsafe_b64decode(pad))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+# challenge 발급(POST /authentication)을 계정별로 직렬화한다. 데이터 새로고침 스레드와
+# 워커가 동시에 인증하면 2초 사이에 inquiry 가 두 번 갈려 먼저 것이 즉시 무효가 된다
+# (실측 2026-07-10 08:53:08/10, 15:18:06/08).
+_MINT_LOCKS: dict[str, threading.Lock] = {}
+_MINT_LOCKS_GUARD = threading.Lock()
+
+
+def _mint_lock(session_file) -> threading.Lock:
+    key = session_file or '<no-persist>'
+    with _MINT_LOCKS_GUARD:
+        lk = _MINT_LOCKS.get(key)
+        if lk is None:
+            lk = _MINT_LOCKS[key] = threading.Lock()
+        return lk
 
 
 def _default_session_file(email: str) -> str:
@@ -27,6 +116,12 @@ def _default_session_file(email: str) -> str:
 
 def _public_persona_url(api_url: str, session=None) -> str | None:
     """Return the browser-facing Persona URL for a WQB persona API URL.
+
+    ⚠ **부작용이 있다 — 폴링 경로에서 부르지 말 것.** `GET /authentication/persona?inquiry=…`
+    는 단순 조회가 아니라 Persona inquiry 를 **재개(resume)** 시켜 새 hosted-flow 세션을
+    발급받는 호출이고, WQB/Persona 는 그 순간 **직전 세션을 무효화**한다. 사용자가 열어 둔
+    인증 페이지가 그 자리에서 죽는다(무한 새로고침 → 'session expired'). 사용자가 링크를
+    요청하는 바로 그 순간에만 호출하라 (`/api/account/wqb-persona-link`).
 
     반환 계약:
       - public withpersona URL: 해석 성공.
@@ -58,6 +153,39 @@ def _is_public_persona_url(url: str) -> bool:
     return isinstance(url, str) and url.startswith('https://') and 'withpersona.com' in url
 
 
+def _parse_expiry(v):
+    """WQB token.expiry 를 epoch(초)로 관대하게 파싱. 형식 편차 방어:
+      - 숫자 & < 10년(초)  → '지금+잔여초'(상대)로 해석
+      - 숫자 & >= 컷오프    → 절대 epoch 로 해석
+      - ISO8601 문자열      → timestamp
+    파싱 불가/비정상은 None(→ 만료 미상, fast-path 미적용, OPTIONS 검증 유지)."""
+    try:
+        if v is None or isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            f = float(v)
+            if f <= 0:
+                return None
+            return (_time.time() + f) if f < _REL_EXPIRY_CUTOFF else f
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                f = float(s)
+                if f <= 0:
+                    return None
+                return (_time.time() + f) if f < _REL_EXPIRY_CUTOFF else f
+            except ValueError:
+                pass
+            from datetime import datetime
+            dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+            return dt.timestamp()
+    except Exception:
+        return None
+    return None
+
+
 def _extract_inquiry_from_url(url: str) -> str:
     try:
         if 'inquiry=' not in url and 'inquiry-id=' not in url:
@@ -69,32 +197,89 @@ def _extract_inquiry_from_url(url: str) -> str:
         return ''
 
 
-# 7개 기본 게이트로 인정하는 IS check allowlist. SELF/PROD_CORRELATION 은 제출 전엔
-# PENDING 버킷으로 빠지므로 카운트에 안 잡히고, FAIL 로 확정되면 게이트에 반영돼야
-# 하므로 core 로 둔다.
-_CORE_IS_CHECKS = frozenset({
-    'LOW_SHARPE', 'LOW_FITNESS', 'LOW_TURNOVER', 'HIGH_TURNOVER',
-    'LOW_SUB_UNIVERSE_SHARPE', 'CONCENTRATED_WEIGHT', 'LOW_2Y_SHARPE',
-    'IS_LADDER_SHARPE', 'SELF_CORRELATION', 'PROD_CORRELATION', 'UNITS',
-})
+# 차단 게이트로 인정하는 IS check — 단일 진실은 criteria.BLOCKING_CHECKS 다.
+# SELF/PROD_CORRELATION 은 제출 전엔 PENDING 버킷으로 빠지므로 카운트에 안 잡히고,
+# FAIL 로 확정되면 게이트에 반영돼야 하므로 core 로 둔다.
+# ⚠ 2026-07-21: HT_*/MATCHES_*/CLUSTER_TEST/OSMOSIS_ALLOCATION 은 **분류 전용**이라
+#   차단하지 않는다(문서 "Failing the Cluster Test does not block submission").
 _UNKNOWN_CHECKS_SEEN: set[str] = set()
+
+# IS check 이름 → metrics 키. 이 체크들의 value/cutoff 는 `is` 요약 블록에 없어서
+# harvest_alpha 가 따로 승격해 주지 않으면 reward/selection 이 영원히 못 본다.
+# (2026-07 개편 후엔 HT_* 지표가 제출 가능성의 1차 결정 변수다 — criteria 참조.)
+_CHECK_METRIC_KEY = _criteria.CHECK_METRIC_KEY
+
+
+def _parse_check_number(v):
+    """IS check 의 value/limit → float|None. WQB 는 숫자를 float 로 주지만
+    문자열/None/빈값도 방어한다 (계약이 흔들려도 metrics 승격이 죽지 않게)."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _harvest_classification(nm_u: str, ch: dict, res: str, out: dict) -> None:
+    """분류/배수 체크의 **구조화된 필드**를 metrics 로 승격한다 (value/limit 밖에 있다).
+
+    - MATCHES_PYRAMID: {'effective': 2, 'multiplier': 1.6, 'pyramids': [...]}
+    - MATCHES_THEMES : {'themes': [{'name','multiplier'}, ...]} — result=PASS 일 때만
+      실제로 매칭된 것이다(WARNING = "these themes do not match").
+    - MATCHES_CLASSIFICATION: {'value': ['High Turnover']}
+    복수 테마 동시 매칭 배수는 criteria.combine_theme_multipliers (sum−count+1).
+    """
+    try:
+        if nm_u == 'MATCHES_PYRAMID':
+            mult = _parse_check_number(ch.get('multiplier'))
+            if mult is not None:
+                out['pyramid_multiplier'] = str(mult)
+            eff = _parse_check_number(ch.get('effective'))
+            if eff is not None:
+                out['pyramid_effective'] = str(eff)
+            names = [str(p.get('name')) for p in (ch.get('pyramids') or [])
+                     if isinstance(p, dict) and p.get('name')]
+            if names:
+                out['pyramids'] = ','.join(names)
+        elif nm_u == 'MATCHES_THEMES':
+            themes = [t for t in (ch.get('themes') or []) if isinstance(t, dict)]
+            names = [str(t.get('name')) for t in themes if t.get('name')]
+            if names:
+                out['themes' if res == 'PASS' else 'themes_unmatched'] = ','.join(names)
+            if res == 'PASS':
+                out['theme_multiplier'] = str(_criteria.combine_theme_multipliers(
+                    [t.get('multiplier') for t in themes]))
+        elif nm_u == 'MATCHES_CLASSIFICATION':
+            v = ch.get('value')
+            if isinstance(v, list) and v:
+                out['classifications'] = ','.join(str(x) for x in v)
+        elif nm_u == 'HT_ORTHOGONAL_RAM_NEUTRALIZATION':
+            if res == 'PASS':
+                out['ht_ram_ok'] = '1'
+    except Exception:   # 승격 실패가 수확 전체를 죽이면 안 된다
+        pass
 
 
 def _is_core_check(name: str) -> bool:
-    """Return True for IS checks that count toward the seven basic gates.
+    """Return True for IS checks that gate submission (FAIL = 제출 차단).
 
     WQB API responses also include bookkeeping/classification checks such as
-    HT_* and MATCHES_*; counting them inflates PASS totals and makes RC logs
-    disagree with the real acceptance gate. 알려진 core 는 allowlist 로 확정하고,
-    처음 보는 이름은 (호환 위해) core 로 세되 이름을 1회 로깅해 임계값 검증
-    근거를 남긴다.
+    HT_*, MATCHES_*, CLUSTER_TEST, OSMOSIS_ALLOCATION; counting them inflates
+    PASS totals and makes RC logs disagree with the real acceptance gate.
+    처음 보는 이름은 (안전하게) core 로 세되 이름을 1회 로깅해 검증 근거를 남긴다.
     """
     nm = str(name or '').strip().upper()
     if not nm:
         return False
-    if nm in _CORE_IS_CHECKS:
+    if nm in _criteria.BLOCKING_CHECKS:
         return True
-    if nm.startswith('HT_') or nm.startswith('MATCHES_'):
+    if not _criteria.is_blocking(nm):
         return False
     if nm not in _UNKNOWN_CHECKS_SEEN:
         _UNKNOWN_CHECKS_SEEN.add(nm)
@@ -120,6 +305,12 @@ class WqbApiClient:
         self.persona_url = None
         self.last_auth_status_code = None
         self.last_auth_body = None
+        # 토큰 만료 epoch(초). None=미상. 선제갱신 fast-path 와 사이드카(.meta) 로 캐시.
+        self._expiry_epoch = None
+        # 직전 _session_valid 가 OPTIONS(프로덕션 경로)로 유효 판정했는지 — 만료 미상일 때만
+        # 1회 GET 로 만료를 학습(_ensure_expiry)하기 위한 플래그. GET-폴백 경로는 이미 만료를
+        # 그 응답 body 에서 잡으므로 중복 GET 을 하지 않는다.
+        self._valid_via_options = False
 
     def _save_session(self) -> bool:
         try:
@@ -159,22 +350,309 @@ class WqbApiClient:
         except Exception as e:
             LOG.warning('session load err: %s', e); return False
 
+    # ── 만료(token.expiry) 캐시 사이드카 ─────────────────────────────────────
+    def _meta_file(self):
+        return (self.session_file + '.meta') if self.session_file else None
+
+    def _save_meta(self, *, refresh_attempt_for: float | None = ...):
+        """만료 사이드카 저장. refresh_attempt_for 를 넘기면 그 값도 함께 기록/삭제한다
+        (기본값 ... = '건드리지 않음' — None 은 '지운다' 는 뜻이라 구분해야 한다)."""
+        try:
+            mf = self._meta_file()
+            if not mf:
+                return
+            d = {}
+            if os.path.exists(mf):
+                try:
+                    with open(mf, 'r') as f:
+                        d = json.load(f) or {}
+                except Exception:
+                    d = {}
+            if not isinstance(d, dict):
+                d = {}
+            if self._expiry_epoch is not None:
+                d['expiry'] = self._expiry_epoch
+            if refresh_attempt_for is not ...:
+                if refresh_attempt_for is None:
+                    d.pop('refresh_attempt_for', None)
+                else:
+                    d['refresh_attempt_for'] = float(refresh_attempt_for)
+            d['written_at'] = _time.time()
+            if not d:
+                return
+            os.makedirs(os.path.dirname(mf), mode=0o700, exist_ok=True)
+            fd = os.open(mf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                json.dump(d, f)
+        except Exception as e:
+            LOG.warning('meta save err: %s', e)
+
+    def _load_meta(self):
+        try:
+            mf = self._meta_file()
+            if not mf or not os.path.exists(mf):
+                return
+            with open(mf, 'r') as f:
+                d = json.load(f)
+            exp = _parse_expiry((d or {}).get('expiry')) if isinstance(d, dict) else None
+            if exp is not None:
+                self._expiry_epoch = exp
+        except Exception:
+            pass
+
+    # ── 만료 시각의 진실은 JWT 안에 있다 ────────────────────────────────────
+    # 과거엔 응답 body 의 token.expiry 만 캐시했는데, complete_persona(얼굴 인증 완료)
+    # 경로가 그걸 캡처하지 않아 .meta 가 **3일째 옛 만료값에 얼어붙어 있었다**(실측).
+    # 그 결과 클라이언트는 자기 토큰이 언제 죽는지 몰랐고, 선제 갱신 자체가 불가능했다.
+    # 쿠키 't' 는 JWT 라 exp 클레임을 네트워크 0회로 읽을 수 있다 — 이게 1차 진실이다.
+    def _expiry_from_jwt(self) -> float | None:
+        try:
+            ck = self.session.cookies
+            tok = (ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)).get('t')
+            exp = _jwt_claims(tok).get('exp')
+            return float(exp) if isinstance(exp, (int, float)) else None
+        except Exception:
+            return None
+
+    def auth_methods(self) -> list:
+        """현재 토큰이 어떤 수단으로 발급됐는지 (예: ['pwd','face']). 진단용."""
+        try:
+            ck = self.session.cookies
+            tok = (ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)).get('t')
+            return list(_jwt_claims(tok).get('amr') or [])
+        except Exception:
+            return []
+
+    def _capture_expiry(self, body=None):
+        """만료 캐시 갱신: JWT(권위) → 없으면 응답 body 의 token.expiry(폴백)."""
+        exp = self._expiry_from_jwt()
+        if exp is None:
+            try:
+                tok = (body or {}).get('token') if isinstance(body, dict) else None
+                exp = _parse_expiry((tok or {}).get('expiry')) if isinstance(tok, dict) else None
+            except Exception:
+                exp = None
+        if exp is not None:
+            self._expiry_epoch = exp
+            self._save_meta()
+
+    def _not_near_expiry(self) -> bool:
+        return (self._expiry_epoch is not None
+                and (self._expiry_epoch - _time.time()) > _REAUTH_THRESHOLD_S)
+
+    def _expiry_stale(self) -> bool:
+        """캐시된 만료가 이미 지났는가 — 지났으면 다시 학습해야 한다.
+        (과거엔 이 판정이 없어 '이미 만료된 값' 을 영원히 재사용했다.)"""
+        return (self._expiry_epoch is not None
+                and self._expiry_epoch <= _time.time() + 60)
+
+    def seconds_to_expiry(self) -> float | None:
+        exp = self._expiry_epoch if self._expiry_epoch is not None else self._expiry_from_jwt()
+        return None if exp is None else (exp - _time.time())
+
+    def _ensure_expiry(self, force: bool = False):
+        """만료를 학습한다. 우선 JWT 에서(네트워크 0회), 그래도 모르면 GET 1회.
+
+        GET /authentication 은 POST 와 달리 challenge 를 새로 만들지 않는다 → biometric 무관.
+        force=True 는 '캐시를 믿지 말고 다시 학습' 이라는 뜻이지 'JWT 를 건너뛰라' 가 아니다.
+        JWT 는 언제나 가장 싼 진실이므로 force 여부와 무관하게 먼저 본다.
+        best-effort: 실패해도 무시.
+        """
+        exp = self._expiry_from_jwt()
+        if exp is not None:
+            self._expiry_epoch = exp
+            self._save_meta()
+            return
+        if not force and self._expiry_epoch is not None and not self._expiry_stale():
+            return
+        try:
+            r = self.session.get(f'{BASE}/authentication', timeout=15)
+            if getattr(r, 'ok', False):
+                self._capture_expiry(r.json())
+        except Exception:
+            pass
+
     def _session_valid(self) -> bool:
-        """Return True only when WQB confirms this session is authenticated."""
+        """세션 유효성 판정. 우선 OPTIONS /simulations 로 **인증 엔드포인트를 건드리지 않고**
+        확인한다(2xx=유효, 401=만료). Persona/biometric throttle 재무장 위험이 없다.
+        OPTIONS 미지원/애매(그 외 코드)면 GET /authentication 으로 폴백하고, 그 김에
+        token.expiry 를 캐시한다."""
+        self._valid_via_options = False
+        try:
+            r = self.session.options(f'{BASE}/simulations', timeout=15)
+            code = getattr(r, 'status_code', None)
+            if code is not None:
+                if 200 <= code < 300:
+                    self._valid_via_options = True
+                    return True
+                if code == 401:
+                    return False
+                # 그 외(403/5xx 등)는 애매 → GET 폴백으로 확정
+        except Exception:
+            pass  # options 미지원/일시오류 → GET 폴백
         try:
             r = self.session.get(f'{BASE}/authentication', timeout=15)
             if not r.ok:
                 return False
             body = r.json()
-            return isinstance(body, dict) and body.get('user') is not None
+            if not isinstance(body, dict):
+                return False
+            self._capture_expiry(body)
+            return body.get('user') is not None
         except Exception:
             return False
 
     def authenticate(self) -> bool:
-        # 1) reuse persisted session — no /authentication POST → no biometric
-        if self._load_session() and self._session_valid():
-            self._authed = True; return True
-        # 2) fresh Basic Auth (persona handling added in Task 2)
+        # 0) 선제갱신 fast-path: 인메모리로 이미 인증됐고 만료까지 여유가 크면 네트워크 0.
+        #    (클라이언트가 사이클간 재사용될 때 OPTIONS 호출조차 건너뛴다.)
+        if self._authed and self._not_near_expiry():
+            return True
+        # 1) reuse persisted session — OPTIONS 검증(인증 엔드포인트 무접촉 → no biometric).
+        #    만료는 JWT 에서 직접 읽는다(네트워크 0회, .meta 가 썩어도 무관).
+        if self._load_session():
+            self._load_meta()
+            if self._session_valid():
+                self._authed = True
+                if self._expiry_epoch is None or self._expiry_stale():
+                    self._ensure_expiry()
+                return True
+        # 2) fresh Basic Auth — 여기 오면 세션이 완전히 죽은 것이고, WQB 는 이 시점에
+        #    얼굴 인증(Persona)을 요구한다. session_keeper 의 선제 갱신이 제대로 돌면
+        #    정상 운영 중에는 이 경로에 오지 않는 것이 목표다.
+        # 계정별 락 — 두 스레드가 동시에 challenge 를 발급하면 뒤엣것이 앞엣것을 폐기한다.
+        with _mint_lock(self.session_file):
+            return self._authenticate_locked()
+
+    # ── 선제 갱신: 살아있는 세션으로 토큰을 연장한다 ─────────────────────────
+    def refresh_token(self) -> str:
+        """만료 전에 토큰을 갱신한다. 반환: refreshed|persona|invalid|skipped|error.
+
+        `_authenticate_locked` 와의 결정적 차이는 **쿠키를 지우지 않는다**는 것이다.
+        그쪽은 _clear_session_cookies() 로 세션을 버리고 맨몸 Basic 로그인을 하는데,
+        WQB 입장에선 그게 '새 기기의 첫 로그인' 이라 얼굴 인증을 요구한다.
+        여기서는 face 로 이미 검증된 살아있는 세션을 그대로 들고 재인증을 청한다.
+
+        안전장치:
+          - 살아있는 challenge 가 있으면 손대지 않는다(사용자가 인증 중일 수 있다).
+          - 토큰 1개당 1회만 시도한다(.meta 에 기록) → /authentication 연타로 인한
+            BIOMETRICS_THROTTLED 재무장이 원천 불가능.
+          - persona 가 오더라도 **살아있는 쿠키를 지우지 않는다** → 워커는 만료까지
+            하던 일을 계속한다. 손해가 없다.
+        """
+        if not SESSION_KEEPALIVE:
+            return 'skipped'
+        with _mint_lock(self.session_file):
+            if self._read_pending() is not None:
+                return 'skipped'          # 인증 진행 중 — 건드리면 그 페이지가 죽는다
+            if self._refresh_attempted_for_current_token():
+                return 'skipped'          # 이 토큰으로는 이미 시도했다
+            self._mark_refresh_attempt()
+            try:
+                # 쿠키 유지! (Basic 자격증명은 session.auth 에 그대로 붙어 있다)
+                r = self.session.post(f'{BASE}/authentication',
+                                      headers={'Accept': _API_ACCEPT},
+                                      timeout=_HTTP_TIMEOUT)
+            except Exception as e:
+                LOG.warning('refresh 실패(네트워크): %s', e)
+                return 'error'
+            body = {}
+            try:
+                body = r.json()
+            except Exception:
+                body = {}
+            code = getattr(r, 'status_code', 0)
+            if code in (200, 201):
+                self._save_session()
+                self._capture_expiry(body)
+                self._clear_refresh_attempt()   # 새 토큰 → 갱신 시도 카운터 리셋
+                self._authed = True
+                left = self.seconds_to_expiry()
+                LOG.info('토큰 선제 갱신 성공 — 만료까지 %s분, amr=%s',
+                         int((left or 0) / 60), self.auth_methods())
+                return 'refreshed'
+            if code == 410:
+                # '이미 인증됨' 애매 응답 — 세션이 실제로 유효한지로 확정한다.
+                self._ensure_expiry(force=True)
+                return 'refreshed' if not self._expiry_stale() else 'invalid'
+            purl = self._extract_persona_url(r, body)
+            if purl:
+                # 가설이 이 계정/상태에선 틀렸다 — WQB 가 갱신에도 얼굴을 요구한다.
+                # ⚠ 살아있는 쿠키를 절대 지우지 않는다. 세션은 만료까지 그대로 쓴다.
+                # ⚠ 이 challenge 는 **알림용 마커로만** 저장한다(source='refresh', cookies={}).
+                #   예전엔 세션 jar 통째(JWT 포함)로 저장했는데, 그 challenge 를 해석하면
+                #   죽은 hosted 세션이 나와 사용자가 열 때마다 'session expired' 가 떴다
+                #   (2026-07-16 사장 보고). 실제 인증용 challenge 는 사용자가 링크를 누르는
+                #   순간 mint_challenge() 가 만료-후 경로와 동일하게 깨끗이 발급한다.
+                self._save_pending(purl, cookies={}, source='refresh')
+                LOG.info('선제 갱신에도 persona 요구 — 세션은 만료까지 유지, 사용자 인증 필요')
+                return 'persona'
+            LOG.info('refresh 응답 HTTP %s — 갱신 불가', code)
+            return 'invalid'
+
+    # 토큰별 갱신 시도 기록 — .meta 에 넣어 프로세스 재시작에도 살아남는다.
+    def _refresh_attempted_for_current_token(self) -> bool:
+        try:
+            mf = self._meta_file()
+            if not mf or not os.path.exists(mf):
+                return False
+            with open(mf, 'r') as f:
+                d = json.load(f)
+            exp = self._expiry_from_jwt() or self._expiry_epoch
+            # 같은 토큰(=같은 만료시각)에 대한 시도만 유효하다.
+            return (isinstance(d, dict) and d.get('refresh_attempt_for') is not None
+                    and exp is not None
+                    and abs(float(d['refresh_attempt_for']) - float(exp)) < 1.0)
+        except Exception:
+            return False
+
+    def _mark_refresh_attempt(self) -> None:
+        exp = self._expiry_from_jwt() or self._expiry_epoch
+        if exp is not None:
+            self._save_meta(refresh_attempt_for=exp)
+
+    def _clear_refresh_attempt(self) -> None:
+        self._save_meta(refresh_attempt_for=None)
+
+    def mint_challenge(self) -> bool:
+        """세션 유효 여부와 **무관하게** 깨끗한 persona challenge 를 지금 발급한다.
+
+        용도 = 만료 전 선인증: authenticate() 는 세션이 살아 있으면 발급 없이 True 를
+        반환하므로 만료 전에 정상 challenge 를 얻을 방법이 없었다. 이 메서드는 기존
+        pending(선제갱신 마커 포함)을 버리고 `_authenticate_locked` 의 검증된 경로
+        (쿠키 비우고 맨몸 POST → challenge 쿠키가 바인딩된 fresh inquiry)를 강제로 탄다.
+        ⚠ POST /authentication 1회가 나간다 — **사용자가 명시적으로 요청한 순간에만**
+        호출하라(폴링 금지, biometric throttle). 살아있는 세션 파일(.pkl)은 건드리지
+        않으므로 워커는 만료까지 하던 일을 계속한다.
+
+        반환 계약은 authenticate() 와 동일: True=인증 완료(persona 불필요),
+        False+persona_required=True → 새 challenge 가 .pending 에 저장됨.
+        """
+        with _mint_lock(self.session_file):
+            self._clear_pending()
+            return self._authenticate_locked()
+
+    def _authenticate_locked(self) -> bool:
+        # ⚠ 미완료 challenge 가 이미 있으면 새로 발급하지 않는다. POST /authentication 은
+        #    매번 새 inquiry 를 만들고 WQB 는 직전 inquiry 를 폐기하므로, 사용자가 그 링크로
+        #    인증하는 중이었다면 페이지가 그 순간 죽는다. TTL 이 지난 challenge 만 갈아끼운다.
+        pend = self._read_pending()
+        if pend is not None:
+            age = self._pending_age_s()
+            if age is None or age < _PERSONA_PENDING_TTL_S:
+                self.persona_required = True
+                self.persona_url = pend.get('persona_url')
+                LOG.info('미완료 persona challenge 재사용(age=%s초) — 새 발급 생략',
+                         int(age) if age is not None else '?')
+                return False
+            LOG.info('persona challenge 가 %.0f분 경과 — 폐기하고 새로 발급', age / 60)
+            self._clear_pending()
+        # ⚠ stale-persona-URL 무한반복 버그 수정(2026-07-08): 무효한 쿠키(만료된 .pkl 세션이든
+        #    pending challenge 쿠키든)를 든 채로 POST /authentication 을 때리면, WQB 가 그 쿠키에
+        #    묶인 '오래된 outstanding persona inquiry' 를 그대로 재발급한다 → 만료된 같은 biometric
+        #    URL 을 영원히 되돌려줘 사용자가 절대 통과 못 한다. 여기까지 왔다는 건 살아있는 세션도
+        #    살아있는 challenge 도 없다는 뜻이므로, 무조건 비우고 '깨끗한' 재인증을 한다.
+        #    (실측: .pkl 제거 시 inquiry ID 가 바뀐다.)
+        self._clear_session_cookies()
         # /authentication 호출 (POST — 새 세션/ Persona 요청).
         # WQB API 이 엔드포인트가 410 Gone을 반환할 수 있음:
         #   - 이미 biometric 완료된 계정이 다시 POST 할 때. 이는 "이미 인증됨"을 의미.
@@ -185,7 +663,7 @@ class WqbApiClient:
         self.last_auth_status_code = r.status_code
         body = r.json() if (r.headers.get('Content-Type', '').startswith('application/json')) else {}
         self.last_auth_body = body
-        
+
         # 410 Gone is ambiguous: the biometric inquiry may already be finalized,
         # or it may be stale. Only treat it as authenticated after a real session check.
         if r.status_code == 410:
@@ -202,8 +680,9 @@ class WqbApiClient:
             self._authed = False
             return False
 
-        
+
         if r.status_code in (200, 201):  # success without explicit user body
+            self._capture_expiry(body)   # POST 성공 body 의 token.expiry 캐시(선제갱신용)
             self._save_session(); self._authed = True; return True
         persona = self._extract_persona_url(r, body, session=self.session)
         if persona:
@@ -232,14 +711,28 @@ class WqbApiClient:
     def _pending_file(self):
         return (self.session_file + '.pending') if self.session_file else None
 
-    def _save_pending(self, persona_url):
+    def _save_pending(self, persona_url, cookies=None, source=None):
+        """미완료 challenge 를 `.pending` 에 기록한다.
+
+        cookies=None(기본) — 현재 세션 jar 전체를 저장. **challenge 를 만든 요청의 쿠키**가
+        finalize 바인딩이므로, `_authenticate_locked`(쿠키 비우고 맨몸 POST) 경로에선 이게 맞다.
+        source='refresh' — 선제 갱신(refresh_token)이 만든 **알림용 마커**. 이 challenge 는
+        살아있는 세션 쿠키(JWT `t`) 아래에서 발급돼, 나중에 링크를 해석하면 이미 죽은
+        hosted-flow 세션이 나온다(2026-07-16 실측: 열자마자 'session expired' 페이지).
+        그래서 마커는 해석 대상이 아니며(pending_persona 가 거부), 사용자가 링크를 누르는
+        순간 mint_challenge() 로 깨끗한 challenge 를 그 자리에서 새로 발급한다.
+        """
         self.persona_url = persona_url; self.persona_required = True  # always signal, even if disabled
         try:
             pf = self._pending_file()
             if not pf:
                 return  # persistence disabled — still signal above
-            ck = self.session.cookies
-            d = ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)
+            if cookies is None:
+                ck = self.session.cookies
+                cookies = ck.get_dict() if hasattr(ck, 'get_dict') else dict(ck)
+            payload = {'cookies': cookies, 'persona_url': persona_url}
+            if source:
+                payload['source'] = str(source)
             os.makedirs(os.path.dirname(pf), mode=0o700, exist_ok=True)
             try:
                 os.chmod(os.path.dirname(pf), 0o700)
@@ -247,29 +740,58 @@ class WqbApiClient:
                 pass
             fd = os.open(pf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # owner-only
             with os.fdopen(fd, 'w') as f:
-                json.dump({'cookies': d, 'persona_url': persona_url}, f)
+                json.dump(payload, f)
         except Exception as e:
             LOG.warning('pending save err: %s', e)
 
-    def pending_persona(self):
-        """저장된 미완료 persona challenge 를 **네트워크 호출 없이** 읽어 반환한다.
-
-        반환: {'persona_url': str, 'inquiry': str} 또는 None.
-        상태조회(passive)는 이 메서드만 쓰고 절대 POST /authentication 을 하지 않는다 —
-        매 조회마다 POST 하면 WQB biometric throttle 가 영원히 재무장되기 때문이다.
-        """
+    def _read_pending(self):
+        """`.pending` 를 **네트워크·세션 부작용 없이** 그대로 읽는다. 없으면 None."""
         try:
             pf = self._pending_file()
             if not pf or not os.path.exists(pf):
                 return None
             with open(pf, 'r') as f:
                 pend = json.load(f)
-            cookies = (pend or {}).get('cookies')
-            if isinstance(cookies, dict) and cookies:
-                self.session.cookies.update(cookies)
-            pu = (pend or {}).get('persona_url') or ''
-            if not pu:
+            if not isinstance(pend, dict) or not (pend.get('persona_url') or ''):
                 return None
+            return pend
+        except Exception as e:
+            LOG.warning('pending read err: %s', e)
+            return None
+
+    def _pending_age_s(self):
+        """`.pending` 이 만들어진 뒤 흐른 초. 파일이 없거나 stat 실패면 None."""
+        try:
+            pf = self._pending_file()
+            if not pf or not os.path.exists(pf):
+                return None
+            return max(0.0, _time.time() - os.path.getmtime(pf))
+        except OSError:
+            return None
+
+    def pending_persona(self, resolve: bool = True):
+        """저장된 미완료 persona challenge 를 반환. 없으면 None.
+
+        반환: {'persona_url': str, 'inquiry': str}
+
+        `resolve=False` — `.pending` 파일만 읽는다. **WQB 로 나가는 호출이 0건**이고
+        `persona_url` 은 항상 ''. 반복 호출되는 경로(60초 폴링, 대시보드 진입)는 반드시
+        이 모드를 써야 한다.
+
+        `resolve=True` — 브라우저용 Persona 링크를 새로 발급받는다(`_public_persona_url`).
+        ⚠ 이건 **부작용이 있는 호출**이다: WQB 가 inquiry 를 재개하며 새 hosted-flow 세션을
+        만들고 직전 세션을 무효화한다. 사용자가 열어 둔 인증 페이지가 그 순간 죽는다
+        (사장 보고 2026-07-10 "무한 새로고침 후 세션 만료" 의 원인). 사용자가 링크를
+        요청하는 그 순간에만 써라.
+
+        어느 모드든 절대 POST /authentication 을 하지 않는다 — 매 조회마다 POST 하면
+        WQB biometric throttle 가 영원히 재무장되기 때문이다.
+        """
+        try:
+            pend = self._read_pending()
+            if pend is None:
+                return None
+            pu = pend.get('persona_url') or ''
             if 'withpersona.com' in pu:
                 # Legacy pending files stored the short-lived Persona public URL.
                 # Once that link expires we cannot refresh it because the WQB API
@@ -277,12 +799,23 @@ class WqbApiClient:
                 # mint a fresh challenge.
                 self._clear_pending()
                 return None
+            inquiry = _extract_inquiry_from_url(pu)
+            source = str(pend.get('source') or '')
+            if not resolve:
+                return {'persona_url': '', 'inquiry': inquiry, 'source': source}
+            if source == 'refresh':
+                # 선제 갱신 마커 — 해석하면 죽은 hosted 세션이 나온다('session expired',
+                # 2026-07-16 실측). 해석하지 말고 그대로 알린다. 링크 발급 경로
+                # (/wqb-persona-link)는 이 표식을 보고 mint_challenge() 로 갈아탄다.
+                return {'persona_url': '', 'inquiry': inquiry, 'source': source}
+            cookies = pend.get('cookies')
+            if isinstance(cookies, dict) and cookies:
+                self.session.cookies.update(cookies)
             public_url = _public_persona_url(pu, session=self.session)
             if public_url is None:
                 # 일시 실패(네트워크 등) — pending 을 지우면 다음 조회가 새 challenge
                 # POST 를 유발해 throttle 재무장 루프가 된다. challenge 는 유지하고
                 # URL 만 빈 값으로 반환 → UI 가 "링크 준비 중" 을 띄우고 재시도한다.
-                inquiry = _extract_inquiry_from_url(pu)
                 return {'persona_url': '', 'inquiry': inquiry}
             if not _is_public_persona_url(public_url):
                 # Never expose the WQB API challenge URL to the browser. Opening
@@ -291,8 +824,8 @@ class WqbApiClient:
                 # endpoint mint a fresh challenge.
                 self._clear_pending()
                 return None
-            inquiry = _extract_inquiry_from_url(pu) or _extract_inquiry_from_url(public_url)
-            return {'persona_url': public_url, 'inquiry': inquiry}
+            return {'persona_url': public_url,
+                    'inquiry': inquiry or _extract_inquiry_from_url(public_url)}
         except Exception as e:
             LOG.warning('pending_persona read err: %s', e)
             return None
@@ -321,6 +854,10 @@ class WqbApiClient:
                 self._clear_pending()
                 self.persona_required = False
                 self._authed = True
+                # ⚠ 여기서 만료를 갱신하지 않아 .meta 가 3일째 옛 값에 얼어붙어 있었다
+                #   (실측 2026-07-12). 만료를 모르면 선제 갱신 자체가 불가능하다.
+                self._ensure_expiry(force=True)
+                self._clear_refresh_attempt()
                 return True
             if r.status_code == 410:
                 # WQB returns 410 Gone for finalized or expired inquiries. Success still
@@ -331,6 +868,8 @@ class WqbApiClient:
                     self.persona_required = False
                     self._clear_pending()
                     self._authed = True
+                    self._ensure_expiry(force=True)
+                    self._clear_refresh_attempt()
                     return True
                 LOG.warning('complete_persona 410 Gone but session verification failed; clearing stale pending persona')
                 self.persona_required = False
@@ -352,6 +891,18 @@ class WqbApiClient:
         except OSError:
             pass
 
+    def _clear_session_cookies(self):
+        """무효(만료) 세션 쿠키를 비운다 — WQB 가 낡은 쿠키에 묶인 오래된 persona inquiry 를
+        재발급하지 않고 fresh inquiry 를 주도록. 파일(.pkl)은 남기고 in-memory 만 비운다
+        (다음 성공 인증이 _save_session 으로 덮어씀). 어떤 쿠키자 구현이든 방어적으로 처리."""
+        try:
+            self.session.cookies.clear()
+        except Exception:
+            try:
+                self.session.cookies = requests.cookies.RequestsCookieJar()
+            except Exception:
+                pass
+
     def _ensure_auth(self) -> bool:
         return self._authed or self.authenticate()
 
@@ -371,10 +922,25 @@ class WqbApiClient:
             return None
         isf = data.get('is') or {}
         checks = isf.get('checks') or []
-        out = {'pass': [], 'fail': [], 'error': [], 'pending': []}
+        out = {'pass': [], 'fail': [], 'error': [], 'pending': [], 'warning': []}
+        check_metrics: dict[str, str] = {}
         for ch in checks:
             res = str(ch.get('result') or '').upper()
             nm = ch.get('name')
+            nm_u = str(nm or '').strip().upper()
+            # ⚠ 승격은 **분류 체크에도** 해야 한다. HT_*/CLUSTER_TEST 는 차단하지 않지만
+            #   그 값이야말로 2026-07 개편 이후 제출 가능성의 1차 결정 변수다.
+            #   (구 코드는 core 가 아니면 `continue` 로 통째로 버려서 HT 지표가 영영
+            #    보상에 도달하지 못했다.)
+            mkey = _CHECK_METRIC_KEY.get(nm_u)
+            if mkey:
+                v = _parse_check_number(ch.get('value'))
+                if v is not None:
+                    check_metrics[mkey] = str(v)
+                lim = _parse_check_number(ch.get('limit'))
+                if lim is not None:
+                    check_metrics[f'{mkey}_cutoff'] = str(lim)
+            _harvest_classification(nm_u, ch, res, check_metrics)
             if not _is_core_check(nm):
                 continue
             # value/cutoff 는 브라우저 스크레이퍼와 동일하게 **문자열** 계약을 지킨다.
@@ -385,14 +951,70 @@ class WqbApiClient:
                     'cutoff': '' if lim is None else str(lim),
                     'result': res,
                     'desc': f"{nm}: {ch.get('result')} (value={ch.get('value')}, limit={ch.get('limit')})"}
-            bucket = {'PASS': 'pass', 'FAIL': 'fail', 'PENDING': 'pending', 'ERROR': 'error'}.get(res)
+            # WARNING 은 **비차단**이다 — 2026-07 개편에서 HT 분류를 얻은 알파의 표준
+            # 컷(LOW_SHARPE 등)이 여기로 강등된다. 예전엔 버킷이 없어 통째로 버려졌고,
+            # 그래서 '제출 가능한데 pass 도 fail 도 아닌' 알파가 보상 0 을 받았다.
+            bucket = {'PASS': 'pass', 'FAIL': 'fail', 'PENDING': 'pending',
+                      'ERROR': 'error', 'WARNING': 'warning'}.get(res)
             if bucket:
                 out[bucket].append(item)
         metrics = {}
         for k in ('sharpe', 'fitness', 'returns', 'turnover', 'drawdown', 'margin'):
             if isf.get(k) is not None:
                 metrics[k] = str(isf[k])
+        # 투자가능성 제약/리스크 중립화 하위 성과 — HT Investable/Orthogonal 판정 재료.
+        for sub_key, prefix in (('investabilityConstrained', 'ic_'), ('riskNeutralized', 'rn_')):
+            sub = isf.get(sub_key)
+            if isinstance(sub, dict):
+                for k in ('sharpe', 'fitness', 'turnover', 'returns'):
+                    if sub.get(k) is not None:
+                        metrics[f'{prefix}{k}'] = str(sub[k])
+        # 최상위 classifications — MATCHES_CLASSIFICATION 체크와 **다른 곳**이다.
+        # 단일데이터셋(DATA_USAGE:SINGLE_DATA_SET) 판정이 여기에만 있고, 그 알파는
+        # IS Ladder 대신 2년 컷 하나만 보므로 안정성 목표치가 달라진다(criteria 참조).
+        try:
+            cids = [str(c.get('id')) for c in (data.get('classifications') or [])
+                    if isinstance(c, dict) and c.get('id')]
+            if cids:
+                metrics['classification_ids'] = ','.join(cids)
+        except Exception:
+            pass
+        st = data.get('settings') or {}
+        for k, mk in (('delay', '_delay'), ('region', 'region'),
+                      ('universe', 'universe'), ('neutralization', 'neutralization')):
+            if st.get(k) is not None:
+                metrics[mk] = str(st[k])
+        # 체크 유래 지표는 요약 지표를 덮어쓰지 않는다(요약이 권위).
+        for k, v in check_metrics.items():
+            metrics.setdefault(k, v)
         return {'metrics': metrics, 'is_status': out}
+
+    def set_alpha_description(self, alpha_id: str, description: str) -> bool:
+        """알파의 regular.description 을 PATCH 로 설정한다 (Power Pool 필수 요건).
+
+        문서("Getting Started with Power Pool Alphas"): 100자 이상 Idea/Rationale
+        형식 설명이 없으면 Power Pool 자격이 없다. 계약은 ACE lib
+        set_alpha_properties 와 동일: PATCH /alphas/{id} {"regular": {"description": …}}.
+        실패해도 제출 자체는 막지 않는다(fail-soft) — 설명 없는 제출은 Regular 로는
+        유효하기 때문. 성공 여부만 돌려준다.
+        """
+        if not alpha_id or not str(description or '').strip():
+            return False
+        if not self._ensure_auth():
+            return False
+        try:
+            r = self.session.patch(
+                f'{BASE}/alphas/{alpha_id}',
+                json={'regular': {'description': str(description)[:4000]}},
+                headers={'Accept': _API_ACCEPT}, timeout=_HTTP_TIMEOUT)
+            if 200 <= r.status_code < 300:
+                return True
+            LOG.warning('alpha %s description PATCH %s: %s',
+                        alpha_id, r.status_code, (r.text or '')[:120])
+            return False
+        except Exception as e:
+            LOG.warning('alpha %s description PATCH err: %s', alpha_id, e)
+            return False
 
     def submit_alpha(self, alpha_id: str, stop_event=None,
                      deadline_s: float | None = None) -> tuple[bool, str]:
@@ -496,11 +1118,40 @@ class WqbApiClient:
                          'Accept': _API_ACCEPT})
         except Exception as e:
             LOG.warning('submit network err: %s', e); return None
+        self._capture_sim_quota(r)
         if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
             return 'RATE_LIMITED'
         if r.status_code not in (200, 201):
             return None
         return r.headers.get('Location') or r.headers.get('location')
+
+    def _capture_sim_quota(self, r) -> None:
+        """POST /simulations 응답의 **일일 시뮬 쿼터** 헤더를 기록한다.
+
+        WQB 는 계정별 일일 시뮬 한도를 두고(중복 시뮬도 차감된다) 남은 수량을
+        `X-Ratelimit-Remaining` 으로 알려준다. 여태 이 코드는 헤더를 읽지 않아
+        한도 소진을 **감지조차 못 했다** — 소진되면 그날 남은 라운드가 통째로
+        실패로 기록된다. 워커가 sim_quota() 를 보고 스스로 멈출 수 있게 남긴다.
+        """
+        try:
+            h = r.headers or {}
+            lim = h.get('X-Ratelimit-Limit') or h.get('x-ratelimit-limit')
+            rem = h.get('X-Ratelimit-Remaining') or h.get('x-ratelimit-remaining')
+            rst = h.get('X-Ratelimit-Reset') or h.get('x-ratelimit-reset')
+            if rem is None and lim is None:
+                return
+            q = {'limit': _parse_check_number(lim), 'remaining': _parse_check_number(rem),
+                 'reset_s': _parse_check_number(rst), 'ts': _time.time()}
+            self._sim_quota = q
+            if q['remaining'] is not None and q['remaining'] <= _SIM_QUOTA_WARN:
+                LOG.warning('일일 시뮬 쿼터 잔여 %s / %s (리셋 %ss)',
+                            q['remaining'], q['limit'], q['reset_s'])
+        except Exception:
+            pass
+
+    def sim_quota(self) -> dict | None:
+        """마지막으로 관측한 일일 시뮬 쿼터. 한 번도 POST 하지 않았으면 None."""
+        return getattr(self, '_sim_quota', None)
 
     @staticmethod
     def _full_settings(s: dict) -> dict:
@@ -520,31 +1171,87 @@ class WqbApiClient:
             'visualization': False,
         }
 
-    def poll(self, progress_url: str, stop_event=None, deadline_s: int = 720,
-             interval_s: float = 5.0, sleep=None) -> dict:
+    def poll(self, progress_url: str, stop_event=None, deadline_s: int = None,
+             interval_s: float = None, sleep=None) -> dict:
+        """시뮬 완료까지 폴링. (status, alpha, message, progress) 반환.
+
+        2026-07-21 개편 — 라이브 에러의 **75%가 여기서 났다**(최근 400건 중 299건이
+        'sim TIMEOUT: poll deadline'). WQB 가 낸 에러가 아니라 우리가 720초 만에
+        포기한 것이다. 세 가지를 고쳤다:
+
+        1. **마감 720초 → 1800초** (IQC_SIM_POLL_DEADLINE_S). D0·TOP3000·10년 IS 시뮬은
+           대기열까지 포함하면 12분을 넘기는 게 정상이다.
+        2. **Retry-After 존중.** BRAIN API 문서가 명시한 계약인데 무시하고 5초 고정으로
+           긁고 있었다 — 30분×5초면 알파당 360회, 8개 동시면 라운드당 2880회 GET 이라
+           "scripts do not lay excessive load on the server" 지침에도 어긋난다.
+        3. **정체(stall) 감지.** 진행률이 IQC_SIM_POLL_STALL_S(기본 900초) 동안 한 번도
+           안 움직이면 마감 전이라도 포기하고 슬롯을 반환한다 — 진짜 멈춘 시뮬에
+           30분을 낭비하지 않기 위해서다.
+        """
         sleep = sleep or _time.sleep
+        deadline_s = _POLL_DEADLINE_S if deadline_s is None else float(deadline_s)
+        base_interval = _POLL_INTERVAL_S if interval_s is None else float(interval_s)
         # deadline 은 **벽시계**(monotonic) 기준이어야 한다. 루프-카운트 방식은 단일 GET 이
         # 매달리면 영원히 한 바퀴를 못 돌아 deadline 이 도달 불가능해진다(라이브 무한 행 회귀).
         start = _time.monotonic()
         last = {'status': None, 'alpha': None, 'message': None, 'progress': None}
-        while _time.monotonic() - start < deadline_s:
+        last_change = start
+        prev_mark = None
+        while True:
+            now = _time.monotonic()
+            if now - start >= deadline_s:
+                reason = 'poll deadline'
+                break
             if stop_event is not None and stop_event.is_set():
                 self.cancel(progress_url)
                 return {'status': 'CANCELLED', 'alpha': None, 'message': '', 'progress': last.get('progress')}
+            wait = base_interval
+            readable = False        # 이번 턴에 서버 상태를 실제로 읽었는가
             try:
                 r = self.session.get(progress_url, timeout=_HTTP_TIMEOUT,
                                      headers={'Accept': _API_ACCEPT})
                 j = r.json() if r.ok else {}
+                readable = bool(r.ok)
+                ra = r.headers.get('Retry-After') or r.headers.get('retry-after')
+                if ra:
+                    try:
+                        wait = _clamp_retry_after(float(ra), base_interval)
+                    except (TypeError, ValueError):
+                        pass
+                elif not r.ok:
+                    # 429/5xx 인데 Retry-After 가 없으면 우리가 알아서 물러난다.
+                    wait = max(base_interval, min(30.0, base_interval * 4))
             except Exception as e:
                 j = {'message': str(e)}
             last = {'status': j.get('status'), 'alpha': j.get('alpha'),
                     'message': j.get('message'), 'progress': j.get('progress')}
             if last['status'] in ('COMPLETE', 'ERROR', 'FAIL', 'WARNING'):
+                LOG.debug('sim 완료 %.0fs status=%s', now - start, last['status'])
                 return last
-            sleep(interval_s)
-        # deadline 초과 — 슬롯 반환
+            # ⚠ **응답을 못 읽은 턴은 정체로 세면 안 된다.** 8워커가 5초마다 긁으면 폴링
+            #   자체가 429 를 맞는데, 그때 j={} 라 status=None 이 되어 (None, None) 이
+            #   계속 같은 mark 로 찍힌다 → 멀쩡히 돌던 시뮬을 900초에 죽였다.
+            #   (2026-07-21 실측: 최근 25건 중 4건이 전부 `status=None` 정체로 오판됐다.)
+            if not readable or last['status'] is None:
+                # ⚠ status 가 아예 없는 200 응답은 **대기열**이다(정체가 아니다).
+                #   WQB 는 큐에 있는 동안 Retry-After 와 함께 빈 본문을 준다.
+                #   2026-07-22 실측: 이걸 정체로 세어 946초 만에 멀쩡한 시뮬을 죽였다
+                #   (라운드 8건 중 2건). 상태를 못 읽는 동안은 전체 마감(1800초)에만 맡긴다.
+                sleep(wait)
+                continue
+            mark = (last['status'], last['progress'])
+            if mark != prev_mark:
+                prev_mark, last_change = mark, now
+            elif now - last_change >= _POLL_STALL_S:
+                reason = f'no progress for {_POLL_STALL_S:.0f}s (status={last["status"]})'
+                break
+            sleep(wait)
+        # 포기 — 슬롯 반환. 얼마나 기다렸는지 남겨야 마감값을 실측으로 조정할 수 있다.
+        elapsed = _time.monotonic() - start
+        LOG.warning('sim 폴링 포기 %.0fs — %s (progress=%s)', elapsed, reason, last.get('progress'))
         self.cancel(progress_url)
-        return {'status': 'TIMEOUT', 'alpha': None, 'message': 'poll deadline', 'progress': last.get('progress')}
+        return {'status': 'TIMEOUT', 'alpha': None,
+                'message': f'{reason} after {elapsed:.0f}s', 'progress': last.get('progress')}
 
     def cancel(self, progress_url: str) -> None:
         if not progress_url:

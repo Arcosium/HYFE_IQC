@@ -73,16 +73,35 @@ def test_simulate_batch_stop_event_aborts():
     assert client.submit_calls == []  # aborted before submitting
 
 
-def test_simulate_batch_fail_mode_below_threshold():
+def test_simulate_batch_fail_mode_requires_blocking_fail():
+    """2026-07-21: 'PASS 갯수 부족' 은 더 이상 fail 이 아니다 — 차단 FAIL 이 있어야 fail.
+
+    고회전 분류를 얻은 알파는 표준 컷이 WARNING 으로 강등돼 차단 PASS 가 4개까지
+    줄어든다. 갯수로 판정하면 제출 가능한 알파를 실패로 기록하게 된다.
+    """
     class SixPassClient(FakeClient):
         def harvest_alpha(self, aid):
-            return {'metrics': {}, 'is_status': {'pass': [{'name': 'x'}] * 6, 'fail': [], 'error': [], 'pending': []}}
+            return {'metrics': {}, 'is_status': {'pass': [{'name': 'x'}] * 6, 'fail': [],
+                                                 'error': [], 'pending': []}}
 
     be = wb.ApiBackend('e', 'p', client=SixPassClient())
     res = be.simulate_batch([{'idx': 9, 'code': 'x', 'desc': '', 'settings': {}}],
                             wqb_username='e', wqb_password='p')
-    assert res[0]['mode'] == 'fail' and res[0]['pass_count'] == 6
+    assert res[0]['mode'] == 'pass' and res[0]['pass_count'] == 6
     assert res[0]['submitted'] is True and res[0]['submit_status'] == 'submitted'
+
+
+def test_simulate_batch_fail_mode_on_blocking_fail():
+    class FailClient(FakeClient):
+        def harvest_alpha(self, aid):
+            return {'metrics': {}, 'is_status': {'pass': [{'name': 'x'}] * 6,
+                                                 'fail': [{'name': 'LOW_SHARPE'}],
+                                                 'error': [], 'pending': []}}
+
+    be = wb.ApiBackend('e', 'p', client=FailClient())
+    res = be.simulate_batch([{'idx': 9, 'code': 'x', 'desc': '', 'settings': {}}],
+                            wqb_username='e', wqb_password='p')
+    assert res[0]['mode'] == 'fail'
 
 
 def test_simulate_batch_rate_limited(monkeypatch):
@@ -258,22 +277,24 @@ def test_simulate_batch_partial_fn_once_per_alpha():
     assert len(seen) == 8  # 중복 없음
 
 
-def test_dispatch_routes_by_account_type(monkeypatch):
-    import server.wqb_browser as wbz
+def test_simulate_batch_always_api(monkeypatch):
+    """Playwright 제거 후 백엔드는 API 단일 — account_type 과 무관하게 ApiBackend 로 붙는다."""
+    import server.wqb_backend as wbz
     called = {}
-    def fake_browser(batch, **kw): called['browser'] = True; return [{'idx': 1, 'mode': 'fail'}]
+
     class FakeApi:
-        def __init__(self, *a, **k): pass
-        def simulate_batch(self, batch, **kw): called['api'] = True; return [{'idx': 1, 'mode': 'pass'}]
-    monkeypatch.setattr(wbz, '_browser_simulate_batch', fake_browser)
+        def __init__(self, *a, **k):
+            pass
+
+        def simulate_batch(self, batch, **kw):
+            called['api'] = called.get('api', 0) + 1
+            return [{'idx': 1, 'mode': 'pass'}]
+
     monkeypatch.setattr('server.wqb_backend.ApiBackend', FakeApi)
-    wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
-                       wqb_username='e', wqb_password='p', account_type='research_consultant')
-    assert called.get('api') and not called.get('browser')
-    called.clear()
-    wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
-                       wqb_username='e', wqb_password='p', account_type='standard')
-    assert called.get('browser') and not called.get('api')
+    for at in ('research_consultant', 'standard'):
+        wbz.simulate_batch([{'idx': 1, 'code': 'x', 'settings': {}}],
+                           wqb_username='e', wqb_password='p', account_type=at)
+    assert called.get('api') == 2
 
 
 def test_alpha_submits_are_serialized_across_threads():

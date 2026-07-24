@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "uk.aive.genomicwqb.app-mergeDebugResources-35:/values-hdpi-v4/values-hdpi-v4.xml",
+            "map": [
+                {
+                    "source": "/home/arcosium/.gradle/caches/8.10.2/transforms/b9ca9463f4459e7008933c2930027dc4/transformed/appcompat-1.7.0/res/values-hdpi-v4/values-hdpi-v4.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "6",
+                        "endColumns": "13",
+                        "endOffsets": "327"
+                    }
+                }
+            ]
+        }
+    ]
+}

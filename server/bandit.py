@@ -29,11 +29,43 @@ from typing import Any
 # Dimension definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _genome_values(attr: str, fallback: list[str]) -> list[str]:
+    """genome_models 에서 유전자 값 전집합을 읽어온다 (단일 진실 소스).
+
+    ⚠ 여기를 하드코딩하면 **조용히 어긋난다**: 2026-07-14 에 'model' family(mdl77/mdl177
+    팩터 3000여개)를 유전체에 열었는데 이 목록엔 없어서, 밴딧이 그 arm 을 뽑을 수도
+    탐색 슬롯에 주입할 수도 없었다 — 팔레트만 넓히고 아무도 못 쓰는 상태.
+    (원래 주석도 '전집합과 일치해야 한다' 고 적혀 있었지만 강제되지 않았다.)
+    """
+    try:
+        from . import genome_models as _gm
+        vals = list(getattr(_gm.BaseGenomeModel, attr))
+        return vals or fallback
+    except Exception:
+        return fallback
+
+
 DIMENSIONS: dict[str, list[str]] = {
-    'universe':      ['TOP3000', 'TOP1000', 'TOP500', 'TOP200'],
-    'neutralization': ['NONE', 'MARKET', 'INDUSTRY', 'SUBINDUSTRY', 'SECTOR'],
+    'universe':      _genome_values('universes',
+                                    ['TOP3000', 'TOP1000', 'TOP500', 'TOP200']),
+    # ⚠ 2026-07-23 — 하드코딩 5종이 유전체 전집합(11종)과 어긋나 있었다. 그 결과
+    #   STATISTICAL(실측 평균보상 0.0806, 전 arm 1위)·REVERSION_AND_MOMENTUM 은
+    #   **통계는 쌓이는데 슬롯으로는 한 번도 선택될 수 없는** 팔이었다. family 때와
+    #   같은 사고의 재발 — 이제 위 _genome_values 경고대로 전집합을 읽는다.
+    'neutralization': _genome_values('neutralizations',
+                                     ['NONE', 'MARKET', 'INDUSTRY', 'SUBINDUSTRY',
+                                      'SECTOR']),
     'decay_bucket':  ['low', 'mid', 'high'],
+    # 구조 유전자 차원 — settings 3종과 같은 루프(선택→탐색슬롯 주입→실측 보상)로
+    # 학습된다. 모델별 제약(RC 등)은 주입 후 _constrain 이 재검증한다.
+    'family':        _genome_values('families',
+                                    ['pv', 'fundamental', 'analyst', 'option', 'news']),
+    'combine':       _genome_values('combines',
+                                    ['spread', 'sum', 'product', 'ratio', 'corr', 'triple']),
 }
+
+# select_slots 가 슬롯마다 채우는 차원 순서 (결정론 유지를 위해 명시 고정).
+_SLOT_DIMENSIONS = ('universe', 'neutralization', 'decay_bucket', 'family', 'combine')
 
 DECAY_BUCKET_VALUE: dict[str, int] = {
     'low': 1,
@@ -120,7 +152,7 @@ def select_slots(
         assignment: dict[str, Any] = {}
         is_explore = slot_idx < explore_slots
 
-        for dim in ('universe', 'neutralization', 'decay_bucket'):
+        for dim in _SLOT_DIMENSIONS:
             values = DIMENSIONS[dim]
             if is_explore:
                 chosen = _rng.choice(values)
@@ -164,12 +196,21 @@ def decay_to_bucket(decay) -> str:
 
 
 def arm_keys_for_assignment(assignment: dict[str, Any]) -> list[str]:
-    """Return the 3 arm_keys (universe / neutralization / decay_bucket) implied
-    by an assignment dict, so the caller can call db.bandit_update on each after
-    the alpha's reward is known (credit assignment per dimension).
+    """Return the arm_keys implied by an assignment dict, so the caller can call
+    db.bandit_update on each after the alpha's reward is known (credit assignment
+    per dimension).
+
+    universe / neutralization / decay_bucket are required keys (legacy contract);
+    family / combine are credited only when present and truthy — old callers that
+    pass 3-key assignments keep getting exactly 3 arm_keys back.
     """
-    return [
+    keys = [
         arm_key('universe',      assignment['universe']),
         arm_key('neutralization', assignment['neutralization']),
         arm_key('decay_bucket',  assignment['decay_bucket']),
     ]
+    for dim in ('family', 'combine'):
+        v = assignment.get(dim)
+        if v:
+            keys.append(arm_key(dim, str(v)))
+    return keys

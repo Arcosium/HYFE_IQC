@@ -1,11 +1,11 @@
-# HYFE IQC — WorldQuant Brain Alpha Auto-Discovery
+# GenomicWQB — WorldQuant Brain Alpha Auto-Discovery
 
 > **Hybrid Financial Engineering — In-Contest Optimizer**
 > Gemini 가 알파(트레이딩 시그널)를 생성하고, Playwright 가 WorldQuant Brain 에 24/7 자동 제출하는 멀티유저 자동화 봇.
 
 [WorldQuant Brain](https://platform.worldquantbrain.com) 은 트레이더가 알파(트레이딩 시그널) 을
 제출해 채점받는 글로벌 퀀트 컨테스트 플랫폼입니다.
-HYFE IQC 는 이 과정을 끝에서 끝까지 자동화합니다 — 알파 발상부터 시뮬레이션, 제출, 거절 분류까지.
+GenomicWQB 는 이 과정을 끝에서 끝까지 자동화합니다 — 알파 발상부터 시뮬레이션, 제출, 거절 분류까지.
 
 ## 한 줄 요약
 
@@ -45,7 +45,7 @@ python3.11 -m playwright install chromium
 
 # 기동
 git clone https://github.com/Arcosium/HYFE_IQC.git
-cd HYFE_IQC
+cd GenomicWQB
 ./run.sh                # 포트 8088 foreground
 # → http://localhost:8088 접속
 # → 첫 화면에서 WQB 이메일/비밀번호 + Gemini API 키 입력하면 끝
@@ -94,7 +94,7 @@ cd HYFE_IQC
 ## 디렉터리
 
 ```
-/home/opc/projects/HYFE_IQC/
+/home/arcosium/projects/GenomicWQB/
 ├── server/                  # Flask 백엔드 + IQC 로직 (Python 3.9)
 │   ├── app.py               # Flask 라우트 + SSE + auto-resume
 │   ├── auth.py              # 로그인/검증 (Playwright + Gemini 호출)
@@ -115,7 +115,7 @@ cd HYFE_IQC
 ├── logs/                    # 서버 로그
 ├── requirements.txt
 ├── run.sh
-└── hyfe-iqc.service         # systemd 유닛 예시
+└── genomicwqb.service         # systemd 유닛 예시
 ```
 
 ## 기동
@@ -129,7 +129,7 @@ sudo dnf install -y python3.11 python3.11-pip
 python3.11 -m pip install --user playwright
 python3.11 -m playwright install chromium
 
-cd /home/opc/projects/HYFE_IQC
+cd /home/arcosium/projects/GenomicWQB
 ./run.sh                # foreground
 ./run.sh background     # nohup 으로 백그라운드 (logs/server.log)
 ```
@@ -167,10 +167,10 @@ cd /home/opc/projects/HYFE_IQC
 ## systemd 등록
 
 ```bash
-sudo cp hyfe-iqc.service /etc/systemd/system/
+sudo cp genomicwqb.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now hyfe-iqc
-sudo systemctl status hyfe-iqc
+sudo systemctl enable --now genomicwqb
+sudo systemctl status genomicwqb
 ```
 
 ## Cloudflare `*.ai-ve.uk` 연결 (예: `iqc.ai-ve.uk`)
@@ -190,12 +190,12 @@ sudo dnf install -y /tmp/cloudflared.rpm
 cloudflared tunnel login
 
 # 3) 터널 생성 + 라우팅
-cloudflared tunnel create hyfe-iqc
-cloudflared tunnel route dns hyfe-iqc iqc.ai-ve.uk
+cloudflared tunnel create genomicwqb
+cloudflared tunnel route dns genomicwqb iqc.ai-ve.uk
 
 # 4) ~/.cloudflared/config.yml
 cat > ~/.cloudflared/config.yml <<'EOF'
-tunnel: hyfe-iqc
+tunnel: genomicwqb
 credentials-file: /home/opc/.cloudflared/<tunnel-id>.json
 
 ingress:
@@ -218,7 +218,7 @@ sudo systemctl enable --now cloudflared
 # 1) Cloudflare DNS A 레코드: iqc.ai-ve.uk → <서버 공인 IP>, Proxy: ON
 # 2) nginx
 sudo dnf install -y nginx
-sudo tee /etc/nginx/conf.d/hyfe-iqc.conf > /dev/null <<'EOF'
+sudo tee /etc/nginx/conf.d/genomicwqb.conf > /dev/null <<'EOF'
 server {
     listen 80;
     server_name iqc.ai-ve.uk;
@@ -300,7 +300,7 @@ PENDING 이 Submit 시점에 새 검사 결과 FAIL 로 바뀌어 거절되는 �
 3. **새 디바이스 인증 (이메일 코드 / 2FA)** — **자동화 불가**.
    - `wqb_auth_required` reason 으로 거절됨
    - 사용자가 직접 `platform.worldquantbrain.com` 에 한 번 로그인하여 인증 코드 입력
-   - 인증 완료 후 HYFE_IQC 에서 다시 로그인 → 자동 통과
+   - 인증 완료 후 GenomicWQB 에서 다시 로그인 → 자동 통과
    - 만약 chromium 프로필이 깨졌다면 다시 인증 필요
 
 ## 자격증명 보안

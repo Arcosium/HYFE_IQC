@@ -67,7 +67,6 @@ def test_resolve_persona_url_falls_back_on_error(monkeypatch):
 def test_validate_login_routes_rc(monkeypatch):
     monkeypatch.setattr(auth, 'validate_gemini_key', lambda k: {'ok': True, 'reason': 'ok'})
     monkeypatch.setattr(auth, 'validate_wqb_api', lambda u, p: {'ok': True, 'reason': 'ok'})
-    monkeypatch.setattr(auth, 'validate_wqb_login', lambda u, p: {'ok': False, 'reason': 'should_not_call'})
     assert auth.validate_login('e', 'p', 'g', account_type='research_consultant')['ok'] is True
 
 

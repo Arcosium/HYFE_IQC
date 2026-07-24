@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 웹앱(static/mobile.html) 팔레트와 일치 -->
+    <color name="bg_primary">#070b09</color>
+    <color name="bg_secondary">#0e1512</color>
+    <color name="accent">#35e0a1</color>
+    <color name="accent_light">#1e8f68</color>
+    <color name="text_primary">#e8f2ec</color>
+    <color name="text_secondary">#8ba396</color>
+    <color name="white">#ffffff</color>
+    <color name="ic_launcher_background">#070b09</color>
+</resources>

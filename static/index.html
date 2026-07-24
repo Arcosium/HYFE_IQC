@@ -3,27 +3,30 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HYFE IQC — Evolution Observatory</title>
+  <title>GenomicWQB — Evolution Observatory</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;900&family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <!-- ⚠ Cloudflare 가 css/js 를 4시간 엣지캐시(max-age=14400 덮어씀) — 배포 시 반드시 ?v= 를 올릴 것 -->
-  <link rel="stylesheet" href="/style.css?v=7" />
+  <link rel="stylesheet" href="/style.css?v=21" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <div class="brand-main">HYFE <span class="accent">IQC</span></div>
-      <div class="brand-sub">Genome Evolution Observatory</div>
+    <div class="mast-row">
+      <div class="brand">
+        <h1 class="brand-main">Genomic<span class="accent">WQB</span></h1>
+        <div class="brand-sub">Genome Evolution Observatory</div>
+      </div>
+      <div class="top-live" id="top-live" hidden>
+        <span class="run-pill" id="run-pill"><span class="dot"></span><span id="run-pill-text">idle</span></span>
+        <span class="top-round">ROUND <strong id="top-round-num">—</strong></span>
+      </div>
+      <div class="user-info" id="user-info" hidden>
+        <span id="user-name"></span>
+        <button id="btn-logout" class="btn-link">로그아웃</button>
+      </div>
     </div>
-    <div class="top-live" id="top-live" hidden>
-      <span class="run-pill" id="run-pill"><span class="dot"></span><span id="run-pill-text">idle</span></span>
-      <span class="top-round">ROUND <strong id="top-round-num">—</strong></span>
-    </div>
-    <div class="user-info" id="user-info" hidden>
-      <span id="user-name"></span>
-      <button id="btn-logout" class="btn-link">로그아웃</button>
-    </div>
+    <hr class="double-rule">
   </header>
 
   <!-- ── 로그인 화면 ── -->
@@ -82,17 +85,20 @@
   <main id="screen-dashboard" class="screen" hidden>
     <div id="persona-banner" hidden class="persona-banner">
       <p>이 RC 계정은 WQB biometric(Persona) 인증이 필요합니다.
-        <a id="persona-link" href="#" target="_blank" rel="noopener">여기서 완료하기 ↗</a></p>
+        <a id="persona-link" href="#" target="_blank" rel="noopener">여기서 완료하기 →</a></p>
+      <button type="button" id="btn-persona-renew" class="ghost"
+              title="열어 둔 인증 페이지가 만료됐을 때 새 인증 링크를 발급받습니다. 이전 링크는 무효가 됩니다.">인증 링크 재발급</button>
       <button type="button" id="btn-persona-complete">완료했습니다 — 세션 저장</button>
       <span id="persona-status"></span>
+      <span class="persona-hint">인증 페이지가 <b>만료(session expired)</b>로 뜨면 <b>인증 링크 재발급</b>을 누르세요 — 그 자리에서 새 링크가 열립니다.</span>
     </div>
 
     <!-- 제어 커맨드 바 -->
     <section class="card-block" aria-label="실행 제어">
       <div class="command-bar">
         <div class="buttons">
-          <button id="btn-start" class="btn-primary">▶ 진화 실행</button>
-          <button id="btn-pause" class="btn-secondary" disabled>⏸ 일시정지</button>
+          <button id="btn-start" class="btn-primary">진화 실행</button>
+          <button id="btn-pause" class="btn-secondary" disabled>일시정지</button>
         </div>
         <div class="status-block">
           <div class="kv"><span class="k">상태</span><span class="v" id="state-text">idle</span></div>
@@ -100,22 +106,48 @@
           <div class="kv"><span class="k">완료 라운드</span><span class="v" id="state-completed">0</span></div>
           <div class="kv"><span class="k">오류 패턴</span><span class="v" id="state-errors">0</span></div>
         </div>
-        <div class="delay-block">
-          <label for="delay-mode">Delay 테스트</label>
-          <select id="delay-mode">
-            <option value="0">Delay=0</option>
-            <option value="1">Delay=1</option>
-            <option value="mix">혼합(랜덤)</option>
-          </select>
-          <span id="delay-mode-status" class="delay-status" aria-live="polite"></span>
-        </div>
       </div>
       <div class="account-strip" id="account-section">
         <span>계정 유형: <strong id="account-type-current">—</strong></span>
         <span id="account-upgrade-prompt">— 일반 → Research Consultant로 전환:</span>
         <button type="button" id="btn-upgrade-rc" class="btn-upgrade-rc">Research Consultant로 전환</button>
+        <button type="button" id="btn-persona-open" class="btn-upgrade-rc" hidden
+                title="WQB biometric 인증 패널을 엽니다 (인증 링크 재발급 포함)">WQB 인증 / 링크 재발급</button>
         <span style="margin-left:auto" class="micro" id="mode-summary"></span>
       </div>
+    </section>
+
+    <!-- 전략 리서치 (선택) — 요청을 넣으면 LLM 이 논문을 찾아 전략 후보를 만든다 -->
+    <section class="card-block collapsible" id="rs-card" data-fold-key="rs" aria-label="전략 리서치">
+      <div class="card-head" id="rs-head" role="button" tabindex="0" aria-expanded="true">
+        <h2>전략 리서치 <span class="micro">Research → Hypothesis → Strategy</span></h2>
+        <div class="card-tools"><span class="micro" id="rs-spec-counts"></span><span class="rs-chev" aria-hidden="true">▾</span></div>
+      </div>
+      <div class="research-bar">
+        <input type="text" id="rs-query" maxlength="500" autocomplete="off"
+               placeholder="예: 재무 건전성을 바탕으로 한 횡단면 팩터 포트폴리오 — 비워두면 무작위 GA 로 돕니다" />
+        <button id="btn-research" class="btn-primary">리서치 실행</button>
+      </div>
+      <!-- 탐색 조건 — Power Pool 주간 테마처럼 기한이 있는 필터. 걸어두면 GA 가
+           도는 내내 조건 밖 알파를 아예 만들지 않는다(재시작 불필요). -->
+      <div class="research-bar constraint-bar">
+        <input type="text" id="constraint-text" maxlength="500" autocomplete="off"
+               placeholder="탐색 조건 — 예: region=USA &amp; delay=1 &amp; universe=TOP1000 &amp; datasets not in ['pv1']  (자연어도 가능)" />
+        <button type="button" id="btn-constraint-save" class="btn-primary">적용</button>
+        <button type="button" id="btn-constraint-clear" class="btn-secondary">해제</button>
+      </div>
+      <div class="constraint-status micro" id="constraint-status" aria-live="polite"></div>
+      <div class="research-steps" id="rs-steps" hidden>
+        <span class="rs-step" data-step="gathering">01 근거 수집</span>
+        <span class="rs-arrow">→</span>
+        <span class="rs-step" data-step="ideating">02 가설 생성</span>
+        <span class="rs-arrow">→</span>
+        <span class="rs-step" data-step="concretizing">03 전략 구체화</span>
+        <span class="rs-arrow">→</span>
+        <span class="rs-step" data-step="ready">04 GA 시딩</span>
+      </div>
+      <div id="rs-body" class="research-body" hidden></div>
+      <div class="empty-msg" id="rs-empty">아직 리서치 요청이 없습니다 — 워커는 무작위 GA 로 돌고 있습니다.</div>
     </section>
 
     <!-- 스탯 타일 -->
@@ -128,7 +160,7 @@
       <div class="stat-tile t-acc">
         <span class="micro">엘리트 Seed</span>
         <span class="value" id="tile-seed">0</span>
-        <span class="sub">교차/변이 모집단</span>
+        <span class="sub" id="tile-seed-sub">교차/변이 모집단</span>
       </div>
       <div class="stat-tile t-mut">
         <span class="micro">Focus 대기</span>
@@ -189,13 +221,14 @@
 
     <!-- 파이프라인 + 세대 사다리 -->
     <section class="grid-2">
-      <div class="card-block" aria-label="GA 파이프라인">
-        <div class="card-head">
+      <div class="card-block collapsible" data-fold-key="pipeline" data-fold-default="closed" aria-label="GA 파이프라인">
+        <div class="card-head" role="button" tabindex="0">
           <h2>GA 파이프라인 <span class="micro">Transition Flow</span></h2>
+          <div class="card-tools"><span class="rs-chev" aria-hidden="true">▾</span></div>
         </div>
         <div class="pipeline" id="pipeline">
           <div class="pl-node pl-rand">
-            <span class="pl-ico">⚄</span>
+            <span class="pl-ico">01</span>
             <span class="pl-body">
               <span class="pl-title">무작위 탐색 <span class="micro">explore</span></span>
               <span class="pl-sub" id="pl-rand-sub">신규 유전체 생성 · 밴딧 —</span>
@@ -204,7 +237,7 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-plain">
-            <span class="pl-ico">⚙</span>
+            <span class="pl-ico">02</span>
             <span class="pl-body">
               <span class="pl-title">시뮬레이션 <span class="micro">backtest</span></span>
               <span class="pl-sub" id="pl-sim-sub">—</span>
@@ -213,7 +246,7 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-acc">
-            <span class="pl-ico">▦</span>
+            <span class="pl-ico">03</span>
             <span class="pl-body">
               <span class="pl-title">게이트 <span class="micro">selection</span></span>
               <span class="pl-sub" id="pl-gate-sub">—</span>
@@ -222,7 +255,7 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-acc">
-            <span class="pl-ico">◈</span>
+            <span class="pl-ico">04</span>
             <span class="pl-body">
               <span class="pl-title">엘리트 Seed 풀 <span class="micro">elite pool</span></span>
               <span class="pl-sub">PASS 상위 알파 → 유전체 역추출</span>
@@ -231,7 +264,7 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-xo">
-            <span class="pl-ico">✂</span>
+            <span class="pl-ico">05</span>
             <span class="pl-body">
               <span class="pl-title">교차 / 변이 <span class="micro">crossover · mutate</span></span>
               <span class="pl-sub">엘리트 유전자 재조합 → 다음 세대 자식</span>
@@ -240,7 +273,7 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-mut">
-            <span class="pl-ico">🎯</span>
+            <span class="pl-ico">06</span>
             <span class="pl-body">
               <span class="pl-title">Focus 정향변이 <span class="micro">directed mutation</span></span>
               <span class="pl-sub">FAIL 사유 기반 유전자 축 이동</span>
@@ -249,31 +282,32 @@
           </div>
           <div class="pl-edge"></div>
           <div class="pl-node pl-acc">
-            <span class="pl-ico">⬆</span>
+            <span class="pl-ico">07</span>
             <span class="pl-body">
               <span class="pl-title">제출 <span class="micro">submit</span></span>
               <span class="pl-sub" id="pl-submit-sub">—</span>
             </span>
             <span class="pl-count" id="pl-submit-count">0</span>
           </div>
-          <div class="pl-loop">↺ 결과·FAIL 사유가 다음 세대 생성에 피드백됩니다</div>
+          <div class="pl-loop">→ 결과·FAIL 사유가 다음 세대 생성에 피드백됩니다</div>
         </div>
       </div>
 
       <div>
-        <div class="card-block" aria-label="세대 사다리">
-          <div class="card-head">
+        <div class="card-block collapsible" data-fold-key="genladder" data-fold-default="closed" aria-label="세대 사다리">
+          <div class="card-head" role="button" tabindex="0">
             <h2>세대 사다리 <span class="micro">Generation Depth</span></h2>
+            <div class="card-tools"><span class="rs-chev" aria-hidden="true">▾</span></div>
           </div>
           <div class="genladder" id="genladder">
             <div class="gl-note">데이터 로딩 중…</div>
           </div>
         </div>
 
-        <div class="card-block" aria-label="최신 세대 상세" style="margin-top:14px">
-          <div class="card-head">
+        <div class="card-block collapsible" data-fold-key="population" data-fold-default="closed" aria-label="최신 세대 상세" style="margin-top:14px">
+          <div class="card-head" role="button" tabindex="0">
             <h2>최신 세대 상세 <span class="micro">Latest Population</span></h2>
-            <div class="card-tools"><span class="micro" id="pop-round-label"></span></div>
+            <div class="card-tools"><span class="micro" id="pop-round-label"></span><span class="rs-chev" aria-hidden="true">▾</span></div>
           </div>
           <div class="pop-table-wrap">
             <table class="pop-table" id="pop-table">
@@ -287,6 +321,90 @@
             <div class="empty-msg" id="pop-empty">아직 세대 데이터가 없습니다.</div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- 성과 분석 (Sharpe×Turnover 파레토 + 설정별 평균) -->
+    <section class="grid-2" aria-label="성과 분석">
+      <div class="card-block collapsible" data-fold-key="scatter" data-fold-default="closed">
+        <div class="card-head" role="button" tabindex="0">
+          <h2>Sharpe × Turnover <span class="micro">Trade-off · Pareto</span></h2>
+          <div class="card-tools"><span class="micro">◆ 파레토 프론트 · 점선 = 게이트(Sharpe≥1.25·Turnover≤0.7)</span><span class="rs-chev" aria-hidden="true">▾</span></div>
+        </div>
+        <div class="scatter-wrap" id="scatter-wrap">
+          <svg id="scatter-chart" role="img" aria-label="Sharpe 대 Turnover 산점도 · 파레토 프론트"></svg>
+          <div class="scatter-tip" id="scatter-tip"></div>
+          <div class="evo-empty" id="scatter-empty" hidden>turnover·sharpe 지표가 있는 시뮬 데이터가 아직 없습니다.</div>
+        </div>
+      </div>
+      <div class="card-block collapsible" data-fold-key="hp" data-fold-default="closed">
+        <div class="card-head" role="button" tabindex="0">
+          <h2>설정별 평균 Sharpe <span class="micro">Hyperparameter Avg</span></h2>
+          <div class="card-tools">
+            <div class="seg-toggle" id="hp-axis">
+              <button type="button" data-axis="neutralization" class="active">중립화</button>
+              <button type="button" data-axis="universe">유니버스</button>
+              <button type="button" data-axis="decay">DECAY</button>
+            </div>
+            <span class="rs-chev" aria-hidden="true">▾</span>
+          </div>
+        </div>
+        <svg id="hp-chart" class="hp-chart" role="img" aria-label="설정별 평균 Sharpe"></svg>
+        <div class="evo-empty" id="hp-empty" hidden>설정·sharpe 데이터가 아직 없습니다.</div>
+      </div>
+    </section>
+
+    <!-- 학습 현황 — '어떤 조정 → 어떤 지표 개선' 온라인 학습 -->
+    <section class="grid-2" aria-label="학습 현황">
+      <div class="card-block collapsible" data-fold-key="directive" data-fold-default="closed">
+        <div class="card-head" role="button" tabindex="0">
+          <h2>정향변이 학습 <span class="micro">Directive Learning · Thompson Sampling</span></h2>
+          <div class="card-tools"><span class="micro">FAIL 사유 × 변이 축 — 실제로 고친 비율</span><span class="rs-chev" aria-hidden="true">▾</span></div>
+        </div>
+        <div class="pop-table-wrap">
+          <table class="pop-table" id="dl-table" hidden>
+            <thead>
+              <tr><th>FAIL 사유</th><th>적용한 변이 축</th><th>시도</th><th>해결</th><th>성공률</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div class="empty-msg" id="dl-empty">아직 귀속 데이터가 없습니다 — focus 라운드가 돌면 부모→자식 결과가 쌓여 여기서 학습됩니다.</div>
+        </div>
+      </div>
+      <div class="card-block collapsible" data-fold-key="bandit" data-fold-default="closed">
+        <div class="card-head" role="button" tabindex="0">
+          <h2>밴딧 Arm 현황 <span class="micro">Bandit Arms · ε-greedy + 시간감쇠</span></h2>
+          <div class="card-tools"><span class="micro">차원별 평균 보상 · 방문수</span><span class="rs-chev" aria-hidden="true">▾</span></div>
+        </div>
+        <div id="bandit-board" class="bandit-board"></div>
+        <div class="empty-msg" id="bandit-empty" hidden>밴딧 데이터가 아직 없습니다.</div>
+      </div>
+    </section>
+
+    <!-- 리더보드 -->
+    <section class="card-block" aria-label="리더보드">
+      <div class="card-head">
+        <h2>리더보드 <span class="micro">Leaderboard</span></h2>
+        <div class="card-tools">
+          <div class="seg-toggle" id="lb-sort">
+            <button type="button" data-sort="sharpe" class="active">SHARPE</button>
+            <button type="button" data-sort="fitness">FITNESS</button>
+            <button type="button" data-sort="turnover">TURNOVER↓</button>
+            <button type="button" data-sort="self_corr">CORR↓</button>
+          </div>
+          <span class="micro preflight-stat" id="preflight-stat"></span>
+        </div>
+      </div>
+      <div class="pop-table-wrap">
+        <table class="pop-table lb-table" id="lb-table">
+          <thead>
+            <tr>
+              <th>#</th><th>오리진</th><th>Sharpe</th><th>Fitness</th><th>Turnover</th><th>Corr</th><th>PASS</th><th>설정</th><th>상태</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-msg" id="lb-empty">아직 데이터가 없습니다.</div>
       </div>
     </section>
 
@@ -304,6 +422,6 @@
     </section>
   </main>
 
-  <script src="/app.js?v=7" defer></script>
+  <script src="/app.js?v=21" defer></script>
 </body>
 </html>

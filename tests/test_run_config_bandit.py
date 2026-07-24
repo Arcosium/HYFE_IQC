@@ -56,10 +56,10 @@ def test_set_true_returns_true(isolated_config):
 
 
 def test_set_does_not_disturb_other_keys(isolated_config):
-    """Toggling bandit_enabled must preserve other config values (e.g. delay_mode)."""
-    isolated_config.set_delay_mode('0')
+    """Toggling bandit_enabled must preserve other config values (e.g. constraint)."""
+    isolated_config.set_constraint_text('region=USA & delay=0 & universe=TOP3000')
     isolated_config.set_bandit_enabled(False)
-    assert isolated_config.get_delay_mode() == '0'
+    assert isolated_config.get_constraint_text() == 'region=USA & delay=0 & universe=TOP3000'
     assert isolated_config.is_bandit_enabled() is False
 
 

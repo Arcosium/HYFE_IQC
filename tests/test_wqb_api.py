@@ -283,3 +283,79 @@ def test_submit_alpha_403_with_failed_checks_classified_as_rejected():
     assert ok is False
     assert status.startswith('rejected:LOW_SHARPE; LOW_FITNESS')
     assert 'http_403' in status
+
+
+# ── 시뮬 폴링 재조정 (2026-07-21) ─────────────────────────────────────────────
+# 라이브 에러의 75%(400건 중 299건)가 'sim TIMEOUT: poll deadline' 이었다 — WQB 실패가
+# 아니라 우리가 720초에 포기한 것. 마감 상향 + Retry-After 존중 + 정체 감지로 고쳤다.
+
+def test_poll_default_deadline_is_thirty_minutes():
+    """기본 마감이 720초로 되돌아가면 타임아웃 폭증이 재발한다."""
+    assert wqb_api._POLL_DEADLINE_S >= 1800
+
+
+def test_poll_honours_retry_after_header():
+    """BRAIN API 문서가 명시한 계약 — Retry-After 가 있으면 그만큼 쉰다.
+
+    5초 고정 폴링은 30분×8알파면 라운드당 2880 GET 이라 "excessive load" 지침 위반이다.
+    """
+    sess = FakeSession()
+    sess.queue[('GET', '/simulations/SIM1')] = [
+        FakeResp(200, {'progress': 0.2, 'status': 'SIMULATING'}, headers={'Retry-After': '20'}),
+        FakeResp(200, {'progress': 1.0, 'status': 'COMPLETE', 'alpha': 'AB1'}),
+    ]
+    slept = []
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
+                 deadline_s=300, sleep=slept.append)
+    assert res['status'] == 'COMPLETE'
+    assert slept and slept[0] == 20.0, slept
+
+
+def test_poll_retry_after_is_clamped():
+    """서버가 0/음수/과대값을 줘도 폴링이 폭주하거나 멈추면 안 된다."""
+    assert wqb_api._clamp_retry_after(0, 5.0) == 5.0
+    assert wqb_api._clamp_retry_after(-3, 5.0) == 5.0
+    assert wqb_api._clamp_retry_after(2, 5.0) == 5.0        # floor 아래는 floor
+    assert wqb_api._clamp_retry_after(99999, 5.0) == wqb_api._POLL_RETRY_AFTER_MAX_S
+
+
+def test_poll_gives_up_early_when_progress_stalls(monkeypatch):
+    """진행률이 stall 시간 동안 안 움직이면 마감 전이라도 슬롯을 반환한다."""
+    sess = FakeSession()
+    sess.queue[('GET', '/simulations/SIM1')] = [
+        FakeResp(200, {'progress': 0.1, 'status': 'SIMULATING'})] * 50
+    sess.queue[('DELETE', '/simulations/SIM1')] = [FakeResp(204)]
+    ticks = {'t': 0.0}
+
+    def _mono():
+        ticks['t'] += 60.0        # 호출마다 1분 전진
+        return ticks['t']
+
+    monkeypatch.setattr(wqb_api._time, 'monotonic', _mono)
+    monkeypatch.setattr(wqb_api, '_POLL_STALL_S', 300.0)
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
+                 deadline_s=100000, sleep=lambda _: None)
+    assert res['status'] == 'TIMEOUT'
+    assert 'no progress' in res['message'], res['message']
+
+
+def test_poll_does_not_give_up_while_progress_advances(monkeypatch):
+    """진행률이 움직이는 동안엔 stall 로 끊으면 안 된다 (느린 D0 시뮬 보호)."""
+    sess = FakeSession()
+    sess.queue[('GET', '/simulations/SIM1')] = [
+        FakeResp(200, {'progress': p, 'status': 'SIMULATING'}) for p in (0.1, 0.2, 0.3, 0.4)
+    ] + [FakeResp(200, {'progress': 1.0, 'status': 'COMPLETE', 'alpha': 'AB1'})]
+    ticks = {'t': 0.0}
+
+    def _mono():
+        ticks['t'] += 200.0       # 호출마다 200초 — stall(300초) 문턱 근처지만 진행 중
+        return ticks['t']
+
+    monkeypatch.setattr(wqb_api._time, 'monotonic', _mono)
+    monkeypatch.setattr(wqb_api, '_POLL_STALL_S', 300.0)
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
+                 deadline_s=100000, sleep=lambda _: None)
+    assert res['status'] == 'COMPLETE'

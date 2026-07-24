@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent">#35e0a1</color>
+    <color name="accent_light">#1e8f68</color>
+    <color name="bg_primary">#070b09</color>
+    <color name="bg_secondary">#0e1512</color>
+    <color name="ic_launcher_background">#070b09</color>
+    <color name="text_primary">#e8f2ec</color>
+    <color name="text_secondary">#8ba396</color>
+    <color name="white">#ffffff</color>
+    <string name="app_name">GenomicWQB</string>
+    <string name="error_message">네트워크 연결을 확인한 후\n다시 시도해주세요.</string>
+    <string name="error_title">인터넷 연결 없음</string>
+    <string name="offline_icon_desc">오프라인 아이콘</string>
+    <string name="retry">다시 시도</string>
+    <style name="Theme.GenomicWQB" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorPrimaryVariant">@color/accent_light</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/accent_light</item>
+        <item name="android:windowBackground">@color/bg_primary</item>
+        <item name="android:navigationBarColor">@color/bg_primary</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="Theme.GenomicWQB.Splash" parent="Theme.GenomicWQB">
+        <item name="windowSplashScreenBackground">@color/bg_primary</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.GenomicWQB</item>
+    </style>
+</resources>

@@ -52,9 +52,21 @@ def test_error_count_returns_zero():
     r = compute_reward(_strong_alpha(), pass_count=7, fail_count=0, error_count=1)
     assert r == 0.0
 
-def test_below_pass_threshold_returns_zero():
-    r = compute_reward(_strong_alpha(), pass_count=5, fail_count=0, error_count=0)
-    assert r == 0.0
+def test_submittable_with_few_passes_is_rewarded():
+    """2026-07-21 규칙 개편 — PASS 갯수는 더 이상 게이트가 아니다.
+
+    고회전(HTVR) 분류를 얻은 알파는 표준 컷(LOW_SHARPE 등)이 WARNING 으로 강등되면서
+    core PASS 가 4개까지 줄어든다. 옛 게이트(pass_count>=7)는 **바로 그 제출 가능한
+    알파에게 0점**을 줬다 (라이브 gJ9qkKWv: FAIL 0 / PASS 4 / PENDING 6).
+    """
+    r = compute_reward(_strong_alpha(), pass_count=4, fail_count=0, error_count=0)
+    assert r > 0.0
+
+
+def test_any_blocking_fail_returns_zero():
+    """차단 FAIL 이 하나라도 있으면 제출 불가 → 0.0 (게이트의 새 단일 기준)."""
+    assert compute_reward(_strong_alpha(), pass_count=9, fail_count=1, error_count=0) == 0.0
+    assert compute_reward(_strong_alpha(), pass_count=9, fail_count=0, error_count=1) == 0.0
 
 def test_exactly_at_threshold_passes():
     r = compute_reward(_strong_alpha(), pass_count=7, fail_count=0, error_count=0, self_corr=0.2)
@@ -249,11 +261,11 @@ def test_reward_always_nonnegative():
 def test_custom_weights_sharpe_only():
     """With sharpe weight=1, others=0, reward ≈ norm_sharpe."""
     kwargs = dict(pass_count=7, fail_count=0, error_count=0, self_corr=0.2)
-    r = compute_reward(
-        _strong_alpha({'sharpe': 1.5}),
-        **kwargs,
-        weights={'sharpe': 1.0, 'fitness': 0.0, 'turnover': 0.0, 'returns': 0.0},
-    )
+    # ⚠ DEFAULT_WEIGHTS 의 **모든** 키를 0 으로 눌러야 한다 — 부분 override 는 나머지
+    #   가중치를 남긴다(2026-07-14 submit/stability 신설).
+    only_sharpe = {k: 0.0 for k in DEFAULT_WEIGHTS}
+    only_sharpe['sharpe'] = 1.0
+    r = compute_reward(_strong_alpha({'sharpe': 1.5}), **kwargs, weights=only_sharpe)
     # norm_sharpe = clamp(1.5/3.0, 0, 1) = 0.5; no penalty (corr=0.2 ≤ 0.3)
     assert math.isclose(r, 0.5, rel_tol=1e-9), f"expected 0.5, got {r}"
 
@@ -271,12 +283,16 @@ def test_partial_weight_override_merges_defaults():
 # ---------------------------------------------------------------------------
 
 def test_all_zeros_metrics():
-    """All-zero metrics, all-pass → reward 0 (all terms clamp to 0)."""
+    """지표가 전부 0 이면 보상도 0.
+
+    ⚠ 2026-07-21 이전엔 이게 **0보다 컸다** — turnover=0 을 '완벽한 저회전' 으로 읽어
+    turnover_term 이 만점(1.0)을 줬기 때문이다. 죽은 알파가 회전율 항으로 점수를 벌던
+    셈이다. 이제 0% 회전율은 LOW_TURNOVER(1% 미만) 제출 차단이자 HT 문턱(20%)에서
+    가장 먼 상태이므로 양쪽 항 모두 0 이다.
+    """
     m = {'sharpe': 0.0, 'fitness': 0.0, 'turnover': 0.0, 'returns': 0.0}
     r = compute_reward(m, pass_count=7, fail_count=0, error_count=0)
-    # turnover=0 → turnover_term=1.0 (max), but sharpe/fitness/returns all 0
-    # base = w_turnover * 1.0 = 0.2 > 0
-    assert r > 0.0  # turnover_term still contributes
+    assert r == 0.0
 
 def test_empty_metrics_dict():
     """Empty dict → all keys default to 0, no crash."""

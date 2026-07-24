@@ -1,12 +1,15 @@
-"""delay 테스트 모드 (run_config) + Gemini delay 지시문 단위 테스트.
+"""라운드 delay 결정 (run_config) + Gemini delay 지시문 단위 테스트.
 
-실행: python3.11 -m pytest tests/test_delay_mode.py
+실행: python3.12 -m pytest tests/test_delay_mode.py
+
+⚠ 2026-07-22: 별도의 'delay 테스트 모드'(0/1/mix 토글, `/api/delay_mode`)는 제거됐다.
+delay 는 **탐색 조건 하나**가 정한다 — 같은 값을 두 곳에서 정하면 조건을 걸어놓고도
+다른 delay 로 라운드가 도는 사고가 난다(실제로 조건 delay=1 인데 토글은 '0' 이었다).
 """
-import importlib
-
 import pytest
 
 from server import run_config
+from server import constraint_spec
 from server import gemini_strategist
 
 
@@ -17,39 +20,28 @@ def isolated_config(tmp_path, monkeypatch):
     return run_config
 
 
-def test_default_is_mix(isolated_config):
-    # 파일이 없으면 default 'mix'.
-    assert isolated_config.get_delay_mode() == 'mix'
+def test_delay_mode_api_is_gone():
+    """옛 토글이 되살아나면(두 진실) 조건과 어긋난 delay 로 시뮬을 버리게 된다."""
+    for gone in ('get_delay_mode', 'set_delay_mode', 'resolve_round_delay',
+                 'VALID_DELAY_MODES', 'DEFAULT_DELAY_MODE'):
+        assert not hasattr(run_config, gone), f'{gone} 이 아직 살아 있다'
 
 
-@pytest.mark.parametrize('mode', ['0', '1', 'mix'])
-def test_set_get_roundtrip(isolated_config, mode):
-    isolated_config.set_delay_mode(mode)
-    assert isolated_config.get_delay_mode() == mode
+def test_default_delay_when_no_constraint(isolated_config):
+    assert isolated_config.round_delay(None) == isolated_config.DEFAULT_DELAY
 
 
-def test_set_invalid_raises(isolated_config):
-    with pytest.raises(ValueError):
-        isolated_config.set_delay_mode('2')
-    with pytest.raises(ValueError):
-        isolated_config.set_delay_mode('')
+@pytest.mark.parametrize('delay', ['0', '1'])
+def test_constraint_decides_delay(isolated_config, delay):
+    spec = constraint_spec.parse(f'region=USA & delay={delay} & universe=TOP1000')
+    assert spec.delay == delay
+    assert isolated_config.round_delay(spec) == delay
 
 
-def test_corrupt_file_falls_back_to_default(isolated_config):
-    with open(isolated_config._CONFIG_PATH, 'w', encoding='utf-8') as f:
-        f.write('not json {{{')
-    assert isolated_config.get_delay_mode() == 'mix'
-
-
-def test_resolve_fixed_modes(isolated_config):
-    assert isolated_config.resolve_round_delay('0') == '0'
-    assert isolated_config.resolve_round_delay('1') == '1'
-
-
-def test_resolve_mix_is_zero_or_one(isolated_config):
-    seen = {isolated_config.resolve_round_delay('mix') for _ in range(50)}
-    assert seen <= {'0', '1'}
-    assert seen  # 비어있지 않음
+def test_constraint_without_delay_falls_back(isolated_config):
+    spec = constraint_spec.parse('region=USA & universe=TOP3000')
+    assert spec.delay is None
+    assert isolated_config.round_delay(spec) == isolated_config.DEFAULT_DELAY
 
 
 def test_delay_directive_none_is_empty():
