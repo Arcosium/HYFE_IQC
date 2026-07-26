@@ -1054,6 +1054,10 @@ class WqbApiClient:
             retry_after = r.headers.get('Retry-After') or r.headers.get('retry-after')
             if 200 <= r.status_code < 300 and retry_after:
                 if _time.monotonic() - start >= deadline:
+                    # 접수는 됐는데 우리가 기다림을 포기하는 경우 — 포기 선언 전에
+                    # 알파 stage 실측으로 성공 여부를 확정한다 (2026-07-25 유실 교훈).
+                    if self._verify_submitted(alpha_id):
+                        return True, 'submitted (pending_timeout 후 stage=OS 확인)'
                     return False, f'submit_pending_timeout:{retry_after}'
                 try:
                     sleep_s = max(0.5, min(30.0, float(retry_after)))
@@ -1102,9 +1106,29 @@ class WqbApiClient:
                 if failed:
                     reason = '; '.join(str(c.get('name') or 'FAIL') for c in failed[:3])
                     return False, f'rejected:{reason} (http_{r.status_code})'
+            # ⚠ 404 맹점 (2026-07-27 진단): 제출이 **완료되면** /alphas/{id}/submit
+            #   리소스가 사라져 폴링 GET 이 404 를 받는다. 7/23·7/25 실제 제출 성공
+            #   2건이 'submit_http_404' 실패로 기록돼 통계·게이트에서 증발했다.
+            #   포기 선언 전에 알파 stage 를 실측해 성공을 확정한다.
+            if r.status_code == 404 and method == 'GET' \
+                    and self._verify_submitted(alpha_id):
+                return True, 'submitted (submit 리소스 소멸 → stage=OS 확인)'
             body = (getattr(r, 'text', '') or '')[:200].replace(chr(10), ' ').strip()
             suffix = f': {body}' if body else ''
             return False, f'submit_http_{r.status_code}{suffix}'
+
+    def _verify_submitted(self, alpha_id: str) -> bool:
+        """GET /alphas/{id} 로 제출 완료(stage OS / dateSubmitted 有)를 실측 확인."""
+        try:
+            r = self.session.get(f'{BASE}/alphas/{alpha_id}', timeout=_HTTP_TIMEOUT,
+                                 headers={'Accept': _API_ACCEPT})
+            if not r.ok:
+                return False
+            j = r.json()
+            return (str(j.get('stage') or '').upper() == 'OS'
+                    or bool(j.get('dateSubmitted')))
+        except Exception:
+            return False
 
     def submit_simulation(self, expr: str, settings: dict) -> str | None:
         if not self._ensure_auth():
@@ -1122,6 +1146,35 @@ class WqbApiClient:
         if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
             return 'RATE_LIMITED'
         if r.status_code not in (200, 201):
+            return None
+        return r.headers.get('Location') or r.headers.get('location')
+
+    def submit_super_simulation(self, selection: str, combo: str,
+                                settings: dict) -> str | None:
+        """type=SUPER 시뮬 제출 → progress Location (⑤ 슈퍼알파, ACE body 형식).
+
+        settings 는 superalpha.default_settings() 가 만든 **완성본**을 그대로 쓴다
+        (REGULAR 용 _full_settings 와 달리 selectionHandling/selectionLimit 포함).
+        반환 규약은 submit_simulation 과 동일: Location / 'RATE_LIMITED' / None.
+        """
+        if not self._ensure_auth():
+            return None
+        body = {'type': 'SUPER', 'settings': dict(settings),
+                'selection': selection, 'combo': combo}
+        try:
+            r = self.session.post(
+                f'{BASE}/simulations', json=body, timeout=_HTTP_TIMEOUT,
+                headers={'Content-Type': 'application/json',
+                         'Access-Control-Request-Headers': 'Location',
+                         'Accept': _API_ACCEPT})
+        except Exception as e:
+            LOG.warning('super submit network err: %s', e); return None
+        self._capture_sim_quota(r)
+        if r.status_code == 429:
+            return 'RATE_LIMITED'
+        if r.status_code not in (200, 201):
+            LOG.warning('super submit http_%s: %s', r.status_code,
+                        (getattr(r, 'text', '') or '')[:200])
             return None
         return r.headers.get('Location') or r.headers.get('location')
 

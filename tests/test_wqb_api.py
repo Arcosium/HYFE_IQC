@@ -359,3 +359,38 @@ def test_poll_does_not_give_up_while_progress_advances(monkeypatch):
     res = c.poll('https://api.worldquantbrain.com/simulations/SIM1',
                  deadline_s=100000, sleep=lambda _: None)
     assert res['status'] == 'COMPLETE'
+
+
+# ── 404 맹점 (2026-07-27): 제출 완료 후 submit 리소스 소멸 → 폴링 GET 404 ──
+
+def test_submit_alpha_404_on_poll_verified_as_submitted(monkeypatch):
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: None)
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
+    sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(404)]
+    # stage 실측 — 제출 완료 상태
+    sess.queue[('GET', '/alphas/A1')] = [FakeResp(200, {'stage': 'OS',
+                                                        'dateSubmitted': '2026-07-25T10:26:56-04:00'})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is True and 'stage=OS' in status
+
+
+def test_submit_alpha_404_on_poll_not_submitted_stays_failure(monkeypatch):
+    monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: None)
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
+    sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(404)]
+    sess.queue[('GET', '/alphas/A1')] = [FakeResp(200, {'stage': 'IS'})]   # 미제출
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is False and status.startswith('submit_http_404')
+
+
+def test_submit_alpha_404_on_post_is_plain_failure():
+    # POST 단계 404 = 알파 자체가 없음 — stage 검증 없이 실패 (GET 폴링 단계만 검증).
+    sess = FakeSession()
+    sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(404)]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is False and status.startswith('submit_http_404')

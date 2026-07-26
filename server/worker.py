@@ -76,6 +76,26 @@ DAILY_SUBMIT_BUDGET = int(os.environ.get('IQC_DAILY_SUBMIT_BUDGET', '4'))
 #   라이브 분포가 쌓이면 올린다.
 SUBMIT_MIN_VALUE = float(os.environ.get('IQC_SUBMIT_MIN_VALUE', '0.15'))
 
+# ── 결정론 레이어 (2026-07-26, WQB AAF·smilee 이식) — LLM 비용 0 ─────────────
+# ① 재조합(combine_layer): 탐색 라운드에서 검증된 IS 알파 둘을 결합해 후보 추가.
+# ② 개선(improve_layer): focus 라운드 phase 1 에서 부모의 회전율 등급에 맞는
+#    lookback 재스케일·trade_when·decay 변형 추가. 0 = 해당 레이어 OFF.
+COMBINE_LAYER_N = int(os.environ.get('IQC_COMBINE_PER_ROUND', '2'))
+IMPROVE_LAYER_N = int(os.environ.get('IQC_IMPROVE_PER_FOCUS', '3'))
+# ♻ 신규성 압력 (2026-07-26 라이브 진단): crossover 의 92%·sweep 75% 가 이미 시뮬한
+# (code,settings) 재생산이었다 — 캐시는 쿼터만 아끼고 라운드 슬롯은 낭비한다.
+# 캐시 히트 예정 후보를 근처 신규 변형(alpha_mutate)으로 교체해 슬롯당 학습량을 살린다.
+NOVELTY_REWRITE = os.environ.get('IQC_NOVELTY_REWRITE', '1') != '0'
+# 🚑 HT 구제 (2026-07-26 라이브 진단): Sharpe>=1.58 인데 fitness<1.0·turnover>0.4
+# 로 죽은 알파가 24h 에 59건 — focus(라운드당 1개)가 못 캐는 광맥. 탐색 라운드마다
+# 이 풀에서 부모 1개를 뽑아 회전 절감 변형을 N개 주입한다. 0 = OFF.
+HT_RESCUE_PER_ROUND = int(os.environ.get('IQC_HT_RESCUE_PER_ROUND', '2'))
+
+# ③ Yield Score (ACE) — arm 배분 점수에 '시뮬 1건당 게이트 통과율'을 섞는 비중.
+#   score = mean + w·(pass_sum+1)/(visits+2)  (라플라스 스무딩 — 냉시작 arm 은
+#   중립 0.5 근처에서 출발). 0 = 순수 mean(기존 동작).
+YIELD_WEIGHT = float(os.environ.get('IQC_YIELD_WEIGHT', '0.15'))
+
 # focus 라운드의 presim 구조적 overlap 임계값. focus 는 부모를 의도적으로 변형하므로
 # 부모/형제와 닮는 게 정상인데, 전역 presim_gate(임계 5)가 그걸 near-dup 으로 보고
 # 라이브 50~80% 를 드롭해 Gemini 생성을 통째로 낭비했다. 0 = focus 에서 overlap 드롭 OFF
@@ -179,6 +199,10 @@ class Worker(threading.Thread):
         self._stop_event = threading.Event()         # pause/stop 신호
         self._batch_proc_holder: dict[str, Any] = {} # 현재 배치 subprocess 보관
         self._lock = threading.Lock()
+        # ④ 패밀리 상관벽 (2026-07-26, AAF 패밀리 트리 이식) — 이번 세션에서
+        # CORRELATION 거절을 맞은 필드셋. DB 는 라운드 끝에야 기록되므로, 같은
+        # 라운드 안의 형제가 곧바로 같은 벽에 돌진하는 것은 이 메모리 셋이 막는다.
+        self._corr_fs_hold: set[frozenset] = set()
         # 차단 FAIL 이 0 인 알파는 그 자리에서 제출을 시도한다 — 단, 일일 예산 안에서만
         # (_submit_gate 참조).
 
@@ -219,6 +243,26 @@ class Worker(threading.Thread):
                 fs = frozenset(str(f) for f in (dict(genome).get('fields') or []) if f)
                 if fs and fs in set(_db.rejected_fieldsets(self.user_id)):
                     return False, 'fieldset_cooldown(24h)'
+                # ④ 패밀리 상관벽 — 상관은 필드셋(아이디어) 수준 속성이라 대표 1회의
+                # CORRELATION 거절이면 같은 필드셋 형제 전원을 24h 보류한다(AAF 패밀리
+                # 트리의 '대표만 검사' 경제화). 탈상관 focus 자식은 필드를 바꾸므로
+                # 다른 필드셋 = 통과. 시뮬·학습은 그대로, **제출 API 만** 아낀다.
+                if fs and (fs in self._corr_fs_hold
+                           or fs in set(_db.rejected_fieldsets(
+                               self.user_id, min_count=1,
+                               reason_contains='CORRELATION'))):
+                    return False, 'family_corr_wall(24h)'
+                # PURE_POWER_POOL_THEME 도 필드셋 수준 속성이다 — 순수 PP 테마
+                # 데이터셋 조합은 품질과 무관하게 거절된다(2026-07-26 실측 3건).
+                # 같은 필드셋 형제의 제출 시도는 제출 락만 낭비하므로 24h 보류.
+                if fs and fs in set(_db.rejected_fieldsets(
+                        self.user_id, min_count=1,
+                        reason_contains='PURE_POWER_POOL')):
+                    return False, 'family_pure_theme_wall(24h)'
+                # ④ 일일 패밀리 dedup — 오늘 이미 같은 필드셋을 성공 제출했으면 예산
+                # 4칸을 형제가 잠식하지 않게 보류(내일 다시 가능).
+                if fs and fs in set(_db.submitted_fieldsets_today(self.user_id)):
+                    return False, 'family_dup_today'
             except Exception as e:
                 LOG.warning('fieldset cooldown 조회 실패 (제출 계속): %s', e)
         if DAILY_SUBMIT_BUDGET <= 0:
@@ -437,6 +481,11 @@ class Worker(threading.Thread):
 
         u = _db.get_user(self.user_id)
 
+        # ④ 상관벽 메모리 홀드셋은 '같은 라운드 안의 형제' 차단용이다. 라운드가 끝나면
+        # DB(alphas.submit_status) 가 24h 윈도우로 이어받으므로 여기서 비운다 —
+        # 안 비우면 세션이 길수록 24h 를 넘겨서까지 과차단한다.
+        self._corr_fs_hold.clear()
+
         # 전략스펙 최우선 — 사용자가 리서치로 명시 요청한 아이디어다. focus 큐 뒤에
         # 세우면 (거의 항상 비어있지 않은) 큐에 밀려 영원히 굶는다.
         # 스펙은 1회성이라 소비되면 큐가 비고 워커는 평소 GA 로 되돌아간다.
@@ -627,7 +676,21 @@ class Worker(threading.Thread):
                 _epsilon = _retrospect.adaptive_epsilon(_trend)
             except Exception:
                 _epsilon = 0.2
-            _stats = {a['arm_key']: a['mean'] for a in _db.bandit_stats(self.user_id)}
+            # Yield Score 블렌딩 (v8) — 통과 없는 시뮬만 쌓는 arm 을 감점하고
+            # 쿼터가 고수율 arm 으로 흐르게 한다. epsilon 탐색은 그대로 유지.
+            # ⚠ 프라이어는 0.5 가 아니라 **전역 yield** 에 앵커링한다 — 라이브 실측
+            #   (2026-07-26) mean 0.02~0.04 · 전역 yield 0.011 스케일에서 라플라스
+            #   (p+1)/(v+2)=0.5 프라이어는 콜드 arm 에 mean 의 2~3배 보너스를 줘
+            #   착취 순위를 통째로 뒤집는다. 전역 앵커면 콜드 arm 은 중립이다.
+            _arms = _db.bandit_stats(self.user_id)
+            _tv = sum(int(a['visits']) for a in _arms)
+            _g = (sum(int(a.get('pass_sum') or 0) for a in _arms) / _tv) if _tv else 0.0
+            _K = 50.0   # 관측 50회쯤부터 arm 실측이 프라이어를 이긴다
+            _stats = {
+                a['arm_key']: a['mean'] + YIELD_WEIGHT
+                * ((int(a.get('pass_sum') or 0) + _K * _g) / (int(a['visits']) + _K))
+                for a in _arms
+            }
             # 위원회 정책 (2026-07-23) — 유효한 정책이 있으면 슬롯 배정의 주도권을 LLM
             # 위원회에 넘긴다(서치스페이스를 사람이 아니라 AI 가 정한다는 방침).
             # 정책이 없거나 낡았으면 기존 epsilon-greedy 그대로 (fail-open).
@@ -741,6 +804,63 @@ class Worker(threading.Thread):
                       f'변이 {_origins.get("mutate", 0)} · 교차 {_origins.get("crossover", 0)}'
                       + (f' (밴딧 arm {min(len(_slot_settings), _origins.get("random", 0))}개 주입)'
                          if _slot_settings else ''))
+
+            # ── 결정론 레이어 후보 주입 (AAF·smilee 이식) — 이하 전 후보는 기존
+            #    파이프라인(repair→lint→hygiene→캐시→시뮬→DB→밴딧)을 그대로 통과한다.
+            try:
+                import random as _rnd_mod
+                _det_rng = _rnd_mod.Random(gen_salt or round_num)
+                if COMBINE_LAYER_N > 0 and not is_focus and not is_spec_round:
+                    from . import combine_layer
+                    _cpool = _db.combine_pool(self.user_id)
+                    _ccands = combine_layer.candidates(
+                        _cpool, n=COMBINE_LAYER_N, rng=_det_rng)
+                    if _ccands:
+                        strategies.extend(_ccands)
+                        self._log(round_num,
+                                  f'  🧬 재조합 레이어 — 검증 알파 풀 {len(_cpool)}개'
+                                  f'에서 결합 후보 {len(_ccands)}개 추가')
+                if (HT_RESCUE_PER_ROUND > 0 and not is_focus
+                        and not is_spec_round):
+                    from . import improve_layer as _improve
+                    _hpool = _db.ht_rescue_pool(self.user_id)
+                    if _hpool:
+                        _hp = _det_rng.choice(_hpool[:10])   # 상위 10 순환
+                        _pset = {k: str(_hp[k]) for k in
+                                 ('universe', 'neutralization', 'decay', 'truncation')
+                                 if _hp.get(k) not in (None, '')}
+                        _hvars = _improve.variants(
+                            _hp['code'], _pset, {'turnover': _hp.get('turnover')},
+                            n=HT_RESCUE_PER_ROUND, rng=_det_rng)
+                        for _i, _v in enumerate(_hvars):
+                            _v['idx'] = 51 + _i     # 41+ 는 focus 개선 대역
+                            _v['origin'] = 'ht_rescue'
+                            _v['parent_alpha_id'] = _hp['id']
+                            _v['desc'] = (f'🚑 HT구제 α#{_hp["id"]}'
+                                          f'(S{float(_hp["sharpe"] or 0):.2f}·'
+                                          f'to{float(_hp["turnover"] or 0):.2f}) — '
+                                          + _v['desc'])
+                        if _hvars:
+                            strategies.extend(_hvars)
+                            self._log(round_num,
+                                      f'  🚑 HT 구제 레이어 — 고샤프·고회전 풀 '
+                                      f'{len(_hpool)}개 중 α#{_hp["id"]} 회전 절감 '
+                                      f'변형 {len(_hvars)}개 주입')
+                if IMPROVE_LAYER_N > 0 and is_focus and phase == 1 and parent_code:
+                    from . import improve_layer
+                    _ivars = improve_layer.variants(
+                        parent_code, parent_settings, parent_metrics,
+                        n=IMPROVE_LAYER_N, rng=_det_rng)
+                    for _v in _ivars:
+                        _v['parent_alpha_id'] = (focus_entry or {}).get('parent_alpha_id')
+                    if _ivars:
+                        strategies.extend(_ivars)
+                        self._log(round_num,
+                                  f'  🔧 개선 레이어 — 부모 회전율 등급 '
+                                  f'{improve_layer.turnover_class(parent_metrics.get("turnover"))}'
+                                  f' 그리드 변형 {len(_ivars)}개 추가')
+            except Exception as _e:
+                self._log_quiet(round_num, f'⚠ 결정론 레이어 실패(무시): {_e}')
 
             if is_focus:
                 _dcomp: dict[str, int] = {}
@@ -883,6 +1003,7 @@ class Worker(threading.Thread):
             # 캐시 hit 분리 (settings-aware 키: code_hash + settings_fingerprint).
             cached_results: list[dict] = []
             to_simulate: list[dict] = []
+            _novelty_n = 0
             seen: set[str] = set()
             settings_by_idx: dict[int, dict] = {
                 int(s['idx']): (s.get('settings') or {}) for s in strategies
@@ -906,11 +1027,31 @@ class Worker(threading.Thread):
                     # **우리 쪽 사정**으로 실패한 행이 섞여 있어(2026-07-21 에러의 75%),
                     # 캐시로 굳히면 멀쩡한 알파가 영구히 죽은 것으로 남는다.
                     cached = None
+                # ♻ 신규성 압력 — 기지 조합이면 근처 신규 변형으로 교체해 시뮬한다.
+                #   spec 은 'LLM 산출물 원본 측정'이 목적이라 원본 그대로 둔다(캐시 응답).
+                if cached and NOVELTY_REWRITE and (s.get('origin') or '') != 'spec':
+                    _nv = _novelty_rewrite(self.user_id, s['code'], fp, seen)
+                    if _nv:
+                        seen.add(f'{_db.code_hash(_nv)}:{fp}')
+                        s['code'] = _nv
+                        # ⚠ 유전체는 비운다 — 코드만 바꾸면 genome↔code 대응이 깨져
+                        #   엘리트 시딩이 오염된다(2026-07-11 손실 압축 교훈의 역방향).
+                        #   genome-less 라도 combine_pool 재료로는 살아남는다.
+                        s['genome'] = None
+                        genome_by_idx[int(s['idx'])] = {}
+                        s['desc'] = '♻ 신규화: ' + (s.get('desc') or '')
+                        _novelty_n += 1
+                        to_simulate.append(s)
+                        continue
                 if cached:
                     cached_results.append(result_cache.materialize(s, cached, round_num))
                 else:
                     to_simulate.append(s)
             cache_hit_total = len(cached_results)
+            if _novelty_n:
+                self._log(round_num,
+                          f'  ♻ 신규성 압력 — 기지(旣知) 조합 {_novelty_n}개를 '
+                          f'근처 신규 변형으로 교체 (슬롯 낭비 방지)')
 
             # 라운드의 시뮬 대상 알파를 WQB REST API 로 넘긴다 — ApiBackend 가 ThreadPool 로
             # 동시 실행하고(계정 tier 만큼), 결과를 idx 순서로 정렬해 돌려준다.
@@ -971,6 +1112,20 @@ class Worker(threading.Thread):
                         except Exception as _e:
                             self._log_quiet(_round_num,
                                             f'⚠ submit_attempt 기록 실패: {_e}')
+                    # ④ 상관 거절 즉시 캡처 — DB 기록은 라운드 끝이라, 같은 라운드의
+                    # 형제 제출을 막으려면 여기(부분 결과 스트림)에서 잡아야 한다.
+                    if (submit_status.startswith('rejected:')
+                            and 'CORRELATION' in submit_status.upper()):
+                        try:
+                            _g = genome_by_idx.get(s_idx) or {}
+                            _fs = frozenset(str(f) for f in (_g.get('fields') or []) if f)
+                            if _fs:
+                                self._corr_fs_hold.add(_fs)
+                                self._log(_round_num,
+                                          f'      🧱 #{s_idx} 상관벽 필드셋 홀드 — '
+                                          f'같은 필드셋 형제는 이번 제출 보류')
+                        except Exception:
+                            pass
 
                 try:
                     results = wqb_backend.simulate_batch(
@@ -1197,10 +1352,12 @@ class Worker(threading.Thread):
                             'family': _gn.get('family'),
                             'combine': _gn.get('combine'),
                         }
+                        _passed = _is_best_alpha(r)   # yield 분자 — 게이트 통과 여부
                         for _ak in _bandit.arm_keys_for_assignment(_assign):
                             _dim = _ak.split(':', 1)[0]
                             _db.bandit_update(self.user_id, _ak, _rwd, round_num,
-                                              dimension=_dim, decay_k=BANDIT_DECAY_K)
+                                              dimension=_dim, decay_k=BANDIT_DECAY_K,
+                                              passed=_passed)
                     except Exception as _e:
                         self._log_quiet(round_num, f'⚠ bandit update 실패: {_e}')
 
@@ -1508,6 +1665,25 @@ class Worker(threading.Thread):
             return
         # 그 외는 Python logger 로만.
         LOG.info('[round %d] %s', round_num, s[:300])
+
+
+def _novelty_rewrite(user_id: int, code: str, fp: str, seen: set) -> str | None:
+    """이미 시뮬한 (code, settings) 조합을 **아직 안 해본** 근처 변형으로 바꿔본다.
+
+    alpha_mutate 의 수치/연산자 변형을 순서대로 시도해 (code_hash, fp) 가 캐시에도
+    이번 라운드(seen)에도 없는 첫 변형을 돌려준다. 없으면 None(캐시 응답 유지).
+    순수 변형 + 캐시 조회뿐이라 싸다. 예외는 호출부가 아니라 여기서 삼킨다.
+    """
+    try:
+        from . import alpha_mutate as _am
+        for v in _am.mutate(code, max_variants=12, include_negation=False):
+            if f'{_db.code_hash(v)}:{fp}' in seen:
+                continue
+            if result_cache.lookup(user_id, v, fp) is None:
+                return v
+    except Exception:
+        pass
+    return None
 
 
 def _extract_self_corr_value(fail_items: list[dict]) -> str:

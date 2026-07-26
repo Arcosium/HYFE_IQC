@@ -47,7 +47,7 @@ _INITIALIZED = False
 # 스키마/데이터 마이그레이션 버전. ALTER·백필을 프로세스마다 재실행하지 않도록
 # PRAGMA user_version 게이트의 기준값. 향후 스키마/데이터 마이그레이션을
 # 추가하면 반드시 이 값을 올려야 새 마이그레이션이 1회 적용된다.
-_SCHEMA_VERSION = 7   # v7: 리서치→가설→전략스펙 파이프라인 + users.backend(능력 기반 백엔드)
+_SCHEMA_VERSION = 8   # v8: Yield Score — bandit_arms.pass_sum (+ superalpha_runs 테이블)
 _FERNET: Fernet | None = None
 
 FEEDBACK_CAP = 30
@@ -319,6 +319,21 @@ def init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_bandit_user_dim ON bandit_arms(user_id, dimension);
 
+            -- ── v8: 슈퍼알파 리서치 런 (⑤, AAF SuperAlpha 이식) ────────────────
+            -- OS 알파 풀 위의 selection×combo 그리드 시뮬 기록. 자동 제출 없음 —
+            -- 결과를 쌓아두고 제출 판단은 사람이 한다.
+            CREATE TABLE IF NOT EXISTS superalpha_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ts REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',  -- running|done|error
+                seed_plus INTEGER NOT NULL DEFAULT 0,
+                selection TEXT NOT NULL DEFAULT '',
+                results TEXT NOT NULL DEFAULT '[]',
+                error TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             -- ── v7: 리서치 → 가설 → 전략스펙 (LLM 파이프라인) ──────────────────
             -- 사용자가 요청을 넣으면 research_runs 1건이 생기고, Arachne 근거 수집 →
             -- LLM 가설 N개(hypotheses) → 가설마다 타입드 유전체 후보 K개(strategy_specs).
@@ -540,6 +555,14 @@ def init() -> None:
                     conn.execute(
                         "UPDATE users SET backend='api' "
                         "WHERE account_type='research_consultant'")
+
+                # v8 (2026-07-26): Yield Score — arm 별 '게이트 통과(best)' 카운트.
+                # 시뮬 1건당 통과 확률(yield = pass_sum/visits)이 arm 배분에 섞인다
+                # (ACE 대회 Yield Score 정신 — 무의미 시뮬로 넓힌 arm 을 감점).
+                if _column_missing(conn, 'bandit_arms', 'pass_sum'):
+                    conn.execute(
+                        'ALTER TABLE bandit_arms ADD COLUMN pass_sum '
+                        'INTEGER NOT NULL DEFAULT 0')
 
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         _INITIALIZED = True
@@ -1439,6 +1462,81 @@ def elite_seeds(user_id: int, top_n: int = 5, *,
     return out[:top_n]
 
 
+def combine_pool(user_id: int, *, window: int = 600, top: int = 40,
+                 min_sharpe: float = 1.0) -> list[dict[str, Any]]:
+    """재조합 레이어(combine_layer)용 검증 알파 풀.
+
+    최근 `window` 행 중 오류 없고 sharpe >= min_sharpe 인 행을 code_hash 당
+    최고 sharpe 1개만 남겨 sharpe 내림차순 `top` 개. elite_seeds 와 달리
+    **genome 유무를 안 본다** — 재조합은 코드 수준 연산이라 LLM 산(産)
+    genome-less 알파도 재료가 된다. metrics 는 파싱해서 dict 로 돌려준다.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT id, code, code_hash, metrics, sharpe, universe, '
+            'neutralization, decay, truncation, self_corr '
+            'FROM alphas WHERE user_id=? AND TRIM(error_text)=\'\' '
+            'AND sharpe IS NOT NULL AND sharpe >= ? '
+            'ORDER BY id DESC LIMIT ?',
+            (user_id, float(min_sharpe), int(window)),
+        ).fetchall()
+    best_by_code: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        d = dict(r)
+        try:
+            d['metrics'] = json.loads(d.get('metrics') or '{}')
+        except (TypeError, ValueError):
+            d['metrics'] = {}
+        key = d.get('code_hash') or d.get('code') or ''
+        prev = best_by_code.get(key)
+        if prev is None or float(d.get('sharpe') or 0) > float(prev.get('sharpe') or 0):
+            best_by_code[key] = d
+    out = sorted(best_by_code.values(),
+                 key=lambda d: float(d.get('sharpe') or 0), reverse=True)
+    return out[:int(top)]
+
+
+def ht_rescue_pool(user_id: int, *, window: int = 600, top: int = 30,
+                   min_sharpe: float = 1.58, max_fitness: float = 1.0,
+                   min_turnover: float = 0.40) -> list[dict[str, Any]]:
+    """🚑 HT 구제 레이어용 부모 풀 — '신호는 검증됐고 회전만 문제'인 알파들.
+
+    2026-07-26 라이브 실측: 24h 신규 시뮬 중 Sharpe>=1.58 이 59건인데 전원
+    fitness 0.49~0.69 (컷 1.0 미달) + turnover 0.48~1.17 — 고샤프 영역 자체가
+    초고회전 구역이라 Fitness 벽에서 전멸했다. focus 큐(라운드당 1개)로는 이
+    광맥을 못 다 캐므로, 탐색 라운드가 이 풀에서 부모를 뽑아 improve_layer 의
+    HT 변형(trade_when·decay 증폭·창 축소)을 결정론으로 주입한다.
+    code_hash 당 최고 sharpe 1개, sharpe 내림차순 top 개.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT id, code, code_hash, metrics, sharpe, fitness, turnover, '
+            'universe, neutralization, decay, truncation '
+            "FROM alphas WHERE user_id=? AND TRIM(error_text)='' "
+            'AND sharpe >= ? AND fitness IS NOT NULL AND fitness < ? '
+            'AND turnover IS NOT NULL AND turnover > ? '
+            'ORDER BY id DESC LIMIT ?',
+            (user_id, float(min_sharpe), float(max_fitness),
+             float(min_turnover), int(window)),
+        ).fetchall()
+    best_by_code: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        d = dict(r)
+        try:
+            d['metrics'] = json.loads(d.get('metrics') or '{}')
+        except (TypeError, ValueError):
+            d['metrics'] = {}
+        key = d.get('code_hash') or d.get('code') or ''
+        prev = best_by_code.get(key)
+        if prev is None or float(d.get('sharpe') or 0) > float(prev.get('sharpe') or 0):
+            best_by_code[key] = d
+    out = sorted(best_by_code.values(),
+                 key=lambda d: float(d.get('sharpe') or 0), reverse=True)
+    return out[:int(top)]
+
+
 def operator_preference_stats(user_id: int, lookback_alphas: int = 200,
                                 top_n_ops: int = 8,
                                 top_n_fields: int = 12) -> dict[str, Any]:
@@ -1709,6 +1807,24 @@ def list_logs_since(user_id: int, since_id: int = 0, limit: int = 500) -> list[d
     return [dict(r) for r in rows]
 
 
+def list_logs_tail(user_id: int, n: int = 1500) -> list[dict[str, Any]]:
+    """마지막 n 줄(비우기 지점 존중, ID 오름차순) — 초기 로딩용.
+
+    2026-07-26: 로그 106k 행 시점에 초기 로딩이 backlog 전체(최대 30k 줄, 60 GET)를
+    재생하느라 수십 초 걸렸다. 화면 DOM 캡이 5000줄이라 그 대부분은 그리자마자
+    버려지는 낭비 — 처음부터 꼬리만 준다.
+    """
+    init()
+    since = get_last_cleared_log_id(user_id)
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT id, round_num, ts, level, line FROM logs '
+            'WHERE user_id=? AND id>? ORDER BY id DESC LIMIT ?',
+            (user_id, int(since), int(n)),
+        ).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
 def latest_log_id(user_id: int) -> int:
     init()
     with _DB_LOCK, _connect() as conn:
@@ -1740,12 +1856,14 @@ def list_rounds(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def bandit_update(user_id: int, arm_key: str, reward: float, round_num: int,
-                  *, dimension: str = '', decay_k: float = 0.0) -> None:
+                  *, dimension: str = '', decay_k: float = 0.0,
+                  passed: bool = False) -> None:
     """arm 의 보상 통계를 갱신(upsert). 알파 완료마다 즉시 flush.
 
     decay_k>0 이면 기존 통계에 exp(-decay_k*(round_num-last_round)) 시간감쇠를 적용한 뒤
     새 reward 를 더한다 (오래된 보상의 가중치를 줄임). visits 는 감쇠하지 않는다
     (UCB 탐험 항 분모를 안정적으로 유지하기 위해 원시 카운트 보존).
+    passed=True 면 pass_sum 도 +1 — yield(=pass_sum/visits) 의 분자다 (v8, 감쇠 없음).
     """
     r = _coerce_float_or_none(reward)
     if r is None:
@@ -1754,7 +1872,7 @@ def bandit_update(user_id: int, arm_key: str, reward: float, round_num: int,
     init()
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
-            'SELECT reward_sum, reward_sq_sum, visits, last_round, dimension '
+            'SELECT reward_sum, reward_sq_sum, visits, last_round, dimension, pass_sum '
             'FROM bandit_arms WHERE user_id=? AND arm_key=?',
             (user_id, arm_key),
         ).fetchone()
@@ -1763,6 +1881,7 @@ def bandit_update(user_id: int, arm_key: str, reward: float, round_num: int,
             rss = float(row['reward_sq_sum'])
             vis = int(row['visits'])
             lr = int(row['last_round'])
+            ps = int(row['pass_sum'] or 0) + (1 if passed else 0)
             new_last_round = max(lr, int(round_num))
             new_dim = dimension or row['dimension']
             if decay_k > 0:
@@ -1774,15 +1893,17 @@ def bandit_update(user_id: int, arm_key: str, reward: float, round_num: int,
             vis += 1
             conn.execute(
                 'UPDATE bandit_arms SET reward_sum=?, reward_sq_sum=?, visits=?, '
-                'last_round=?, updated_at=?, dimension=? WHERE user_id=? AND arm_key=?',
-                (rs, rss, vis, new_last_round, now, new_dim, user_id, arm_key),
+                'last_round=?, updated_at=?, dimension=?, pass_sum=? '
+                'WHERE user_id=? AND arm_key=?',
+                (rs, rss, vis, new_last_round, now, new_dim, ps, user_id, arm_key),
             )
         else:
             conn.execute(
                 'INSERT INTO bandit_arms (user_id, arm_key, dimension, '
-                'reward_sum, reward_sq_sum, visits, last_round, updated_at) '
-                'VALUES (?,?,?,?,?,?,?,?)',
-                (user_id, arm_key, dimension or '', r, r * r, 1, round_num, now),
+                'reward_sum, reward_sq_sum, visits, last_round, updated_at, pass_sum) '
+                'VALUES (?,?,?,?,?,?,?,?,?)',
+                (user_id, arm_key, dimension or '', r, r * r, 1, round_num, now,
+                 1 if passed else 0),
             )
 
 
@@ -1797,13 +1918,15 @@ def bandit_stats(user_id: int, dimension: str | None = None) -> list[dict[str, A
     with _DB_LOCK, _connect() as conn:
         if dimension is not None:
             rows = conn.execute(
-                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, '
+                'last_round, pass_sum '
                 'FROM bandit_arms WHERE user_id=? AND dimension=? ORDER BY id ASC',
                 (user_id, dimension),
             ).fetchall()
         else:
             rows = conn.execute(
-                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+                'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, '
+                'last_round, pass_sum '
                 'FROM bandit_arms WHERE user_id=? ORDER BY id ASC',
                 (user_id,),
             ).fetchall()
@@ -1812,6 +1935,7 @@ def bandit_stats(user_id: int, dimension: str | None = None) -> list[dict[str, A
         vis = int(row['visits'])
         rs = float(row['reward_sum'])
         rss = float(row['reward_sq_sum'])
+        ps = int(row['pass_sum'] or 0)
         mean = rs / vis if vis > 0 else 0.0
         var = max(0.0, rss / vis - mean * mean) if vis > 0 else 0.0
         out.append({
@@ -1823,16 +1947,59 @@ def bandit_stats(user_id: int, dimension: str | None = None) -> list[dict[str, A
             'reward_sum': rs,
             'reward_sq_sum': rss,
             'last_round': int(row['last_round']),
+            'pass_sum': ps,
+            # Yield Score (ACE) — 시뮬 1건당 게이트 통과율. 원시비율(스무딩 없음);
+            # 배분에 섞을 때는 호출부가 라플라스 스무딩한다.
+            'yield': (ps / vis) if vis > 0 else 0.0,
         })
     return out
 
 
+def superalpha_start(user_id: int, seed_plus: int, selection: str) -> int:
+    """슈퍼알파 런 시작 기록 → run_id."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        cur = conn.execute(
+            'INSERT INTO superalpha_runs (user_id, ts, status, seed_plus, selection) '
+            'VALUES (?,?,?,?,?)',
+            (user_id, time.time(), 'running', int(seed_plus), selection))
+        return int(cur.lastrowid)
+
+
+def superalpha_finish(run_id: int, status: str, results: list[dict],
+                      error: str = '') -> None:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        conn.execute(
+            'UPDATE superalpha_runs SET status=?, results=?, error=? WHERE id=?',
+            (status, json.dumps(results, ensure_ascii=False), error[:600],
+             int(run_id)))
+
+
+def superalpha_runs_list(user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT * FROM superalpha_runs WHERE user_id=? ORDER BY id DESC LIMIT ?',
+            (user_id, int(limit))).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d['results'] = json.loads(d.get('results') or '[]')
+        except (TypeError, ValueError):
+            d['results'] = []
+        out.append(d)
+    return out
+
+
 def bandit_arm(user_id: int, arm_key: str) -> dict[str, Any] | None:
-    """단일 arm dict 또는 None. 반환 키: arm_key, dimension, visits, mean, var, reward_sum, reward_sq_sum, last_round."""
+    """단일 arm dict 또는 None. 반환 키: bandit_stats 와 동일 (pass_sum/yield 포함)."""
     init()
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
-            'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, last_round '
+            'SELECT arm_key, dimension, visits, reward_sum, reward_sq_sum, '
+            'last_round, pass_sum '
             'FROM bandit_arms WHERE user_id=? AND arm_key=?',
             (user_id, arm_key),
         ).fetchone()
@@ -1841,6 +2008,7 @@ def bandit_arm(user_id: int, arm_key: str) -> dict[str, Any] | None:
     vis = int(row['visits'])
     rs = float(row['reward_sum'])
     rss = float(row['reward_sq_sum'])
+    ps = int(row['pass_sum'] or 0)
     mean = rs / vis if vis > 0 else 0.0
     var = max(0.0, rss / vis - mean * mean) if vis > 0 else 0.0
     return {
@@ -1852,6 +2020,8 @@ def bandit_arm(user_id: int, arm_key: str) -> dict[str, Any] | None:
         'reward_sum': rs,
         'reward_sq_sum': rss,
         'last_round': int(row['last_round']),
+        'pass_sum': ps,
+        'yield': (ps / vis) if vis > 0 else 0.0,
     }
 
 
@@ -2529,24 +2699,32 @@ def set_alpha_submit_result(alpha_pk: int, submitted: bool,
 
 
 def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
-                       min_count: int = 3) -> list[frozenset]:
+                       min_count: int = 3,
+                       reason_contains: str | None = None) -> list[frozenset]:
     """최근 N시간 동안 제출이 `rejected:` 로 min_count 회 이상 끝난 **필드 조합**들.
 
     2026-07-24 실측: 같은 mdl177 3종 필드셋의 변형 19개가 3시간 동안 전부
     PROD_CORRELATION/LOW_2Y 로 거절됐다 — 상관은 필드(아이디어) 수준 속성이라
     중립화·감쇠만 바꾼 형제는 같은 벽에 부딪힌다. 이 목록이 제출 게이트의
     쿨다운 근거가 된다 (시뮬은 계속 하되 **제출만** 보류 — 학습 데이터는 쌓인다).
+
+    reason_contains 를 주면 거절 사유에 그 문자열(대소문자 무시)이 든 행만 센다 —
+    ④ 패밀리 상관벽: 'CORRELATION' + min_count=1 로 부르면 '대표 1회 거절 = 같은
+    필드셋 형제 전원 보류'(AAF 패밀리 트리의 검사 경제화)가 된다.
     """
     init()
     since = time.time() - float(since_s)
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
-            "SELECT genome FROM alphas WHERE user_id=? AND ts>? "
+            "SELECT genome, submit_status FROM alphas WHERE user_id=? AND ts>? "
             "AND submit_status LIKE 'rejected:%' AND genome IS NOT NULL",
             (user_id, since),
         ).fetchall()
+    needle = (reason_contains or '').upper()
     cnt: dict[frozenset, int] = {}
     for r in rows:
+        if needle and needle not in str(r['submit_status'] or '').upper():
+            continue
         try:
             g = json.loads(r['genome'])
             fs = frozenset(str(f) for f in (g.get('fields') or []) if f)
@@ -2555,3 +2733,33 @@ def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
         if fs:
             cnt[fs] = cnt.get(fs, 0) + 1
     return [fs for fs, n in cnt.items() if n >= int(min_count)]
+
+
+def submitted_fieldsets_today(user_id: int, now: float | None = None) -> list[frozenset]:
+    """오늘(EST — submitted_today 와 같은 경계) 성공 제출된 알파들의 필드 조합.
+
+    ④ 일일 예산 4칸을 같은 아이디어(필드셋)의 형제들이 잠식하지 않게 하는
+    dedup 근거 — 이미 오늘 낸 필드셋의 형제는 제출을 보류한다.
+    """
+    import datetime as _dt
+    ts = time.time() if now is None else float(now)
+    est = _dt.datetime.utcfromtimestamp(ts) - _dt.timedelta(hours=5)
+    midnight_est = est.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = (midnight_est + _dt.timedelta(hours=5)).replace(
+        tzinfo=_dt.timezone.utc).timestamp()
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT genome FROM alphas WHERE user_id=? AND ts>=? '
+            'AND submitted=1 AND genome IS NOT NULL', (user_id, start),
+        ).fetchall()
+    out: set[frozenset] = set()
+    for r in rows:
+        try:
+            g = json.loads(r['genome'])
+            fs = frozenset(str(f) for f in (g.get('fields') or []) if f)
+        except (TypeError, ValueError):
+            continue
+        if fs:
+            out.add(fs)
+    return list(out)
