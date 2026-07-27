@@ -83,6 +83,16 @@ def variants(parent_code: str, parent_settings: dict | None,
         klass = turnover_class((parent_metrics or {}).get('turnover'))
 
         cands: list[tuple[str, str, dict]] = []   # (code, desc, settings)
+        # ⚠ 2026-07-27 GLB 실측 교정: **창 재스케일보다 사후 감쇠가 우선**이다.
+        #   창을 늘리면 신호 자체가 죽는다(CLV 5일 S=1.01 → 10일 0.36 → 20일 0.46).
+        #   반면 창은 그대로 두고 ts_decay_linear 로 포지션 변화만 평활하면
+        #   회전율이 반토막(1.18→0.60) 나면서 Sharpe 는 오히려 올랐다(1.01→1.07).
+        #   그날 유일하게 제출권에 든 알파가 이 처방에서 나왔다.
+        if klass in ('HT', 'MID'):
+            for k in (20, 30):
+                cands.append((f'ts_decay_linear({code}, {k})',
+                              f'🔧 개선[{klass}·사후감쇠 {k}]: 창 유지·회전율만 절감',
+                              dict(settings)))
         for g in GRIDS[klass]:
             new = rescale_windows(code, g)
             if new:

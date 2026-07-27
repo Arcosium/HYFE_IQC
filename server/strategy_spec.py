@@ -35,9 +35,19 @@ FIELDS_SHOWN_PER_FAMILY = 14
 LLM 이 목록 밖 필드를 내면 validate_and_build 가 폐기한다."""
 
 
+def _active_palette() -> dict:
+    """지금 조건에서 **실제로 시뮬 가능한** 필드 팔레트.
+
+    탐색 조건이 USA 밖 리전이면 그 리전 팔레트(genome_models._REGION_DATASETS)를
+    쓴다. 2026-07-27 GLB 전환에서 드러난 문제: USA 정적 팔레트만 보여 주면 LLM 이
+    GLB 에 없는 필드를 내고, 아래 validate_and_build 가 전부 폐기해 스펙이 0 이 된다.
+    """
+    return dict(getattr(gm, '_REGION_DATASETS', None) or gm.SHARED_DATASETS)
+
+
 def _palette_block() -> str:
     lines = []
-    for fam, fields in gm.SHARED_DATASETS.items():
+    for fam, fields in _active_palette().items():
         shown = list(fields)[:FIELDS_SHOWN_PER_FAMILY]
         more = len(fields) - len(shown)
         tail = f'  … 외 {more}개' if more > 0 else ''
@@ -155,7 +165,8 @@ def validate_and_build(raw_genome: dict, *, account_type: str = 'research_consul
     if g is None:
         return None
     # 필드가 팔레트 밖이면(할루시네이션) 폐기 — 조용히 pv 로 갈아끼우면 가설이 증발한다.
-    known = {f for fam in gm.SHARED_DATASETS.values() for f in fam}
+    # ⚠ 팔레트는 **현재 조건 기준**이다(리전 전환 시 USA 정적 목록으로 재면 전량 폐기).
+    known = {f for fam in _active_palette().values() for f in fam}
     if not set(g.fields) <= known:
         LOG.info('spec 폐기: 팔레트 밖 필드 %s', set(g.fields) - known)
         return None
@@ -188,7 +199,8 @@ def validate_and_build(raw_genome: dict, *, account_type: str = 'research_consul
 
 
 def concretize(hypothesis: dict, evidence: str = '', *, k: int = 4,
-               account_type: str = 'research_consultant') -> list[dict[str, Any]]:
+               account_type: str = 'research_consultant',
+               think: bool = True) -> list[dict[str, Any]]:
     """가설 1개 → 검증 통과한 전략 후보 k개(이하). 실패 시 빈 리스트(fail-open).
 
     반환 원소: {genome, code, settings, delay, why}
@@ -220,7 +232,7 @@ def concretize(hypothesis: dict, evidence: str = '', *, k: int = 4,
                + '\n'.join(f'- {c}' for c in seen_codes) if seen_codes else ''))
         raw = _llm([{'role': 'system', 'content': _system_prompt()},
                     {'role': 'user', 'content': user}],
-                   temperature=0.6 + 0.2 * attempt)
+                   temperature=0.6 + 0.2 * attempt, think=think)
         items = parse_json_array(raw)
         if not items:
             LOG.warning('가설 "%s" 후보 파싱 실패 (시도 %d, 응답 %d자)',

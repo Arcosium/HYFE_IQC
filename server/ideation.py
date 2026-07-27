@@ -47,19 +47,52 @@ LLM_TIMEOUT_S = int(__import__('os').environ.get('IQC_IDEATE_TIMEOUT_S', '900'))
 
 
 def _llm(messages: list[dict], *, max_tokens: int = 24000,
-         temperature: float = 0.7, timeout: int | None = None) -> str:
-    """arcllm 호출. 실패/타임아웃이면 빈 문자열 (호출자가 fail-open)."""
+         temperature: float = 0.7, timeout: int | None = None,
+         think: bool = True) -> str:
+    """arcllm 호출. 실패/타임아웃이면 빈 문자열 (호출자가 fail-open).
+
+    think=False 면 추론을 끈다 (QuantInSight 와 같은 규약:
+    `chat_template_kwargs.enable_thinking`). 2026-07-27 사장 지시 —
+    **판단은 1회만 추론으로, 그 뒤 '식 쓰기' 반복은 추론 없이** 돌린다.
+    추론 반복은 느리고(수 분/회) 빈 응답·폭주 위험이 있다.
+    """
     try:
         import arcllm
     except ImportError:
         LOG.warning('arcllm 미설치 — 아이디어 생성 건너뜀')
         return ''
     try:
-        return arcllm.chat(messages, max_tokens=max_tokens, temperature=temperature,
-                           timeout=int(timeout or LLM_TIMEOUT_S))
+        if think:
+            return arcllm.chat(messages, max_tokens=max_tokens,
+                               temperature=temperature,
+                               timeout=int(timeout or LLM_TIMEOUT_S))
+        return _chat_no_think(messages, max_tokens=max_tokens,
+                              temperature=temperature,
+                              timeout=int(timeout or LLM_TIMEOUT_S))
     except Exception as e:
         LOG.warning('LLM 호출 실패: %s: %s', type(e).__name__, e)
         return ''
+
+
+def _chat_no_think(messages: list[dict], *, max_tokens: int, temperature: float,
+                   timeout: int) -> str:
+    """추론 OFF 호출 — arcllm 이 이 노브를 노출하지 않아 여기서 직접 POST 한다."""
+    import json as _json
+    import os as _os
+    import urllib.request as _u
+    base = (_os.environ.get('LOCAL_LLM_BASE_URL')
+            or 'http://127.0.0.1:11434/v1').rstrip('/')
+    model = _os.environ.get('LOCAL_LLM_MODEL', 'qwen3.6-35b-a3b-uncensored')
+    body = _json.dumps({
+        'model': model, 'messages': messages, 'stream': False,
+        'temperature': temperature, 'max_tokens': max_tokens,
+        'chat_template_kwargs': {'enable_thinking': False},
+    }).encode()
+    req = _u.Request(base + '/chat/completions', data=body,
+                     headers={'Content-Type': 'application/json'})
+    with _u.urlopen(req, timeout=timeout) as r:
+        data = _json.loads(r.read())
+    return ((data.get('choices') or [{}])[0].get('message') or {}).get('content', '') or ''
 
 
 _FENCE_RX = re.compile(r'^\s*```(?:json)?\s*|\s*```\s*$', re.MULTILINE)

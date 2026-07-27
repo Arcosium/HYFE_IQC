@@ -17,44 +17,46 @@ def client():
         yield c
 
 
-# ── Test 1: Signup passes account_type to validate_login and upsert_user ────
+# ── Test 1: 가입은 account_type 을 **묻지 않고 측정**한다 (2026-07-27) ──────────
+# 옛 계약은 가입 폼 라디오 버튼 값을 그대로 신뢰했다. 자기 신고라 실제 WQB 권한과
+# 어긋날 수 있었고, 이를 바로잡을 승급 검사도 '로그인 되면 RC' 라 게이트가 아니었다.
 
-def test_signup_passes_account_type(client, monkeypatch):
-    """신규 가입 시 account_type='research_consultant' 가 validate_login 과
-    upsert_user 에 정확히 전달되어야 한다. (가입 경로는 /api/register)"""
+def _register(client, monkeypatch, validate_result, body_extra=None):
     captured = {}
-
-    # 신규 사용자 — 찾을 수 없음
     monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
-
-    def fake_validate_login(u, p, g='', account_type='standard'):
-        captured['validate_account_type'] = account_type
-        return {'ok': True, 'reason': 'ok'}
+    monkeypatch.setattr(app_mod._auth, 'validate_login',
+                        lambda u, p, *a, **kw: validate_result)
 
     def fake_upsert_user(u, p, g, account_type='standard'):
         captured['upsert_account_type'] = account_type
-        return 42  # fake uid
+        return 42
 
-    def fake_issue_session(uid, wqb_username, remember):
-        with app_mod.app.app_context():
-            return jsonify({'ok': True, 'user_id': uid, 'wqb_username': wqb_username})
-
-    monkeypatch.setattr(app_mod._auth, 'validate_login', fake_validate_login)
     monkeypatch.setattr(app_mod._db, 'upsert_user', fake_upsert_user)
-    monkeypatch.setattr(app_mod, '_issue_session', fake_issue_session)
+    monkeypatch.setattr(app_mod, '_issue_session',
+                        lambda uid, un, rm: jsonify({'ok': True, 'user_id': uid}))
+    with app_mod.app.app_context():
+        r = client.post('/api/register', data=json.dumps({
+            'wqb_username': 'user@example.com', 'wqb_password': 'pass123',
+            **(body_extra or {})}), content_type='application/json')
+    return r, captured
 
-    r = client.post('/api/register', data=json.dumps({
-        'wqb_username': 'user@example.com',
-        'wqb_password': 'pass123',
-        'gemini_api_key': 'AIzaSytest',
-        'account_type': 'research_consultant',
-    }), content_type='application/json')
 
+def test_signup_measures_account_type_from_wqb_permissions(client, monkeypatch):
+    r, captured = _register(client, monkeypatch,
+                            {'ok': True, 'reason': 'ok', 'backend': 'api',
+                             'account_type': 'research_consultant'})
     assert r.status_code == 200
-    assert captured.get('validate_account_type') == 'research_consultant', \
-        f"validate_login 에 account_type 미전달: {captured}"
-    assert captured.get('upsert_account_type') == 'research_consultant', \
-        f"upsert_user 에 account_type 미전달: {captured}"
+    assert captured['upsert_account_type'] == 'research_consultant'
+
+
+def test_signup_ignores_self_declared_account_type_in_body(client, monkeypatch):
+    """폼이 research_consultant 라고 우겨도 측정값(standard)이 이긴다."""
+    r, captured = _register(client, monkeypatch,
+                            {'ok': True, 'reason': 'ok', 'backend': 'api',
+                             'account_type': 'standard'},
+                            body_extra={'account_type': 'research_consultant'})
+    assert r.status_code == 200
+    assert captured['upsert_account_type'] == 'standard'
 
 
 # ── Test 1b–1e: login/register split (Task 1) ────────────────────────────────
@@ -95,39 +97,37 @@ def test_register_rejects_existing(monkeypatch):
     assert r.status_code == 409 and r.get_json()['reason'] == 'already_registered'
 
 
-def test_register_creates_with_account_type(monkeypatch):
+def test_register_creates_with_measured_account_type(monkeypatch):
     monkeypatch.setattr(app_mod._db, 'find_user_by_username', lambda u: None)
     captured = {}
-
-    def fake_validate(u, p, g='', account_type='standard'):
-        captured['vl'] = account_type
-        return {'ok': True, 'reason': 'ok'}
 
     def fake_upsert(u, p, g, account_type='standard'):
         captured['up'] = account_type
         return 7
 
-    monkeypatch.setattr(app_mod._auth, 'validate_login', fake_validate)
+    monkeypatch.setattr(app_mod._auth, 'validate_login',
+                        lambda u, p, *a, **kw: {'ok': True, 'reason': 'ok',
+                                                'account_type': 'research_consultant'})
     monkeypatch.setattr(app_mod._db, 'upsert_user', fake_upsert)
     monkeypatch.setattr(app_mod, '_issue_session',
                         lambda uid, u, r: app_mod.jsonify({'ok': True}))
     r = _client().post('/api/register', json={
-        'wqb_username': 'new@x.com', 'wqb_password': 'pw',
-        'gemini_api_key': 'gk', 'account_type': 'research_consultant',
-    })
+        'wqb_username': 'new@x.com', 'wqb_password': 'pw'})
     assert r.get_json().get('ok') is True
-    assert captured['vl'] == 'research_consultant' and captured['up'] == 'research_consultant'
+    assert captured['up'] == 'research_consultant'
 
 
 # ── Test 2: Upgrade success ──────────────────────────────────────────────────
 
 def test_upgrade_to_rc_success(client, monkeypatch):
-    """로그인된 사용자가 WQB API 검증 통과 시 RC로 전환되어야 한다."""
+    """WQB permissions 에 CONSULTANT 가 있으면 RC 로 전환된다."""
     captured = {}
 
     monkeypatch.setattr(app_mod, '_current_user_id', lambda: 7)
     monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('user@ex.com', 'pw', 'gemkey'))
-    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api', lambda u, p: {'ok': True, 'reason': 'ok'})
+    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
+                        lambda u, p: {'ok': True, 'reason': 'ok',
+                                      'permissions': ['MULTI_SIMULATION', 'CONSULTANT']})
 
     def fake_set_account_type(uid, account_type):
         captured['uid'] = uid
@@ -143,6 +143,26 @@ def test_upgrade_to_rc_success(client, monkeypatch):
     assert captured.get('uid') == 7, f"set_account_type called with wrong uid: {captured}"
     assert captured.get('account_type') == 'research_consultant', \
         f"set_account_type called with wrong type: {captured}"
+
+
+# ── Test 2b: 인증만 통과하고 CONSULTANT 권한이 없으면 승급 거부 (2026-07-27) ──
+# 이게 옛 버그의 핵심이었다 — 일반 계정도 WQB API Basic 인증이 통과하므로
+# 'ok=True' 만 보고 승급시키면 아무나 RC 가 됐다.
+
+def test_upgrade_refused_when_authenticated_but_not_consultant(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app_mod, '_current_user_id', lambda: 9)
+    monkeypatch.setattr(app_mod._db, 'get_user_credentials', lambda uid: ('u@ex.com', 'pw', 'k'))
+    monkeypatch.setattr(app_mod._auth, 'validate_wqb_api',
+                        lambda u, p: {'ok': True, 'reason': 'ok',
+                                      'permissions': ['MULTI_SIMULATION']})
+    monkeypatch.setattr(app_mod._db, 'set_account_type',
+                        lambda uid, t: captured.update(account_type=t))
+    r = client.post('/api/account/upgrade-to-rc', content_type='application/json')
+    assert r.status_code == 400
+    assert r.get_json()['reason'] == 'wqb_not_consultant'
+    # 강등 방향으로는 동기화한다 — RC 였다가 권한을 잃은 계정을 그대로 두면 안 된다
+    assert captured['account_type'] == 'standard'
 
 
 # ── Test 3: Upgrade rejected when WQB API says not consultant ───────────────

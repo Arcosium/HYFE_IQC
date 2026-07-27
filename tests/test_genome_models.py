@@ -8,7 +8,7 @@ def test_non_rc_population_uses_standard_genome_contract():
         account_type='standard', round_num=3, forced_delay='1', n=8
     )
     assert len(rows) == 8
-    assert all(r['desc'].startswith('standard-playwright-genome') for r in rows)
+    assert all(r['desc'].startswith('standard-genome') for r in rows)
     assert all(r['settings']['delay'] == '1' for r in rows)
     assert all('filter=' not in r['code'] for r in rows)
     assert all(not re.search(r'(?:^|;)\s*[A-Za-z_]\w*\s*=', r['code']) for r in rows)

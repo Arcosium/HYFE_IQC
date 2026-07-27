@@ -1,7 +1,7 @@
 """하우스 RC 계정으로 /data-fields·/operators 실시간 조회 → data/live_datafields.csv.
 실패는 절대 생성 흐름을 막지 않는다(호출부가 폴백)."""
 from __future__ import annotations
-import csv, logging, os, tempfile, time
+import csv, logging, os, tempfile, threading, time
 from . import db as _db
 from . import wqb_api
 
@@ -20,14 +20,17 @@ HOUSE_RC_USERNAME = os.environ.get('HYFE_HOUSE_RC_USERNAME', 'platinumcasillas@g
 # 6시간이었을 땐 워커가 하루 4번 20000행을 긁어 429 를 유발했다.
 _TTL_SEC = float(os.environ.get('IQC_DATAFIELDS_TTL_S', str(24 * 3600)))
 _last_refresh = {'ts': 0.0}
+_REFRESH_LOCK = threading.Lock()      # 동시 수집 방지 (워커 라운드 × theme_sync)
 # /data-fields 는 연속 호출에 429 를 준다(실측: 3페이지째부터). 문서의 "scripts do not
 # lay excessive load on the server" 지침에 맞춰 페이지 사이를 쉬고 429 는 백오프한다.
 _PAGE_SLEEP_S = float(os.environ.get('IQC_DATAFIELDS_PAGE_SLEEP_S', '1.5'))
 _PAGE_RETRY_MAX = 5
 _PAGE_RETRY_BASE_S = 5.0
-# 부분 수집으로 기존 팔레트를 덮어쓰지 않기 위한 하한. datafield_palette 는 라이브 CSV 가
-# 비어있지만 않으면 그쪽을 쓰므로, 300행짜리를 쓰면 팔레트가 통째로 퇴화한다(2026-07-21 실측).
-_MIN_ROWS_TO_WRITE = int(os.environ.get('IQC_DATAFIELDS_MIN_ROWS', '3000'))
+_PAGE_LIMIT = 50                      # /data-fields·/data-sets 의 하드 상한 (100 은 400)
+# 부분 수집으로 기존 팔레트를 덮어쓰지 않기 위한 관문. 그리드별로 "기대 필드수
+# (dataset fieldCount 합)" 대비 이만큼은 받아야 CSV 를 쓴다. 총행수 하한만 보던 옛
+# 방식은 한 리전이 통째로 비어도 다른 리전 행이 채워서 통과해버렸다(2026-07-27).
+_MIN_GRID_COVERAGE = float(os.environ.get('IQC_DATAFIELDS_MIN_COVERAGE', '0.9'))
 
 
 def map_datafields(api_results, region, universe, delay) -> list[dict]:
@@ -182,14 +185,11 @@ def _house_client():
     return wqb_api.WqbApiClient(u, p)
 
 
-def _fetch_page(client, region, universe, delay, offset):
+def _get_paged(client, path, params):
     """한 페이지. 429 면 지수 백오프로 재시도. 끝내 실패하면 None."""
     wait = _PAGE_RETRY_BASE_S
     for _ in range(_PAGE_RETRY_MAX):
-        r = client.session.get(f'{wqb_api.BASE}/data-fields',
-                               params={'region': region, 'universe': universe,
-                                       'delay': delay, 'instrumentType': 'EQUITY',
-                                       'limit': 50, 'offset': offset})
+        r = client.session.get(f'{wqb_api.BASE}{path}', params=params)
         if r.ok:
             return r.json()
         if r.status_code != 429:
@@ -204,54 +204,163 @@ def _fetch_page(client, region, universe, delay, offset):
     return None
 
 
-def refresh(now_ts: float | None = None,
-            grid=(('USA', 'TOP3000', 1), ('USA', 'TOP3000', 0))) -> bool:
+def _fetch_page(client, region, universe, delay, offset, dataset_id):
+    """dataset_id 는 필수다 — 전체 조회는 10000 캡에 걸려 쓸 수 없다(_collect_grid 주석)."""
+    return _get_paged(client, '/data-fields',
+                      {'region': region, 'universe': universe, 'delay': delay,
+                       'instrumentType': 'EQUITY', 'limit': _PAGE_LIMIT,
+                       'offset': offset, 'dataset.id': dataset_id})
+
+
+def _fetch_datasets(client, region, universe, delay) -> list[tuple]:
+    """그 그리드의 (dataset_id, fieldCount) 전체. 실패하면 빈 리스트."""
+    out, offset = [], 0
+    while True:
+        j = _get_paged(client, '/data-sets',
+                       {'region': region, 'universe': universe, 'delay': delay,
+                        'instrumentType': 'EQUITY', 'limit': _PAGE_LIMIT,
+                        'offset': offset})
+        if j is None:
+            return []
+        res = j.get('results') or []
+        if not res:
+            break
+        out += [(d.get('id'), int(d.get('fieldCount') or 0)) for d in res if d.get('id')]
+        offset += _PAGE_LIMIT
+        if offset >= int(j.get('count') or 0):
+            break
+        time.sleep(_PAGE_SLEEP_S)
+    return out
+
+
+def _collect_grid(client, region, universe, delay) -> tuple:
+    """한 그리드의 **전 필드**를 dataset.id 별로 나눠 수집 → (rows, 기대필드수).
+
+    ⚠ 왜 데이터셋별로 쪼개나 — /data-fields 는 전체 조회 시 count 를 10000 으로 캡하고
+    필드 id **알파벳순**으로만 준다. offset=10000 은 400 ("Invalid offset. Please use
+    filters to narrow down the result."), limit 은 50 이 상한, order=-id 로 역방향을
+    받아도 정·역 합쳐 20000 이라 GLB(2만 초과)엔 중간 구멍이 남는다 — 실제로 'g'~'n'
+    구간이 통째로 빠져 mdl110_*·rsk70_* 이 한 번도 후보에 오르지 못했다(2026-07-27).
+    API 가 에러 메시지로 직접 지시한 대로 dataset.id 필터로 쪼개면 캡에 안 걸린다.
+    """
+    rows, expect = [], 0
+    datasets = _fetch_datasets(client, region, universe, delay)
+    if not datasets:
+        return [], -1        # 목록 자체를 못 받음 → 결손으로 취급(호출부가 쓰기 중단)
+    for ds_id, n_fields in datasets:
+        if n_fields <= 0:
+            continue
+        expect += n_fields
+        offset = 0
+        while True:
+            j = _fetch_page(client, region, universe, delay, offset, dataset_id=ds_id)
+            if j is None:
+                LOG.warning('datafields %s/%s/D%s dataset=%s offset=%d 중단',
+                            region, universe, delay, ds_id, offset)
+                break
+            res = j.get('results') or []
+            if not res:
+                break
+            rows += map_datafields(res, region, universe, delay)
+            offset += _PAGE_LIMIT
+            if offset >= int(j.get('count') or 0):
+                break
+            time.sleep(_PAGE_SLEEP_S)
+    return rows, expect
+
+
+def _load_live_rows() -> list[dict]:
+    """현재 라이브 CSV 의 행들. 없거나 못 읽으면 빈 리스트."""
+    try:
+        with open(LIVE_CSV_PATH, newline='', encoding='utf-8') as fh:
+            return list(csv.DictReader(fh))
+    except (OSError, csv.Error):
+        return []
+
+
+def _rows_by_grid(rows) -> dict:
+    """행 목록 → {(region, universe, delay): [행…]}. 그리드 단위 부분 갱신용."""
+    out: dict = {}
+    for r in rows or []:
+        out.setdefault((str(r.get('region') or ''), str(r.get('universe') or ''),
+                        str(r.get('delay') or '')), []).append(r)
+    return out
+
+
+def _constraint_grid_extra() -> tuple:
+    """활성 탐색 조건이 USA 밖 리전이면 그 (region, universe, delay) 콤보를 그리드에
+    추가한다 (2026-07-27, GLB 테마). 이게 없으면 일일 갱신이 CSV 를 USA 행만으로
+    다시 써서 지역 팔레트가 하루 만에 증발한다. 실패 시 빈 튜플(fail-open)."""
+    try:
+        from . import run_config
+        c = run_config.get_constraint()
+        if c is None or not c.region or str(c.region).upper() == 'USA':
+            return ()
+        return ((str(c.region).upper(),
+                 str(c.universe or 'TOP3000').upper(),
+                 int(c.delay if c.delay is not None else 1)),)
+    except Exception:
+        return ()
+
+
+def refresh(now_ts: float | None = None, grid=None) -> bool:
     """하우스 계정으로 grid 별 /data-fields 페이지네이션 수집 → 라이브 CSV. 성공 True.
 
-    ⚠ 20000행짜리 수집이라 **하루 1회**(_TTL_SEC)만 돌아야 하고, 페이지 사이를 쉬어야
-    한다. 부분 수집은 쓰지 않는다 — 팔레트가 퇴화하기 때문(_MIN_ROWS_TO_WRITE).
+    grid=None 이면 USA 기본 콤보 + 활성 조건의 리전 콤보(_constraint_grid_extra).
+
+    ⚠ 그리드당 수만 행짜리 수집이라 **하루 1회**(_TTL_SEC)만 돌아야 하고, 페이지 사이를
+    쉬어야 한다. 부분 수집은 쓰지 않는다 — 팔레트가 퇴화하기 때문(_MIN_GRID_COVERAGE).
+    ⚠ 오래 걸리므로(그리드당 10분+) 호출부는 **백그라운드 스레드**에서 돌려야 한다.
     """
+    if grid is None:
+        grid = (('USA', 'TOP3000', 1), ('USA', 'TOP3000', 0)) + _constraint_grid_extra()
+    if not _REFRESH_LOCK.acquire(blocking=False):
+        # 워커 라운드와 theme_sync 가 동시에 부를 수 있다 — 겹치면 같은 수천 페이지를
+        # 두 번 긁어 429 만 키운다.
+        LOG.info('datafields 수집 이미 진행 중 — skip')
+        return False
     try:
         c = _house_client()
         if not c or not c.authenticate():
             LOG.warning('house RC client 미가용 — 라이브 데이터 새로고침 skip')
             return False
-        all_rows = []
-        for region, universe, delay in grid:
-            offset = 0
-            while True:
-                j = _fetch_page(c, region, universe, delay, offset)
-                if j is None:
-                    LOG.warning('datafields %s/%s/D%s offset=%d 중단', region, universe,
-                                delay, offset)
-                    break
-                res = j.get('results') or []
-                if not res:
-                    break
-                all_rows += map_datafields(res, region, universe, delay)
-                offset += 50
-                if offset >= int(j.get('count') or 0):
-                    break
-                time.sleep(_PAGE_SLEEP_S)
-        # operators 는 region 무관·1회 수집 — 같은 세션으로 함께 새로고침(best-effort).
+        # operators 는 region 무관·1회 수집 — 필드 수집보다 **먼저**(싸고 독립적이라
+        # 필드 쪽이 결손으로 중단돼도 영향을 안 받는다).
         try:
             refresh_operators(c)
         except Exception as e:
             LOG.warning('operators 새로고침 skip: %s', e)
-        if len(all_rows) >= _MIN_ROWS_TO_WRITE:
-            write_live_csv(all_rows)
+        # ⚠ 그리드별로 **부분 갱신**한다 (2026-07-27). 예전엔 전체를 새로 쓰고 한
+        #   그리드라도 결손이면 통째로 버렸는데, 실제로 GLB 29343행을 20분에 걸쳐
+        #   멀쩡히 받아 놓고 뒤이은 USA/D1 이 429 로 111개 데이터셋을 놓치자 GLB 까지
+        #   같이 폐기됐다. 성공한 그리드는 반영하고, 결손 그리드는 옛 행을 남긴다.
+        kept = _rows_by_grid(_load_live_rows())
+        fresh, thin = {}, []
+        for region, universe, delay in grid:
+            rows, expect = _collect_grid(c, region, universe, delay)
+            key = (str(region), str(universe), str(delay))
+            if expect < 0 or len(rows) < expect * _MIN_GRID_COVERAGE:
+                thin.append(f'{region}/{universe}/D{delay} {len(rows)}/{expect}')
+                continue
+            fresh[key] = rows
+        if thin:
+            LOG.warning('datafields 그리드 결손(%s) — 그 그리드는 옛 행 유지', ', '.join(thin))
+        if not fresh:
             if now_ts is not None:
-                _last_refresh['ts'] = now_ts
-            LOG.info('live datafields 새로고침: %d rows', len(all_rows))
-            return True
-        if all_rows:
-            # 부분 수집 — 기존 CSV 를 지키고 다음 TTL 때 다시 시도한다.
-            LOG.warning('datafields 부분 수집 %d행 < %d — 기존 팔레트 보존(쓰지 않음)',
-                        len(all_rows), _MIN_ROWS_TO_WRITE)
-            if now_ts is not None:
-                _last_refresh['ts'] = now_ts   # 즉시 재시도해 429 를 키우지 않는다
+                _last_refresh['ts'] = now_ts   # 즉시 재시도하면 429 만 키운다
+            return False
+        kept.update(fresh)
+        all_rows = [r for rows in kept.values() for r in rows]
+        write_live_csv(all_rows)
+        if now_ts is not None:
+            _last_refresh['ts'] = now_ts
+        LOG.info('live datafields 새로고침: %d rows (갱신 그리드 %d, 유지 %d)',
+                 len(all_rows), len(fresh), len(kept) - len(fresh))
+        return True
     except Exception as e:
         LOG.warning('refresh 실패(폴백 유지): %s', e)
+    finally:
+        _REFRESH_LOCK.release()
     return False
 
 
@@ -269,7 +378,17 @@ def _csv_age_ts() -> float:
 
 
 def maybe_refresh(now_ts: float) -> bool:
+    """TTL 만료면 수집을 **백그라운드로** 기동하고 즉시 반환(기동했으면 True).
+
+    ⚠ 워커 라운드 맨 앞에서 불린다 — 인라인으로 돌리면 데이터셋별 수천 페이지 수집이
+    끝날 때까지 라운드가 통째로 멈춘다(그리드당 10분+).
+    """
     last = max(_last_refresh['ts'], _csv_age_ts())
-    if now_ts - last >= _TTL_SEC:
-        return refresh(now_ts=now_ts)
-    return False
+    if now_ts - last < _TTL_SEC:
+        return False
+    if _REFRESH_LOCK.locked():
+        return False
+    _last_refresh['ts'] = now_ts      # 스레드가 끝나기 전 다음 라운드가 또 띄우지 않도록
+    threading.Thread(target=lambda: refresh(now_ts=time.time()),
+                     daemon=True, name='datafields-refresh').start()
+    return True

@@ -66,6 +66,14 @@ CHECK_ALIAS = {
 
 KNOWN_REGIONS = ('USA', 'GLB', 'CHN', 'EUR', 'ASI', 'JPN', 'KOR', 'TWN',
                  'HKG', 'AMR', 'IND', 'MEA')
+# 비-컨설턴트가 뛰는 판(IQC)은 USA 고정이다. delay 는 0/1 중 선택 가능하고,
+# 리전만 못 고른다 (2026-07-27 사장 확인). ConstraintSpec.for_account 가 강제한다.
+IQC_REGION = 'USA'
+# 일반 계정이 실제로 쓸 수 있는 중립화 (2026-07-27 실계정 실측).
+# 나머지(STATISTICAL·CROWDING·FAST·SLOW·SLOW_AND_FAST·REVERSION_AND_MOMENTUM)는
+# "Neutralization X is not available." 로 400 이 난다 — 컨설턴트 전용이다.
+# ⚠ 이걸 안 걸면 GLB Power Pool 테마의 중립화 목록이 그대로 넘어와 시뮬이 전멸한다.
+IQC_NEUTRALIZATIONS = ('NONE', 'MARKET', 'INDUSTRY', 'SUBINDUSTRY', 'SECTOR')
 
 
 @dataclass
@@ -84,6 +92,32 @@ class ConstraintSpec:
     def is_empty(self) -> bool:
         return not (self.region or self.delay or self.universe or self.neutralizations
                     or self.excluded_datasets or self.required_checks)
+
+    def for_account(self, account_type: str) -> 'ConstraintSpec':
+        """계정 종류가 강제하는 규칙을 덧씌운 조건.
+
+        비-컨설턴트는 **IQC(International Quant Championship) 규칙**을 따른다:
+        리전은 무조건 USA, delay 는 0/1 중 선택 가능. 전역 조건이 GLB 같은 다른
+        리전을 가리켜도 일반 계정은 그 리전으로 경쟁할 수 없으므로 여기서 가둔다
+        (2026-07-27 사장 지시). RC 는 조건을 그대로 쓴다.
+        """
+        import dataclasses
+        if account_type == 'research_consultant':
+            return self
+        # 중립화는 리전과 무관하게 계정 등급에 매인다 — 조건이 컨설턴트 전용 중립화만
+        # 지정했다면 남는 게 없으므로 제약을 아예 푼다(유전체가 기본 5종에서 고른다).
+        allowed = tuple(n for n in self.neutralizations if n in IQC_NEUTRALIZATIONS)
+        same_region = self.region == IQC_REGION
+        if same_region and allowed == self.neutralizations:
+            return self
+        return dataclasses.replace(
+            self,
+            region=IQC_REGION,
+            neutralizations=allowed,
+            # 유니버스는 리전에 매인다 — 다른 리전 것을 들고 가면 시뮬이 죽는다.
+            universe=(self.universe if self.region in (None, IQC_REGION) else None),
+            label=(f'{self.label} · IQC 규칙(USA·기본 중립화)' if self.label
+                   else 'IQC 규칙(USA·기본 중립화)'))
 
     def settings_base(self) -> dict:
         """이 조건이 **강제**하는 시뮬 설정 조각. 나머지(decay·truncation 등)는 자유다."""

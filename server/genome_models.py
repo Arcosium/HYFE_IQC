@@ -1,8 +1,9 @@
 """Typed genome generators for HYFE IQC alpha search — genetic-algorithm core.
 
 The split is by account type:
-- StandardGenomeModel: non-RC accounts. It shares datafields but targets the
-  Playwright/browser path and relies on browser self-correlation gating.
+- StandardGenomeModel: 일반(비 RC) 계정. 유전자 범위(decay/truncation)가 넓고
+  하한만 강제한다. 시뮬 백엔드는 RC 와 **동일한 REST API** 다 — 예전엔 Playwright
+  브라우저 경로를 노렸으나 2026-07-13 제거됐다.
 - ResearchConsultantGenomeModel: RC accounts. It renders stricter API-safe
   FASTEXPR and assumes the API backend will submit-attempt every completed alpha.
 
@@ -456,6 +457,13 @@ def genome_from_alpha(code: str, settings: dict | None = None,
     flat_code = code.replace(" ", "")
     found: list[str] = []
     masked = flat_code
+    # ⚠ 레짐 조건식은 **먼저** 지운다 (2026-07-27). 조건에 쓰인 high/low/returns 는
+    #   regime 유전자에 속하는 가드지 신호 필드가 아닌데, 코드 맨 앞에 있어서 등장순
+    #   추출이 이것부터 3개를 채우고 진짜 신호 필드를 밖으로 밀어냈다
+    #   (실측: range_expand 알파에서 fields 가 (high, low, adv20…) 로 뒤바뀌고
+    #    alternative_slippage_0025 가 통째로 유실 → focus 폴백이 엉뚱한 부모를 변이).
+    for _cond in _REGIME_CONDS.values():
+        masked = masked.replace(_cond.replace(" ", ""), "")
     for _syn, _expr in SYNTHETIC_FIELDS.items():
         _core = _expr.strip()
         while _core.startswith("(") and _core.endswith(")"):
@@ -679,11 +687,30 @@ def settings(genome: Genome, forced_delay=None) -> dict:
 # 애초에 만들어지지 않는다. 사후 필터링보다 훨씬 싸다 — 시뮬 한 건이 곧 쿼터다.
 _ACTIVE_CONSTRAINT = None
 _CONSTRAINT_BANNED_FIELDS: frozenset = frozenset()
+# 조건 region 이 USA 가 아닐 때의 지역 필드 팔레트 (D0_DATASETS 미러, 2026-07-27).
+# 비면 '모름' — 강제하지 않는다(fail-open). GLB 첫 라운드 8/8 'unknown variable'
+# 전멸이 신설 이유: USA 큐레이션 필드는 타 리전에 존재하지 않는 게 많다.
+_REGION_DATASETS: dict = {}
+
+
+_ACCOUNT_DATASETS = None      # 이 계정이 접근 가능한 dataset.id 집합. None = 제한 없음.
+
+
+def set_account_datasets(ids) -> None:
+    """계정 등급이 허용하는 dataset.id 집합을 건다 (None = 제한 없음).
+
+    ⚠ 왜 필요한가 — 팔레트는 **하우스 RC 계정**으로 긁는다. 일반 계정은 접근 가능한
+    데이터셋이 훨씬 적어서(2026-07-27 실측: USA/TOP3000 기준 RC 297개 vs 일반 21개),
+    RC 팔레트를 그대로 쓰면 시뮬이 'Invalid data field …' 로 죽는다.
+    set_constraint 보다 **먼저** 불러야 그 안의 풀 계산에 반영된다.
+    """
+    global _ACCOUNT_DATASETS
+    _ACCOUNT_DATASETS = frozenset(str(x) for x in ids) if ids else None
 
 
 def set_constraint(spec) -> None:
     """탐색 조건을 건다. spec=None 이면 해제."""
-    global _ACTIVE_CONSTRAINT, _CONSTRAINT_BANNED_FIELDS
+    global _ACTIVE_CONSTRAINT, _CONSTRAINT_BANNED_FIELDS, _REGION_DATASETS
     if spec is not None and getattr(spec, 'is_empty', lambda: False)():
         spec = None
     _ACTIVE_CONSTRAINT = spec
@@ -695,6 +722,30 @@ def set_constraint(spec) -> None:
         except Exception:
             banned = set()
     _CONSTRAINT_BANNED_FIELDS = frozenset(banned)
+    # 필드 풀을 다시 계산해야 하는 경우는 둘이다:
+    #   (a) USA 밖 리전 — 리전마다 필드 집합이 다르다
+    #   (b) 계정 등급 제한 — 일반 계정은 접근 가능한 데이터셋이 훨씬 적다(USA 라도)
+    _region = str(getattr(spec, 'region', '') or '').upper() if spec is not None else ''
+    pools: dict = {}
+    if spec is not None and (_region not in ('', 'USA') or _ACCOUNT_DATASETS is not None):
+        try:
+            from . import datafield_palette as _dfp
+            pools = _dfp.family_pools(
+                delay=(spec.delay if spec.delay is not None else 1),
+                region=(spec.region or 'USA'), universe=spec.universe,
+                datasets=_ACCOUNT_DATASETS) or {}
+            pools = {fam: tuple(names) for fam, names in pools.items()
+                     if names and not all(_f in _CONSTRAINT_BANNED_FIELDS for _f in names)}
+        except Exception:
+            pools = {}
+    _REGION_DATASETS = pools
+
+
+def region_allowed_fields() -> frozenset | None:
+    """조건 리전에서 써도 되는 필드명 집합. 팔레트가 없으면 None ('모름' → 폴백)."""
+    if not _REGION_DATASETS:
+        return None
+    return frozenset(f for fields in _REGION_DATASETS.values() for f in fields)
 
 
 def active_constraint():
@@ -868,6 +919,39 @@ def _apply_constraint(d: dict) -> None:
         # 유전체 내용으로 안정적인 인덱스를 만든다 — 같은 유전체면 항상 같은 결과.
         key = f'{d.get("family")}|{d.get("fields")}|{d.get("decay")}'
         d["neutralization"] = allowed[hash(key) % len(allowed)]
+    # 지역 팔레트 강제 (2026-07-27) — 조건 리전에 실존하는 필드로 전면 교체.
+    # USA 필드를 GLB 에 보내면 'unknown variable' 로 시뮬이 통째로 죽는다.
+    allowed_region = region_allowed_fields()
+    if allowed_region is not None:
+        flds = list(d.get("fields") or ())
+        if not all(f in allowed_region for f in flds):
+            fam = str(d.get("family") or "pv")
+            pool = list(_REGION_DATASETS.get(fam) or ())
+            pool = [f for f in pool if not _field_is_banned(f)]
+            if len(pool) < 3:
+                # 이 계열이 이 리전에 없다 — 유전체 내용 기반 결정론으로 대체 계열 선택
+                # (rng 금지: _constrain 은 dedup 키 입력이라 호출마다 같아야 한다).
+                fams = sorted(f for f, p in _REGION_DATASETS.items()
+                              if len([x for x in p if not _field_is_banned(x)]) >= 3)
+                if fams:
+                    key = f'{d.get("family")}|{d.get("fields")}'
+                    fam = fams[hash(key) % len(fams)]
+                    pool = [f for f in _REGION_DATASETS[fam]
+                            if not _field_is_banned(f)]
+                    d["family"] = fam
+            if len(pool) >= 3:
+                key = f'{d.get("fields")}|{d.get("decay")}|{d.get("transform_a")}'
+                base = hash(key) % len(pool)
+                out = []
+                for j, f in enumerate(flds):
+                    if f in allowed_region and f not in out:
+                        out.append(f)
+                    else:
+                        i = base + j
+                        while pool[i % len(pool)] in out:
+                            i += 1
+                        out.append(pool[i % len(pool)])
+                d["fields"] = tuple(out[:3])
     banned = _CONSTRAINT_BANNED_FIELDS
     if banned:
         flds = list(d.get("fields") or ())
@@ -1518,11 +1602,19 @@ class BaseGenomeModel:
 
 
 class StandardGenomeModel(BaseGenomeModel):
-    name = "standard-playwright-genome"
+    name = "standard-genome"
+    # ⚠ 일반 계정은 **그룹 중립화 5종만** 쓸 수 있다 (2026-07-27 실계정 실측).
+    #   리스크 중립화(STATISTICAL·CROWDING·FAST·SLOW·SLOW_AND_FAST·RAM)를 넣으면
+    #   WQB 가 "Neutralization X is not available." 로 400 을 준다 — 시뮬이 아예
+    #   접수되지 않는다. 유전자 풀에서 빼야 교차·변이로도 다시 안 생긴다.
+    neutralizations = tuple(n for n in NEUTRALIZATIONS if n not in RISK_NEUTRALIZATIONS)
 
     def _constrain(self, g: Genome, rng: random.Random) -> Genome:
         g = super()._constrain(g, rng)
+        neut = (g.neutralization if g.neutralization in self.neutralizations
+                else rng.choice(self.neutralizations))
         return Genome(**{**g.__dict__,
+                         "neutralization": neut,
                          "decay": max(g.decay, 4),
                          "truncation": max(g.truncation, 0.08)})
 

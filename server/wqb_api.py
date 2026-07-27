@@ -1149,6 +1149,37 @@ class WqbApiClient:
             return None
         return r.headers.get('Location') or r.headers.get('location')
 
+    def accessible_datasets(self, region: str, universe: str, delay) -> set:
+        """이 **계정이 실제로 접근 가능한** dataset.id 집합. 실패하면 빈 집합.
+
+        팔레트는 하우스 RC 계정으로 긁으므로 일반 계정에는 없는 필드가 섞인다
+        (2026-07-27 실측 USA/TOP3000: RC 297 데이터셋 vs 일반 21). 그대로 쓰면
+        시뮬이 'Invalid data field …' 로 죽는다.
+        """
+        if not self._ensure_auth():
+            return set()
+        out: set = set()
+        offset = 0
+        while True:
+            try:
+                r = self.session.get(
+                    f'{BASE}/data-sets', timeout=_HTTP_TIMEOUT,
+                    params={'region': region, 'universe': universe, 'delay': delay,
+                            'instrumentType': 'EQUITY', 'limit': 50, 'offset': offset})
+            except Exception as e:
+                LOG.warning('data-sets 조회 실패: %s', e)
+                return out
+            if not r.ok:
+                return out
+            j = r.json()
+            res = j.get('results') or []
+            if not res:
+                return out
+            out |= {str(d.get('id')) for d in res if d.get('id')}
+            offset += 50
+            if offset >= int(j.get('count') or 0):
+                return out
+
     def submit_super_simulation(self, selection: str, combo: str,
                                 settings: dict) -> str | None:
         """type=SUPER 시뮬 제출 → progress Location (⑤ 슈퍼알파, ACE body 형식).
@@ -1173,8 +1204,15 @@ class WqbApiClient:
         if r.status_code == 429:
             return 'RATE_LIMITED'
         if r.status_code not in (200, 201):
-            LOG.warning('super submit http_%s: %s', r.status_code,
-                        (getattr(r, 'text', '') or '')[:200])
+            body = (getattr(r, 'text', '') or '')
+            LOG.warning('super submit http_%s: %s', r.status_code, body[:200])
+            # 권한 미보유는 **재시도해도 소용없는 계정 상태**다 — 일반 실패와 구분해
+            #   호출부가 사람에게 "WQB 에 super simulation 권한을 요청하라" 고 말할 수
+            #   있게 한다. 실측(2026-07-27, CONSULTANT 권한 보유 계정):
+            #   400 {"type":["Not permissioned for super simulations"]}
+            #   — CONSULTANT 만으로는 안 되고 별도 권한이 필요하다.
+            if r.status_code == 400 and 'not permissioned' in body.lower():
+                return 'NOT_PERMISSIONED'
             return None
         return r.headers.get('Location') or r.headers.get('location')
 

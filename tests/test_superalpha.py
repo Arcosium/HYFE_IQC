@@ -59,3 +59,36 @@ def test_superalpha_run_lifecycle(isolated_db):
     runs = db.superalpha_runs_list(uid)
     assert runs[0]['status'] == 'done'
     assert runs[0]['results'][0]['alpha_id'] == 'abc'
+
+
+# ── 권한 미보유 처리 (2026-07-27 실측) ──────────────────────────────────────
+# CONSULTANT 권한만 있는 계정에서 실제로 받은 응답:
+#   400 {"type":["Not permissioned for super simulations"]}
+# super simulation 은 CONSULTANT 와 **별개 권한**이다.
+
+class _NotPermissionedClient:
+    """submit 마다 권한 거절을 돌려주는 가짜 클라이언트."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def authenticate(self):
+        return True
+
+    def submit_super_simulation(self, selection, combo, settings):
+        self.calls += 1
+        return 'NOT_PERMISSIONED'
+
+
+def test_run_stops_immediately_when_account_lacks_permission(isolated_db, monkeypatch):
+    """남은 후보를 더 돌려도 전부 같은 400 이다 — 첫 건에서 끝내고 사유를 남긴다."""
+    uid = isolated_db
+    fake = _NotPermissionedClient()
+    import server.wqb_api as wqb_api
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', lambda u, p: fake)
+
+    rid = superalpha.run(uid, 'u', 'p', seed_plus=10, n=6)
+    assert fake.calls == 1, '권한 거절인데 후보 6개를 다 시도했다'
+    row = db.superalpha_runs_list(uid)[0]
+    assert row['id'] == rid and row['status'] == 'error'
+    assert 'super simulation 권한' in (row['error'] or '')

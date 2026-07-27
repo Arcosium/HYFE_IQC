@@ -129,6 +129,8 @@ def test_submit_gate_allows_then_blocks_at_budget(monkeypatch):
 
     used = {'n': 0}
     monkeypatch.setattr(w._db, 'submitted_today', lambda uid: used['n'])
+    # 제출 보류창(2026-07-27)은 이 테스트의 관심사가 아니다 — 라이브 설정에서 격리.
+    monkeypatch.setattr(w.run_config, 'get_submit_hold_until', lambda: 0.0)
     wk = w.Worker.__new__(w.Worker)
     wk.user_id = 2
     good = dict(sharpe='1.53', fitness='0.69', turnover='0.54',
@@ -151,6 +153,7 @@ def test_submit_gate_fails_open_on_db_error(monkeypatch):
         raise RuntimeError('db down')
 
     monkeypatch.setattr(w._db, 'submitted_today', boom)
+    monkeypatch.setattr(w.run_config, 'get_submit_hold_until', lambda: 0.0)
     wk = w.Worker.__new__(w.Worker)
     wk.user_id = 2
     assert wk._submit_gate({'sharpe': '1.5'})[0] is True

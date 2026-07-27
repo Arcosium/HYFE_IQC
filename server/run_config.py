@@ -73,6 +73,63 @@ def set_constraint_text(text) -> str:
     return val
 
 
+def _get(key: str, default=None):
+    with _LOCK:
+        return _read().get(key, default)
+
+
+def _set(key: str, val) -> None:
+    """falsy 면 키를 지운다 — 남겨 두면 '설정 안 함'과 '0으로 설정함'이 안 구별된다."""
+    with _LOCK:
+        data = _read()
+        if val:
+            data[key] = val
+        else:
+            data.pop(key, None)
+        _write(data)
+
+
+def get_submit_hold_until() -> float:
+    """이 시각(epoch)까지 자동 제출을 보류한다. 0 이면 보류 없음.
+
+    용도: 테마 경계(UTC 자정=KST 09:00)와 **제출 예산 리셋(동부 자정=KST 13:00)**이
+    서로 다른 시계라서 생기는 4시간 구간 — 새 테마 알파를 그 사이에 내면 전날
+    예산을 쓰게 된다. 예산이 새로 열릴 때까지 미뤄 하루치를 통째로 확보한다.
+    """
+    try:
+        return float(_get('submit_hold_until', 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def set_submit_hold_until(ts) -> float:
+    val = float(ts or 0)
+    _set('submit_hold_until', val)
+    return val
+
+
+def get_last_region() -> str:
+    """마지막으로 라운드를 돈 조건 리전 — 리전 전환 감지(큐·시드 정리)용."""
+    return str(_get('last_region', '') or '').strip().upper()
+
+
+def set_last_region(region) -> str:
+    val = str(region or '').strip().upper()
+    _set('last_region', val)
+    return val
+
+
+def get_theme_last_applied() -> str:
+    """theme_sync 가 마지막으로 자동 적용한 테마 원문 — 수동 조건 보호의 기준."""
+    return str(_get('theme_last_applied', '') or '').strip()
+
+
+def set_theme_last_applied(text) -> str:
+    val = str(text or '').strip()
+    _set('theme_last_applied', val)
+    return val
+
+
 def get_constraint():
     """현재 조건을 파싱한 ConstraintSpec. 조건이 없으면 None."""
     from . import constraint_spec
@@ -94,51 +151,40 @@ def round_delay(constraint=None) -> str:
     return str(d) if d is not None else DEFAULT_DELAY
 
 
-def is_bandit_enabled() -> bool:
-    """True if the bandit learning-loop is enabled (default: True).
+def _flag(key: str, default: bool = True) -> bool:
+    """run_config.json 의 bool 플래그. 없으면 default, 문자열 표기도 받는다.
 
-    Reads 'bandit_enabled' from data/run_config.json — live-editable without
-    a server restart, exactly like get_constraint_text().
-    Absent / non-bool values default to True so the loop ships ON.
+    ⚠ _set 을 안 쓴다 — _set 은 falsy 를 '키 삭제'로 취급하는데, 플래그는 False 를
+    **명시적으로 저장**해야 default(True)로 되살아나지 않는다.
     """
-    with _LOCK:
-        val = _read().get('bandit_enabled', None)
+    val = _get(key)
     if val is None:
-        return True
-    # Accept both JSON bool (True/False) and string representations.
+        return default
     if isinstance(val, bool):
         return val
     return str(val).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def _set_flag(key: str, enabled: bool) -> None:
+    with _LOCK:
+        data = _read()
+        data[key] = bool(enabled)
+        _write(data)
+
+
+def is_bandit_enabled() -> bool:
+    """밴딧 학습 루프 on/off (기본 ON). 재시작 없이 즉시 반영."""
+    return _flag('bandit_enabled')
 
 
 def set_bandit_enabled(enabled: bool) -> None:
-    """Persist the bandit_enabled flag.  No restart required."""
-    with _LOCK:
-        data = _read()
-        data['bandit_enabled'] = bool(enabled)
-        _write(data)
+    _set_flag('bandit_enabled', enabled)
 
 
 def is_grounding_enabled() -> bool:
-    """True if per-round Google grounding is enabled (default: True).
-
-    Reads 'grounding_enabled' from data/run_config.json — live-editable without
-    a server restart, exactly like is_bandit_enabled().
-    Absent / non-bool values default to True so grounding ships ON.
-    """
-    with _LOCK:
-        val = _read().get('grounding_enabled', None)
-    if val is None:
-        return True
-    # Accept both JSON bool (True/False) and string representations.
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() not in ('false', '0', 'no', 'off')
+    """라운드별 Google 그라운딩 on/off (기본 ON). 재시작 없이 즉시 반영."""
+    return _flag('grounding_enabled')
 
 
 def set_grounding_enabled(enabled: bool) -> None:
-    """Persist the grounding_enabled flag.  No restart required."""
-    with _LOCK:
-        data = _read()
-        data['grounding_enabled'] = bool(enabled)
-        _write(data)
+    _set_flag('grounding_enabled', enabled)

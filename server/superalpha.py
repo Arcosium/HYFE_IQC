@@ -114,6 +114,13 @@ def run(user_id: int, username: str, password: str, *,
                 break
             loc = client.submit_super_simulation(c['selection'], c['combo'],
                                                  c['settings'])
+            if loc == 'NOT_PERMISSIONED':
+                # 계정 권한 문제 — 남은 후보를 돌려봐야 전부 같은 400 이다. 즉시 끝낸다.
+                _db.superalpha_finish(
+                    run_id, 'error', results,
+                    'WQB 계정에 super simulation 권한이 없습니다. CONSULTANT 권한만으로는 '
+                    '안 되고 별도 권한이 필요합니다 — WorldQuant 에 요청하세요.')
+                return run_id
             if loc in (None, 'RATE_LIMITED'):
                 results.append({'combo': c['combo'], 'error': str(loc or 'submit 실패')})
                 continue

@@ -4,6 +4,7 @@ RC(Research Consultant) 는 동시 시뮬을 지원하므로 ThreadPool 로 알�
 from __future__ import annotations
 import logging
 import os
+import random as _rnd
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,11 +23,19 @@ PASS_THRESHOLD = int(os.environ.get('HYFE_IQC_PASS_THRESHOLD', '1'))
 # 일반(pre-consultant)=최대 5. 1..10 로 clamp. (env 로 튜닝, 재시작 반영)
 _CONCURRENCY_DEFAULT = 8
 # 429(CONCURRENT_SIMULATION_LIMIT_EXCEEDED)=슬롯 한도. 실패가 아니라 "슬롯 빌 때까지 대기".
-# sim 한 개가 슬롯을 비우는 데 ~130s+ 걸리므로 재시도 예산(deadline)은 그보다 충분히 길어야
-# 8개를 던져도 가용 슬롯 수만큼 웨이브로 처리된다. (예산 < sim시간이면 영원히 슬롯 못 잡고 포기)
-_RL_DEADLINE_S = float(os.environ.get('HYFE_IQC_RC_RL_DEADLINE_S', '600'))
+# 재시도 예산(deadline)은 **sim 1건 소요시간보다 길어야** 한다 — 슬롯은 앞선 sim 이
+# 끝나야 비기 때문이다. 예산 < sim시간이면 대기자는 슬롯이 열리기도 전에 전부 포기한다.
+#
+# ⚠ 2026-07-27 실측으로 그 일이 실제로 벌어지고 있었다. 600s 는 sim 이 ~130s 이던 시절
+#   값인데, GLB·TOPDIV3000·10년 IS 시뮬은 **약 1,200s** 다(r3: 성공 2건에 라운드 1,243s).
+#   그래서 라운드마다 8개 중 2~6개가 600s 를 태우고 429 로 죽었다 — 슬롯이 모자란 게
+#   아니라 **기다리다 만 것**이다. 폴링 마감(_POLL_DEADLINE_S=1800)과 같은 눈금으로 올린다.
+_RL_DEADLINE_S = float(os.environ.get('HYFE_IQC_RC_RL_DEADLINE_S', '1800'))
 _RL_BACKOFF_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_S', '8'))
-_RL_BACKOFF_CAP_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_CAP_S', '45'))
+# 백오프 상한 = **슬롯이 빈 뒤 그걸 알아채기까지의 최대 지연**이다. 45s 였을 땐 슬롯
+# 하나가 빌 때마다 평균 20초 넘게 놀았다. 대기자가 여럿이라 한꺼번에 몰리지 않도록
+# 지터를 섞는다(thundering herd 방지). 2026-07-27.
+_RL_BACKOFF_CAP_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_CAP_S', '15'))
 
 
 def _default_concurrency() -> int:
@@ -186,15 +195,24 @@ class ApiBackend:
         끝내 못 잡으면 'RATE_LIMITED', stop 요청 시 None."""
         start = _time.monotonic()
         delay = _RL_BACKOFF_S
+        waited = False
         while True:
             if stop_event is not None and stop_event.is_set():
                 return None
             url = self._client.submit_simulation(code, settings)
             if url != 'RATE_LIMITED':
+                if waited:
+                    # 슬롯을 얼마나 기다렸는지 남긴다 — 실효 동시 슬롯 수를 추측이 아니라
+                    # 관측으로 알게 해 준다(2026-07-27). 0 이면 여유, 길면 한도에 붙었다.
+                    LOG.info('슬롯 대기 %.0fs 후 접수', _time.monotonic() - start)
                 return url
+            waited = True
             if _time.monotonic() - start >= _RL_DEADLINE_S:
+                LOG.warning('슬롯 대기 %.0fs 초과 — 포기(429). 동시 시뮬 한도에 걸려 있다.',
+                            _RL_DEADLINE_S)
                 return 'RATE_LIMITED'
-            _time.sleep(delay)
+            # 지터 ±25% — 대기자 여럿이 같은 순간에 몰려 서로를 429 시키지 않게.
+            _time.sleep(delay * _rnd.uniform(0.75, 1.25))
             delay = min(delay * 1.5, _RL_BACKOFF_CAP_S)
 
     @staticmethod

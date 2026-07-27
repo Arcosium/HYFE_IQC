@@ -36,10 +36,15 @@ def test_lt_variants():
         assert c['settings']['universe'] == 'TOP3000'
 
 
-def test_ht_variants_include_trade_when_and_decay():
+def test_ht_variants_prefer_post_smoothing_then_trade_when():
+    """2026-07-27 실측 교정: 창 확대는 신호를 죽이고 사후 감쇠는 살린다
+    (CLV 5일 S=1.01 → 창10일 0.36 / 사후감쇠 1.07). 감쇠가 **앞**에 와야 한다."""
     v = improve_layer.variants('rank(ts_delta(close, 5))', {'decay': '2'},
-                               {'turnover': '0.60'}, n=4)
+                               {'turnover': '0.60'}, n=8)
     codes = [c['code'] for c in v]
+    assert codes[0].startswith('ts_decay_linear(')          # 1순위 = 사후 감쇠
+    assert any(c.startswith('ts_decay_linear(rank(ts_delta(close, 5)), 20)')
+               for c in codes)
     assert any(c.startswith('trade_when(volume > adv20,') for c in codes)
     decay_vars = [c for c in v if c['code'] == 'rank(ts_delta(close, 5))']
     assert decay_vars and decay_vars[0]['settings']['decay'] == '8'

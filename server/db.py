@@ -47,7 +47,7 @@ _INITIALIZED = False
 # 스키마/데이터 마이그레이션 버전. ALTER·백필을 프로세스마다 재실행하지 않도록
 # PRAGMA user_version 게이트의 기준값. 향후 스키마/데이터 마이그레이션을
 # 추가하면 반드시 이 값을 올려야 새 마이그레이션이 1회 적용된다.
-_SCHEMA_VERSION = 8   # v8: Yield Score — bandit_arms.pass_sum (+ superalpha_runs 테이블)
+_SCHEMA_VERSION = 9   # v9: users.submit_mode ('auto' 자동제출 | 'list' 대기목록만)
 _FERNET: Fernet | None = None
 
 FEEDBACK_CAP = 30
@@ -319,6 +319,26 @@ def init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_bandit_user_dim ON bandit_arms(user_id, dimension);
 
+            -- ── v8.1: 제출 대기 큐 (2026-07-27 사장 지시) ──────────────────────
+            -- kind='theme': PURE_POWER_POOL_THEME 거절작 보관 — 테마는 주간 로테이션이라
+            --   다음 주 수동 재시도 가치가 있다(UI '제출 대기' 카드에서 버튼으로 1건씩).
+            -- kind='budget': 일일 제출 예산 초과분 — 다음 날 워커가 자동 드레인.
+            CREATE TABLE IF NOT EXISTS submit_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                alpha_pk INTEGER,
+                wqb_alpha_id TEXT NOT NULL,
+                code TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'theme',
+                status TEXT NOT NULL DEFAULT 'pending',
+                note TEXT NOT NULL DEFAULT '',
+                metrics TEXT NOT NULL DEFAULT '{}',
+                ts REAL NOT NULL,
+                updated_at REAL NOT NULL DEFAULT 0,
+                UNIQUE(user_id, wqb_alpha_id, kind),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             -- ── v8: 슈퍼알파 리서치 런 (⑤, AAF SuperAlpha 이식) ────────────────
             -- OS 알파 풀 위의 selection×combo 그리드 시뮬 기록. 자동 제출 없음 —
             -- 결과를 쌓아두고 제출 판단은 사람이 한다.
@@ -564,6 +584,14 @@ def init() -> None:
                         'ALTER TABLE bandit_arms ADD COLUMN pass_sum '
                         'INTEGER NOT NULL DEFAULT 0')
 
+                # v9 (2026-07-27): 제출 모드 — 'auto'(자동 제출) | 'list'(대기 목록만).
+                # 사용자별로 둔다. 멀티유저로 올리면 남의 계정이 내 뜻과 다르게 실주문
+                # (제출은 되돌릴 수 없고 일일 예산을 쓴다)을 내면 안 된다.
+                # 기존 사용자는 지금 동작(자동 제출)을 유지해야 하므로 DEFAULT 'auto'.
+                if _column_missing(conn, 'users', 'submit_mode'):
+                    conn.execute("ALTER TABLE users ADD COLUMN submit_mode TEXT "
+                                 "NOT NULL DEFAULT 'auto'")
+
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         _INITIALIZED = True
 
@@ -624,19 +652,35 @@ def record_submit_attempt(conn, user_id: int, round_num: int, idx: int, code: st
     )
 
 
-def submitted_today(user_id: int, now: float | None = None) -> int:
-    """오늘(EST 기준) **성공한** 제출 건수. 일일 제출 예산(4건) 집행에 쓴다.
+def day_start_ts(now: float | None = None) -> float:
+    """일일 제출 예산의 리셋 경계 = **미국 동부시간 자정** (여름 KST 13:00 / 겨울 14:00).
 
-    WQB 컨설턴트는 하루 최대 4개까지만 제출할 수 있다(Power Pool 문서: "Max 4 alpha
-    submissions in a day"). 리셋은 EST 자정 기준이므로 UTC-5 로 환산해 날짜를 자른다
-    (서머타임은 무시 — 경계에서 한 시간 어긋나도 예산이 하루 밀릴 뿐 초과 제출은 없다).
+    2026-07-27 API 실측으로 확정: `/users/self/activities/submissions` 가
+    UTC 7/27 01:33(= EDT 7/26 21:33)에 'yesterday=2026-07-25' 를 반환했다.
+    즉 플랫폼의 '오늘'은 EDT 7/26 — 날짜 버킷이 **UTC 도 UTC-5 고정도 아니고
+    DST 를 따르는 America/New_York** 이다. (구 코드는 UTC-5 고정이라 여름에
+    1시간 늦게 리셋됐다.)
+
+    tzdata 가 없는 환경에서는 UTC-4 로 폴백한다(여름 기준, 최대 1시간 오차).
     """
     import datetime as _dt
     ts = time.time() if now is None else float(now)
-    est = _dt.datetime.utcfromtimestamp(ts) - _dt.timedelta(hours=5)
-    midnight_est = est.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = (midnight_est + _dt.timedelta(hours=5)).replace(
-        tzinfo=_dt.timezone.utc).timestamp()
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo('America/New_York')
+    except Exception:
+        tz = _dt.timezone(_dt.timedelta(hours=-4))
+    local = _dt.datetime.fromtimestamp(ts, tz)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def submitted_today(user_id: int, now: float | None = None) -> int:
+    """오늘(미국 동부시간 자정 기준 — day_start_ts) **성공한** 제출 건수.
+
+    WQB 컨설턴트는 하루 최대 4개까지만 제출할 수 있다(Power Pool 문서: "Max 4 alpha
+    submissions in a day").
+    """
+    start = day_start_ts(now)
     init()
     with _DB_LOCK, _connect() as conn:
         row = conn.execute(
@@ -676,15 +720,26 @@ def set_last_cleared_submit_id(user_id: int, submit_id: int) -> int:
     return int(row['last_cleared_submit_id'] or 0) if row else 0
 
 
-def list_submit_attempts(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
-    """최근 제출 시도 — 비우기 지점 이후만, 최신순. 모바일 대시보드용."""
+def list_submit_attempts(user_id: int, limit: int = 50,
+                         scope: str = 'submitted') -> list[dict[str, Any]]:
+    """최근 제출 시도 — 비우기 지점 이후만, 최신순.
+
+    scope='submitted'(기본) — **성공한 제출만**. 화면의 '제출 내역' 은 "무엇이 나갔나"
+      를 보는 곳이지 실패 로그가 아니다 (2026-07-27 사장 지시).
+    scope='all' — 스킵·거절 포함(감사용).
+
+    ⚠ 걸러내기는 반드시 **서버에서** 해야 한다. 예전엔 전부 실어 보내고 화면이 걸렀는데,
+    그러면 limit 이 '보이는 행' 이 아니라 '전체 행' 에 걸린다 — 실제로 시도 54건 중
+    50건(대부분 게이트 스킵)만 오면서 **성공 제출 1건이 화면에서 사라졌다**.
+    """
     init()
     cleared = get_last_cleared_submit_id(user_id)
+    _f = ' AND submitted=1' if scope != 'all' else ''
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             'SELECT id, round_num, idx, code, submitted, submit_status, '
-            'pass_count, fail_count, ts FROM submit_attempts '
-            'WHERE user_id=? AND id>? ORDER BY id DESC LIMIT ?',
+            f'pass_count, fail_count, ts FROM submit_attempts '
+            f'WHERE user_id=? AND id>?{_f} ORDER BY id DESC LIMIT ?',
             (user_id, cleared, int(limit)),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -801,6 +856,25 @@ def get_account_type(conn, user_id: int) -> str:
 @_with_conn
 def set_account_type(conn, user_id: int, account_type: str) -> None:
     conn.execute('UPDATE users SET account_type=? WHERE id=?', (account_type, user_id))
+
+
+SUBMIT_MODES = ('auto', 'list')
+
+
+@_with_conn
+def get_submit_mode(conn, user_id: int) -> str:
+    """'auto' = 게이트 통과 알파를 즉시 제출 · 'list' = 제출하지 않고 대기 목록에만."""
+    row = conn.execute('SELECT submit_mode FROM users WHERE id=?', (user_id,)).fetchone()
+    mode = row['submit_mode'] if row else None
+    return mode if mode in SUBMIT_MODES else 'auto'
+
+
+@_with_conn
+def set_submit_mode(conn, user_id: int, mode: str) -> str:
+    """알 수 없는 값은 'auto' 로 떨어뜨린다 — 조용히 제출을 멈추는 쪽이 더 나쁘다."""
+    mode = mode if mode in SUBMIT_MODES else 'auto'
+    conn.execute('UPDATE users SET submit_mode=? WHERE id=?', (mode, user_id))
+    return mode
 
 
 def get_user(user_id: int) -> dict[str, Any] | None:
@@ -1462,8 +1536,36 @@ def elite_seeds(user_id: int, top_n: int = 5, *,
     return out[:top_n]
 
 
+def recent_metrics(user_id: int, *, limit: int = 400,
+                   with_submitted: bool = False) -> list[dict[str, Any]]:
+    """최근 알파의 metrics dict 목록 (오류 행 제외, 최신순).
+
+    테마 플레이북이 '이 테마에서 뭐가 통과했나' 를 실측으로 읽는 용도.
+    with_submitted=True 면 각 dict 에 '_submitted'(bool) 를 얹는다.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT metrics, submitted FROM alphas WHERE user_id=? "
+            "AND TRIM(error_text)='' ORDER BY id DESC LIMIT ?",
+            (user_id, int(limit)),
+        ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            m = json.loads(r['metrics'] or '{}')
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(m, dict):
+            continue
+        if with_submitted:
+            m = dict(m, _submitted=bool(r['submitted']))
+        out.append(m)
+    return out
+
+
 def combine_pool(user_id: int, *, window: int = 600, top: int = 40,
-                 min_sharpe: float = 1.0) -> list[dict[str, Any]]:
+                 min_sharpe: float = 1.0, region: str | None = None) -> list[dict[str, Any]]:
     """재조합 레이어(combine_layer)용 검증 알파 풀.
 
     최근 `window` 행 중 오류 없고 sharpe >= min_sharpe 인 행을 code_hash 당
@@ -1472,14 +1574,19 @@ def combine_pool(user_id: int, *, window: int = 600, top: int = 40,
     genome-less 알파도 재료가 된다. metrics 는 파싱해서 dict 로 돌려준다.
     """
     init()
+    # region 을 주면 그 리전 알파만 재료로 쓴다 (2026-07-27) — 리전이 바뀌면 옛
+    # 알파의 필드가 새 리전에 존재하지 않아 재조합이 통째로 'unknown variable' 이 된다.
+    _rf = ' AND UPPER(COALESCE(region, \'\'))=? ' if region else ''
+    _args = ([user_id, float(min_sharpe)] + ([str(region).upper()] if region else [])
+             + [int(window)])
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             'SELECT id, code, code_hash, metrics, sharpe, universe, '
             'neutralization, decay, truncation, self_corr '
             'FROM alphas WHERE user_id=? AND TRIM(error_text)=\'\' '
-            'AND sharpe IS NOT NULL AND sharpe >= ? '
-            'ORDER BY id DESC LIMIT ?',
-            (user_id, float(min_sharpe), int(window)),
+            'AND sharpe IS NOT NULL AND sharpe >= ?' + _rf +
+            ' ORDER BY id DESC LIMIT ?',
+            tuple(_args),
         ).fetchall()
     best_by_code: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -1497,9 +1604,75 @@ def combine_pool(user_id: int, *, window: int = 600, top: int = 40,
     return out[:int(top)]
 
 
+def hunt_ladder_pool(user_id: int, *, window: int = 60, top: int = 4,
+                     min_abs_sharpe: float = 0.8,
+                     region: str | None = None) -> list[dict[str, Any]]:
+    """🧭 사냥 사다리 대상 — |Sharpe| 는 충분한데 부호·회전율·Fitness 로만 막힌 알파.
+
+    2026-07-27 GLB 사냥 이식: 그날 제출권에 든 알파는 'S=-0.98 (부호 반대) →
+    반전 → 사후 감쇠' 처방에서 나왔다. 그런 후보를 **직전 라운드들에서** 찾아
+    다음 라운드에 즉시 처방한다. 상관·에러로 죽은 알파는 대상이 아니다(그건 다른 병).
+    """
+    init()
+    _rf = " AND UPPER(COALESCE(region, ''))=? " if region else ''
+    _args = ([user_id, float(min_abs_sharpe)]
+             + ([str(region).upper()] if region else []) + [int(window)])
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT id, code, code_hash, metrics, sharpe, fitness, turnover, '
+            'fail_items, universe, neutralization, decay, truncation '
+            "FROM alphas WHERE user_id=? AND TRIM(error_text)='' "
+            'AND sharpe IS NOT NULL AND ABS(sharpe) >= ?' + _rf +
+            ' ORDER BY id DESC LIMIT ?',
+            tuple(_args),
+        ).fetchall()
+    from . import criteria as _criteria
+    # 형제 처방 제외 기준 = **실제로 상관 거절을 맞은 필드셋만** (2026-07-27 사장 결정).
+    #   "제출된 필드셋 전부 제외"는 과했다 — 거절은 예산을 안 쓰므로 형제도 일단
+    #   시도해 볼 가치가 있고, 통과하면 제출 수가 는다. WQB 가 CORRELATION 으로
+    #   거절한 뒤에야 그 필드셋을 사다리에서 뺀다(헛발질 반복 방지).
+    try:
+        from . import alpha_ast as _ast
+        _done = set(rejected_fieldsets(user_id, min_count=1,
+                                       reason_contains='CORRELATION'))
+    except Exception:
+        _ast, _done = None, set()
+    best: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        d = dict(r)
+        try:
+            d['metrics'] = json.loads(d.get('metrics') or '{}')
+            fails = json.loads(d.get('fail_items') or '[]')
+        except (TypeError, ValueError):
+            continue
+        names = [str((f.get('name') if isinstance(f, dict) else f) or '') for f in fails]
+        blocking = [n for n in names if n and _criteria.is_blocking(n)]
+        if not blocking:
+            continue                      # 이미 제출 가능 — 처방 불필요
+        if not set(n.upper() for n in blocking) <= {
+                'LOW_SHARPE', 'LOW_FITNESS', 'HIGH_TURNOVER', 'LOW_TURNOVER'}:
+            continue                      # 구조적 실패(상관·서브유니버스 등)는 대상 아님
+        if _ast is not None and _done:
+            try:
+                fs = frozenset(_ast.fields_used(d.get('code') or ''))
+            except Exception:
+                fs = frozenset()
+            if fs and fs in _done:
+                continue                  # 이 신호는 이미 제출됨 — 형제 양산 금지
+        d['blocking'] = blocking
+        key = d.get('code_hash') or d.get('code') or ''
+        prev = best.get(key)
+        if prev is None or abs(float(d.get('sharpe') or 0)) > abs(float(prev.get('sharpe') or 0)):
+            best[key] = d
+    out = sorted(best.values(), key=lambda d: abs(float(d.get('sharpe') or 0)),
+                 reverse=True)
+    return out[:int(top)]
+
+
 def ht_rescue_pool(user_id: int, *, window: int = 600, top: int = 30,
                    min_sharpe: float = 1.58, max_fitness: float = 1.0,
-                   min_turnover: float = 0.40) -> list[dict[str, Any]]:
+                   min_turnover: float = 0.40,
+                   region: str | None = None) -> list[dict[str, Any]]:
     """🚑 HT 구제 레이어용 부모 풀 — '신호는 검증됐고 회전만 문제'인 알파들.
 
     2026-07-26 라이브 실측: 24h 신규 시뮬 중 Sharpe>=1.58 이 59건인데 전원
@@ -1510,16 +1683,19 @@ def ht_rescue_pool(user_id: int, *, window: int = 600, top: int = 30,
     code_hash 당 최고 sharpe 1개, sharpe 내림차순 top 개.
     """
     init()
+    # region 필터 — combine_pool 과 같은 이유(리전 교체 시 옛 필드는 존재하지 않음).
+    _rf = " AND UPPER(COALESCE(region, ''))=? " if region else ''
+    _args = ([user_id, float(min_sharpe), float(max_fitness), float(min_turnover)]
+             + ([str(region).upper()] if region else []) + [int(window)])
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             'SELECT id, code, code_hash, metrics, sharpe, fitness, turnover, '
             'universe, neutralization, decay, truncation '
             "FROM alphas WHERE user_id=? AND TRIM(error_text)='' "
             'AND sharpe >= ? AND fitness IS NOT NULL AND fitness < ? '
-            'AND turnover IS NOT NULL AND turnover > ? '
-            'ORDER BY id DESC LIMIT ?',
-            (user_id, float(min_sharpe), float(max_fitness),
-             float(min_turnover), int(window)),
+            'AND turnover IS NOT NULL AND turnover > ?' + _rf +
+            ' ORDER BY id DESC LIMIT ?',
+            tuple(_args),
         ).fetchall()
     best_by_code: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -1953,6 +2129,93 @@ def bandit_stats(user_id: int, dimension: str | None = None) -> list[dict[str, A
             'yield': (ps / vis) if vis > 0 else 0.0,
         })
     return out
+
+
+def submit_queue_add(user_id: int, *, wqb_alpha_id: str, kind: str,
+                     code: str = '', alpha_pk: int | None = None,
+                     note: str = '', metrics: dict | None = None) -> bool:
+    """제출 대기 큐에 추가. (user, wid, kind) 중복은 무시. → 새로 넣었으면 True."""
+    wid = str(wqb_alpha_id or '').strip()
+    if not wid:
+        return False
+    init()
+    with _DB_LOCK, _connect() as conn:
+        cur = conn.execute(
+            'INSERT OR IGNORE INTO submit_queue '
+            '(user_id, alpha_pk, wqb_alpha_id, code, kind, note, metrics, ts, updated_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (user_id, alpha_pk, wid, str(code or ''), kind, str(note or '')[:300],
+             json.dumps(dict(metrics or {}), ensure_ascii=False),
+             time.time(), time.time()))
+        return cur.rowcount > 0
+
+
+def submit_queue_list(user_id: int, limit: int = 60,
+                      include_skipped: bool = False) -> list[dict[str, Any]]:
+    """대기 큐 목록. **skipped 는 기본 제외** (2026-07-27 사장 지시).
+
+    skipped 는 '이 알파는 더 이상 낼 일이 없다' 고 결론난 항목이라 목록에 남으면
+    사람이 판단해야 할 것들 사이에 섞여 눈만 어지럽힌다 (제출 내역에서 스킵을 뺀 것과
+    같은 이유). 감사 목적이면 include_skipped=True 로 볼 수 있다.
+    """
+    init()
+    _f = '' if include_skipped else " AND COALESCE(status,'') != 'skipped'"
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            f'SELECT * FROM submit_queue WHERE user_id=?{_f} ORDER BY id DESC LIMIT ?',
+            (user_id, int(limit))).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d['metrics'] = json.loads(d.get('metrics') or '{}')
+        except (TypeError, ValueError):
+            d['metrics'] = {}
+        out.append(d)
+    return out
+
+
+def submit_queue_get(qid: int) -> dict[str, Any] | None:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        r = conn.execute('SELECT * FROM submit_queue WHERE id=?', (int(qid),)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    try:
+        d['metrics'] = json.loads(d.get('metrics') or '{}')
+    except (TypeError, ValueError):
+        d['metrics'] = {}
+    return d
+
+
+def submit_queue_mark(qid: int, status: str, note: str | None = None) -> None:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        if note is None:
+            conn.execute('UPDATE submit_queue SET status=?, updated_at=? WHERE id=?',
+                         (status, time.time(), int(qid)))
+        else:
+            conn.execute(
+                'UPDATE submit_queue SET status=?, note=?, updated_at=? WHERE id=?',
+                (status, str(note)[:300], time.time(), int(qid)))
+
+
+def submit_queue_next_pending(user_id: int, kind: str = 'budget') -> dict[str, Any] | None:
+    """가장 오래된 pending 1건 (자동 드레인용 — kind='budget' 만 자동 소비)."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        r = conn.execute(
+            "SELECT * FROM submit_queue WHERE user_id=? AND kind=? AND status='pending' "
+            'ORDER BY id ASC LIMIT 1', (user_id, kind)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    try:
+        d['metrics'] = json.loads(d.get('metrics') or '{}')
+    except (TypeError, ValueError):
+        d['metrics'] = {}
+    return d
 
 
 def superalpha_start(user_id: int, seed_plus: int, selection: str) -> int:
@@ -2735,18 +2998,46 @@ def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
     return [fs for fs, n in cnt.items() if n >= int(min_count)]
 
 
+def submitted_fieldsets(user_id: int, *, since_s: float | None = None) -> list[frozenset]:
+    """**성공 제출된** 알파들의 필드 조합 (기본: 전 기간).
+
+    Power Pool self-corr 풀은 태그를 떼도 남으므로, 한 번 제출한 신호의 형제를
+    다시 만드는 것은 구조적으로 낭비다 — 사냥 사다리가 이 목록을 피해 간다.
+    """
+    init()
+    args: list = [user_id]
+    where = 'user_id=? AND submitted=1 AND genome IS NOT NULL'
+    if since_s:
+        where += ' AND ts>?'
+        args.append(time.time() - float(since_s))
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(f'SELECT genome, code FROM alphas WHERE {where}',
+                            tuple(args)).fetchall()
+    out: set[frozenset] = set()
+    for r in rows:
+        try:
+            g = json.loads(r['genome'])
+            fs = frozenset(str(f) for f in (g.get('fields') or []) if f)
+        except (TypeError, ValueError):
+            fs = frozenset()
+        if not fs:
+            try:
+                from . import alpha_ast as _ast
+                fs = frozenset(_ast.fields_used(r['code'] or ''))
+            except Exception:
+                fs = frozenset()
+        if fs:
+            out.add(fs)
+    return list(out)
+
+
 def submitted_fieldsets_today(user_id: int, now: float | None = None) -> list[frozenset]:
-    """오늘(EST — submitted_today 와 같은 경계) 성공 제출된 알파들의 필드 조합.
+    """오늘(동부시간 자정 — submitted_today 와 같은 경계) 성공 제출된 알파들의 필드 조합.
 
     ④ 일일 예산 4칸을 같은 아이디어(필드셋)의 형제들이 잠식하지 않게 하는
     dedup 근거 — 이미 오늘 낸 필드셋의 형제는 제출을 보류한다.
     """
-    import datetime as _dt
-    ts = time.time() if now is None else float(now)
-    est = _dt.datetime.utcfromtimestamp(ts) - _dt.timedelta(hours=5)
-    midnight_est = est.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = (midnight_est + _dt.timedelta(hours=5)).replace(
-        tzinfo=_dt.timezone.utc).timestamp()
+    start = day_start_ts(now)
     init()
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(

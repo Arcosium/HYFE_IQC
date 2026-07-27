@@ -75,6 +75,33 @@ def _api_post_auth(username: str, password: str):
     return sess.post(_WQB_API_BASE + '/authentication', timeout=30)
 
 
+# WQB 가 /authentication 200 바디에 실어 주는 권한 배열의 컨설턴트 표식.
+# 실측(2026-07-27, RC 계정): permissions=[..., "CONSULTANT", "MULTI_SIMULATION", ...]
+# /users/self 의 onboarding.status = "CONSULTANT_APPROVED" 도 같은 사실을 말한다.
+CONSULTANT_PERMISSION = 'CONSULTANT'
+
+
+def _permissions_of(r) -> list:
+    """/authentication 응답의 permissions 배열. 없거나 못 읽으면 빈 리스트."""
+    try:
+        body = r.json()
+    except Exception:
+        return []
+    perms = body.get('permissions') if isinstance(body, dict) else None
+    return [str(p) for p in perms] if isinstance(perms, list) else []
+
+
+def account_type_for(permissions) -> str:
+    """WQB 권한 배열 → 우리 account_type.
+
+    ⚠ 이 값은 **측정**이지 자기 신고가 아니다. 예전엔 가입 폼 라디오 버튼이 정했는데,
+    일반 계정도 API Basic 인증이 통과하므로(auth 주석 참조) '로그인 되면 RC' 라는
+    옛 승급 검사는 아무나 통과했다 — 즉 게이트 구실을 못 했다(2026-07-27).
+    """
+    return ('research_consultant'
+            if CONSULTANT_PERMISSION in set(permissions or ()) else 'standard')
+
+
 def _resolve_persona_url(api_url: str) -> str:
     """WQB '/authentication/persona?inquiry=...' 는 302 로 Persona 호스팅
     verify 페이지(worldquantbrain.withpersona.com)로 리다이렉트한다. 그 최종
@@ -107,7 +134,8 @@ def validate_wqb_api(username: str, password: str) -> dict[str, Any]:
         return {'ok': False, 'reason': 'wqb_unreachable',
                 'detail': f'API 인증 연결 실패: {type(e).__name__}: {e}'}
     if r.status_code in (200, 201):
-        return {'ok': True, 'reason': 'ok', 'detail': 'WQB API 인증 성공'}
+        return {'ok': True, 'reason': 'ok', 'detail': 'WQB API 인증 성공',
+                'permissions': _permissions_of(r)}
     body: dict = {}
     try:
         headers = getattr(r, 'headers', {}) or {}
@@ -170,7 +198,12 @@ def probe_wqb_backend(username: str, password: str) -> dict[str, Any]:
     v = validate_wqb_api(username, password)
     reason = v.get('reason')
     if v.get('ok') or reason == 'wqb_persona_required':
-        return {'backend': 'api', **v}
+        # account_type 도 함께 싣는다 — 워커가 이 탐침 결과로 승급/강등을 동기화한다
+        # (2026-07-27). 안 실으면 그 동기화가 조용히 아무 일도 안 한다.
+        out = {'backend': 'api', **v}
+        if v.get('ok'):
+            out['account_type'] = account_type_for(v.get('permissions'))
+        return out
     if reason == 'wqb_not_consultant':      # HTTP 403 — API 접근 불가(브라우저 폴백 없음)
         return {'backend': 'api_forbidden', **v}
     return {'backend': '', **v}             # 401/429/unreachable — 판정 보류
@@ -194,7 +227,10 @@ def validate_login(wqb_username: str, wqb_password: str, gemini_api_key: str = '
     if backend == 'api':
         if not probe.get('ok'):
             return probe                      # persona_required 등 — 그대로 전달
+        perms = probe.get('permissions') or []
         return {'ok': True, 'reason': 'ok', 'backend': 'api',
+                'permissions': perms,
+                'account_type': account_type_for(perms),
                 'detail': 'WQB API 인증 통과'}
     if backend == 'api_forbidden':
         # 403 — 이 계정은 WQB REST API 를 못 쓴다. 브라우저 폴백은 제거됐으므로 거절.

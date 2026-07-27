@@ -100,6 +100,10 @@ def _load_csv(path: str = DATAFIELDS_CSV) -> list[dict]:
             _CSV_CACHE[cache_key] = []
             return []
 
+        # 같은 파일의 옛 mtime 항목은 버린다 — 갱신할 때마다 수만 행짜리 리스트가
+        # 하나씩 쌓이면 그대로 누수다 (팔레트가 GLB 29343행으로 커진 뒤 특히).
+        for k in [k for k in _CSV_CACHE if k[0] == path and k != cache_key]:
+            _CSV_CACHE.pop(k, None)
         _CSV_CACHE[cache_key] = rows
         return rows
 
@@ -249,12 +253,17 @@ def _all_rows() -> list[dict]:
       delay=1 → 정적 + 라이브 D1,   delay=0 → 라이브 D0.
     """
     rows: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    # ⚠ dedup 키에 region/universe 포함 (2026-07-27, GLB 테마) — (name, delay) 만
+    #   쓰면 같은 필드가 USA·GLB 양쪽에 실재할 때 GLB 행이 조용히 버려져
+    #   리전 필터가 '이 필드는 GLB 에 없다' 고 오판한다.
+    seen: set[tuple] = set()
     for path in (_LIVE_CSV_PATH, DATAFIELDS_CSV):
         try:
             for r in _load_csv(path):
                 key = ((r.get('name') or '').strip().lower(),
-                       str(r.get('delay') or '').strip())
+                       str(r.get('delay') or '').strip(),
+                       str(r.get('region') or '').strip().upper(),
+                       str(r.get('universe') or '').strip().upper())
                 if key[0] and key not in seen:
                     seen.add(key)
                     rows.append(r)
@@ -470,7 +479,8 @@ def find_substitutes(field, excluded=(), k: int = 12, delay=None) -> list[dict]:
 
 def family_pools(per_family: int | None = None,
                  min_coverage: int | None = None,
-                 delay=None) -> dict[str, list[str]]:
+                 delay=None, region=None, universe=None,
+                 datasets=None) -> dict[str, list[str]]:
     """CSV → {family: [필드명…]}. 실패하면 빈 dict (호출부가 curated 로 폴백).
 
     선택 규칙(결정론적 — 같은 CSV 면 언제나 같은 결과):
@@ -486,7 +496,21 @@ def family_pools(per_family: int | None = None,
     n = FIELDS_PER_FAMILY if per_family is None else int(per_family)
     cov_floor = MIN_COVERAGE if min_coverage is None else int(min_coverage)
     want_delay = None if delay is None else str(delay).strip()
-    key = f'{n}:{cov_floor}:{want_delay}'
+    # region/universe 필터 (2026-07-27, GLB 테마) — 필드 집합이 리전마다 다르다.
+    # USA 필드를 GLB 에 쓰면 'unknown variable' 로 라운드가 통째로 ERROR 난다.
+    want_region = None if region is None else str(region).strip().upper()
+    want_universe = None if universe is None else str(universe).strip().upper()
+    # 라이브 CSV mtime 을 키에 섞어 갱신 시 캐시가 자동 무효화되게 한다
+    # (2026-07-27 — 리전 팔레트가 비었다가 refresh 후 채워지는 시나리오).
+    try:
+        _mt = os.path.getmtime(_LIVE_CSV_PATH)
+    except OSError:
+        _mt = 0
+    # 계정 등급별 데이터셋 허용목록도 캐시 키에 넣는다 — 같은 리전이라도 계정마다
+    # 팔레트가 다르다(RC 297 데이터셋 vs 일반 21, 2026-07-27 실측).
+    _ds = frozenset(str(d) for d in datasets) if datasets else None
+    _dskey = ('all' if _ds is None else f'{len(_ds)}:{hash(_ds) & 0xffffff:06x}')
+    key = f'{n}:{cov_floor}:{want_delay}:{want_region}:{want_universe}:{_mt:.0f}:{_dskey}'
     with _POOL_LOCK:
         if key in _POOL_CACHE:
             return _POOL_CACHE[key]
@@ -494,6 +518,14 @@ def family_pools(per_family: int | None = None,
     rows = _all_rows()
     if want_delay is not None:
         rows = [r for r in rows if str(r.get('delay') or '').strip() == want_delay]
+    if want_region is not None:
+        rows = [r for r in rows if str(r.get('region') or '').strip().upper() == want_region]
+    if want_universe is not None:
+        rows = [r for r in rows
+                if str(r.get('universe') or '').strip().upper() == want_universe]
+    if _ds is not None:
+        # category 컬럼에 dataset.id 가 들어 있다 (map_datafields 참조).
+        rows = [r for r in rows if str(r.get('category') or '').strip() in _ds]
     buckets: dict[str, list[dict]] = {}
     for r in rows:
         name = (r.get('name') or '').strip()
@@ -654,20 +686,24 @@ def build_palette(
         rows = _load_csv(_csv_path) if _csv_path else _all_rows()
         if not rows:
             return ''
-        _seen_names: set = set()
-        _uniq = []
-        for _r in rows:
-            _nm = (_r.get('name') or '').strip().lower()
-            if _nm and _nm not in _seen_names:
-                _seen_names.add(_nm)
-                _uniq.append(_r)
-        rows = _uniq
 
         # ---- Step 1: region filter (mandatory) --------------------------
+        # ⚠ **이름 중복 제거보다 먼저** 걸러야 한다 (2026-07-27). 라이브 CSV 가
+        #   다중 리전을 담게 되면서, 이름 dedup 을 먼저 하면 같은 필드의 GLB 행이
+        #   USA 행을 밀어내고 → 리전 필터가 그 필드를 통째로 떨어뜨린다(USA 팔레트에
+        #   구멍). 리전을 먼저 고정하면 dedup 은 D0/D1 중복만 접는다.
         pool = _apply_region_filter(rows, region)
         if not pool:
             # If region matched nothing, use full set as last resort
             pool = list(rows)
+        _seen_names: set = set()
+        _uniq = []
+        for _r in pool:
+            _nm = (_r.get('name') or '').strip().lower()
+            if _nm and _nm not in _seen_names:
+                _seen_names.add(_nm)
+                _uniq.append(_r)
+        pool = _uniq
 
         # ---- Step 2: universe filter (optional, relax if starved) -------
         universe_relaxed = False

@@ -1,4 +1,6 @@
 # tests/test_wqb_backend.py
+import threading
+import time as _time
 import server.wqb_backend as wb
 
 EXPECTED_KEYS = {
@@ -358,3 +360,74 @@ def test_submit_lock_wait_respects_stop_event():
     statuses = sorted(r['submit_status'] for r in res)
     assert 'submitted' in statuses
     assert any(s.startswith('submit_skipped') for s in statuses)
+
+
+# ── 슬롯 재시도 예산 (2026-07-27 실측) ──────────────────────────────────────
+# 슬롯은 앞선 sim 이 끝나야 빈다. 예산이 sim 소요시간보다 짧으면 대기자는 슬롯이
+# 열리기도 전에 전부 포기한다 — 실제로 GLB sim ~1,200s 대 예산 600s 라 라운드마다
+# 8개 중 2~6개가 429 로 죽고 있었다.
+
+def test_retry_budget_outlasts_a_simulation():
+    import server.wqb_backend as wb
+    assert wb._RL_DEADLINE_S >= 1800, (
+        f'재시도 예산 {wb._RL_DEADLINE_S}s 가 sim 소요시간(~1200s)보다 짧으면 '
+        '대기자가 슬롯을 못 잡고 전멸한다')
+    # 폴링 마감과 같은 눈금이어야 한다 — 한쪽만 늘리면 다시 어긋난다
+    import server.wqb_api as wapi
+    assert wb._RL_DEADLINE_S >= wapi._POLL_DEADLINE_S * 0.9
+
+
+def test_retry_gives_up_only_after_the_budget(monkeypatch):
+    """429 가 계속돼도 예산 안에서는 재시도하고, 넘겨야 RATE_LIMITED."""
+    import server.wqb_backend as wb
+    calls = []
+    clock = {'t': 0.0}
+    monkeypatch.setattr(wb._time, 'monotonic', lambda: clock['t'])
+    monkeypatch.setattr(wb._time, 'sleep', lambda s: clock.__setitem__('t', clock['t'] + s))
+    be = wb.ApiBackend.__new__(wb.ApiBackend)
+    be._client = type('C', (), {
+        'submit_simulation': lambda self, c, s: (calls.append(1), 'RATE_LIMITED')[1]})()
+    assert be._submit_with_retry('rank(close)', {}, None) == 'RATE_LIMITED'
+    assert len(calls) > 1, '한 번만 시도하고 포기했다 — 재시도 루프가 죽었다'
+    assert clock['t'] >= wb._RL_DEADLINE_S
+
+
+# ── 빈 슬롯 없이 돌기 (2026-07-27 사장 지시) ────────────────────────────────
+# 후보 수 == 슬롯 수면 sim 하나가 끝나도 집어 갈 다음 후보가 없어 그 슬롯이 라운드
+# 끝까지 논다. sim 이 ~20분이라 낭비가 크다 — 후보를 슬롯보다 많이 줘야 한다.
+
+def test_candidate_count_exceeds_slot_count():
+    import server.wqb_backend as wb
+    from server import worker as w
+    assert w.ALPHAS_PER_ROUND > wb._default_concurrency(), (
+        f'후보 {w.ALPHAS_PER_ROUND} <= 슬롯 {wb._default_concurrency()} — '
+        '시뮬이 끝나도 채울 후보가 없어 슬롯이 논다')
+
+
+def test_pool_refills_a_freed_slot_immediately(monkeypatch):
+    """슬롯(스레드)이 비면 대기 후보가 **즉시** 들어가야 한다 — 동시 실행은 슬롯 수를
+    넘지 않으면서, 전체 후보가 모두 처리돼야 한다."""
+    import server.wqb_backend as wb
+    live, peak, done = {'n': 0}, {'n': 0}, []
+    lock = threading.Lock()
+
+    def fake_run_one(self, s, forced_delay, partial_fn, stop_event, submit_gate=None):
+        with lock:
+            live['n'] += 1
+            peak['n'] = max(peak['n'], live['n'])
+        _time.sleep(0.02)
+        with lock:
+            live['n'] -= 1
+            done.append(s['idx'])
+        return {'idx': s['idx']}
+
+    monkeypatch.setattr(wb.ApiBackend, '_run_one', fake_run_one)
+    be = wb.ApiBackend.__new__(wb.ApiBackend)
+    be.concurrency = 4
+    be._client = type('C', (), {'authenticate': lambda self: True})()
+    batch = [{'idx': i} for i in range(1, 13)]        # 후보 12 > 슬롯 4
+    out = be.simulate_batch(batch)
+
+    assert len(out) == 12 and len(done) == 12, '후보 일부가 처리되지 않았다'
+    assert peak['n'] <= 4, f'동시 실행이 슬롯 수를 넘었다: {peak["n"]}'
+    assert peak['n'] == 4, f'슬롯을 다 못 채웠다: {peak["n"]}'
