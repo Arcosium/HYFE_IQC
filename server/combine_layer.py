@@ -110,8 +110,27 @@ def _weighted_pick(profiles: list[dict], weights: list[float], rng) -> dict:
     return profiles[-1]
 
 
+def usable_combiners(operators=None) -> list[tuple[str, str]]:
+    """이 계정이 실제로 쓸 수 있는 결합식만. operators=None 이면 (조회 실패 등) 전부.
+
+    ⚠ 2026-07-28 실측: COMBINERS 5개 중 **3개가 우리 계정에서 접근 불가**였다
+    (vector_proj·regression_neut·regression_proj — /operators 는 82개만 준다).
+    고르는 순간엔 알 길이 없어 시뮬까지 간 뒤 'Attempted to use inaccessible or
+    unknown operator' 로 죽었다 — 라운드마다 재조합 후보를 통째로 버린 셈이다.
+    RC 라고 다 쓸 수 있는 게 아니라서 계정 종류로 건너뛰면 안 된다.
+    """
+    if not operators:
+        return list(COMBINERS)
+    ok = []
+    for name, tmpl in COMBINERS:
+        used = set(re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\s*\(', tmpl))
+        if used <= set(operators):
+            ok.append((name, tmpl))
+    return ok or list(COMBINERS)   # 전멸이면 차라리 옛 동작 — 조회가 틀렸을 수 있다
+
+
 def candidates(pool: list[dict], *, n: int = 2, rng=None,
-               max_code_len: int = 700) -> list[dict]:
+               max_code_len: int = 700, operators=None) -> list[dict]:
     """검증 알파 풀에서 재조합 후보 전략 dict ≤ n 개를 만든다.
 
     각 dict 은 워커 strategies 항목과 같은 모양:
@@ -134,6 +153,7 @@ def candidates(pool: list[dict], *, n: int = 2, rng=None,
 
         out: list[dict] = []
         made: set[str] = set()
+        combiners = usable_combiners(operators)
         weights = [p['weight'] for p in profiles]
         for _attempt in range(n * 6):
             if len(out) >= n:
@@ -143,7 +163,7 @@ def candidates(pool: list[dict], *, n: int = 2, rng=None,
             rest_w = [p['weight'] * (1.0 + max(_affinity(a, p), 0.0))
                       for p in rest]
             b = _weighted_pick(rest, rest_w, _rng)
-            name, tmpl = COMBINERS[int(_rng.random() * len(COMBINERS)) % len(COMBINERS)]
+            name, tmpl = combiners[int(_rng.random() * len(combiners)) % len(combiners)]
             code = tmpl.format(a=a['code'], b=b['code'])
             if len(code) > max_code_len or code in made:
                 continue

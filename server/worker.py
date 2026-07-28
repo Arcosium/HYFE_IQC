@@ -68,16 +68,6 @@ FOCUS_MIN_SHARPE = float(os.environ.get('HYFE_IQC_FOCUS_MIN_SHARPE', '1.0'))
 # submit_queue(kind=budget)로 넘겨 다음 날 자동 드레인한다.
 # 리셋 경계는 **UTC 자정 = KST 09:00** (db.day_start_ts).
 DAILY_SUBMIT_BUDGET = int(os.environ.get('IQC_DAILY_SUBMIT_BUDGET', '4'))
-# 그 4칸을 쓸 최소 가치(reward.submission_value).
-# ⚠ **일일 예산은 이월되지 않는다** — 안 쓰면 그냥 사라진다. 그래서 문턱이 높을 때의
-#   손해(하루 0건 제출)가 낮을 때의 손해(평범한 알파 제출)보다 크다.
-#   게다가 이 문턱은 **2차 필터**다: 여기 도달한 알파는 이미 차단 FAIL 0 = 제출 가능이고,
-#   후비용 Sharpe > 0 이라 비용을 내고도 남는 신호다. 쓰레기는 1차 게이트가 이미 막았다.
-#   보정 근거(2026-07-21 실측 지표로 계산한 submission_value):
-#       Sharpe 1.53 → 0.310 · 1.12 → 0.254 · 0.8 → 0.210 · 0.5 → 0.170 · 0.4 → 0.157
-#   0.25 로 두면 Sharpe 1.1 미만이 전부 막혀 하루 0건이 되기 쉽다 → 0.15 로 시작하고
-#   라이브 분포가 쌓이면 올린다.
-SUBMIT_MIN_VALUE = float(os.environ.get('IQC_SUBMIT_MIN_VALUE', '0.15'))
 
 # ── 결정론 레이어 (2026-07-26, WQB AAF·smilee 이식) — LLM 비용 0 ─────────────
 # ① 재조합(combine_layer): 탐색 라운드에서 검증된 IS 알파 둘을 결합해 후보 추가.
@@ -177,6 +167,33 @@ def _theme_retry_worthwhile(metrics) -> bool:
         return True          # 판정 불가면 보관한다 — 잘못 버리는 쪽이 더 나쁘다
 
 
+def _stamp_region(strategies, region: str | None) -> int:
+    """라운드 탐색 조건의 리전을 후보 settings 에 채운다(비어 있을 때만). 채운 개수 반환.
+
+    ⚠ 2026-07-28 실측 버그. GA 후보는 region 을 실어 오지만 **레이어 주입 후보**
+    (재조합·사냥사다리·HT구제·개선)는 부모 알파의 universe/neutralization/decay/
+    truncation 만 물려받고 region 을 안 실었다. 그러면 wqb_api._full_settings 의
+    기본값 'USA' 로 떨어져, GLB 유니버스에 USA 가 붙는다:
+
+        400 {"settings":{"universe":["Universe TOPDIV3000 is not available
+                                      for instrument type EQUITY and region USA."]}}
+
+    한 라운드에서 4개가 이렇게 조용히 죽었다(응답 본문을 안 읽어 '제출 응답 없음'
+    으로만 보였다). 레이어마다 고치면 다음에 새 레이어가 또 빠뜨리므로, 후보가
+    전부 지나는 길목에서 한 번 채운다 — 캐시 지문(settings_fingerprint)을 만들기
+    **전에** 불러야 지문과 실제 제출 설정이 어긋나지 않는다.
+    """
+    if not region:
+        return 0
+    n = 0
+    for s in strategies:
+        st = s.setdefault('settings', {})
+        if not st.get('region'):
+            st['region'] = region
+            n += 1
+    return n
+
+
 def _repair_field_pool():
     """field 스냅 후보 = 라이브+정적 팔레트 필드 ∪ genome curated 필드. 10분 캐시."""
     now = time.time()
@@ -231,6 +248,18 @@ def cleanup_dead() -> None:
             _REGISTRY.pop(uid, None)
 
 
+def shutdown_all() -> int:
+    """살아 있는 워커 전부에 종료 요청 + 진행 중 시뮬 취소. 취소한 시뮬 수 반환."""
+    with _REGISTRY_LOCK:
+        workers = list(_REGISTRY.values())
+    for w in workers:
+        try:
+            w.request_shutdown()
+        except Exception:
+            pass
+    return wqb_backend.cancel_all_inflight()
+
+
 class Worker(threading.Thread):
     """user_id 별 IQC 라운드 무한 실행."""
 
@@ -249,20 +278,20 @@ class Worker(threading.Thread):
 
     # ── 일일 제출 예산 ────────────────────────────────────────────
     def _submit_gate(self, metrics: dict, self_corr=None, fail_items=None,
-                     genome=None) -> tuple[bool, str]:
+                     genome=None, code=None) -> tuple[bool, str]:
         """제출할까? (ok, 사유) — wqb_backend 가 **제출 락 안에서** 호출한다.
 
         WQB 컨설턴트의 제출 한도는 **하루 4건**이다("Max 4 alpha submissions in a day",
-        Power Pool 문서). 2026-07 규칙 개편으로 고회전 알파는 Sharpe 1.1 로도 제출
-        가능해졌기 때문에, 예전처럼 '완료되면 무조건 제출' 하면 그날 예산 4칸이 **그날
-        가장 먼저 통과한 4개**에 소진된다. 뒤에 훨씬 좋은 알파가 나와도 못 낸다.
+        Power Pool 문서).
 
-        그래서 세 겹으로 거른다:
+        **낼 수 있으면 낸다** (2026-07-28 사장 지시). 두 겹만 거른다:
           0) 차단 FAIL: `criteria.is_blocking` FAIL 이 하나라도 있으면 **WQB 가 반드시
              403 으로 거절**한다 — 보낼 이유가 없다
-          1) 예산: 오늘 성공 제출이 DAILY_SUBMIT_BUDGET 이상이면 중단
-          2) 품질: reward.submission_value 가 SUBMIT_MIN_VALUE 미만이면 보류
-        1·2 는 env 로 조정 가능하고, DAILY_SUBMIT_BUDGET=0 이면 그 둘이 꺼진다.
+          1) 예산: 오늘 성공 제출이 DAILY_SUBMIT_BUDGET 이상이면 대기 큐로
+        예전엔 여기에 품질 문턱(below_value)이 한 겹 더 있었다. 4칸을 아껴 뒀다가 더
+        좋은 알파에 쓰자는 것이었는데, 실측이 정반대였다 — 제출 실적 1·1·2·4·2 건으로
+        대개 4칸을 못 채우면서 같은 기간 330건을 문턱으로 걸렀다. 예산은 이월되지
+        않으니 아끼는 게 곧 버리는 것이었다.
         0 은 끄지 않는다 — 거절이 확정된 요청은 어떤 설정에서도 낭비다.
 
         ⚠ 0 이 없어서 2026-07-22 라이브에서 FAIL 5개짜리 알파를 계속 제출해
@@ -275,6 +304,18 @@ class Worker(threading.Thread):
         blocking = [n for n in names if n and _criteria.is_blocking(n)]
         if blocking:
             return False, f'blocking_fail({",".join(blocking[:3])})'
+        # 같은 식이 **최근** 거절당했으면 또 보내지 않는다. 후보 생성이 결정론이라
+        # 재시작·재방문 때 같은 식이 다시 만들어져, 이 검사가 없으면 계속 재제출한다
+        # (2026-07-28: 1YzG86aM 이 14분 간격으로 같은 FAIL 5개로 재거절).
+        # IS 판정엔 안 걸리고 제출 시점 판정에만 걸리는 알파라 위 blocking 검사로는 못 막는다.
+        # ⚠ 영구 차단이 아니다 — Power Pool·테마 조건이 바뀌면 통과할 수 있으므로
+        #   db.REJECT_MEMORY_S(기본 24h) 가 지나면 다시 시도한다(사장 지적).
+        try:
+            prior = _db.code_rejected_before(self.user_id, str(code or ''))
+        except Exception:
+            prior = None
+        if prior:
+            return False, f'already_rejected({prior[len("rejected:"):][:60]})'
         # 📋 제출 모드 = 'list' — 자동 제출하지 않고 대기 목록에만 쌓는다(사용자 선택).
         #    차단 FAIL 검사 **뒤**에 둔다: WQB 가 어차피 거절할 알파로 목록을 채우면
         #    사람이 골라야 할 것이 묻힌다. kind='manual' 은 큐 드레인이 건드리지 않는다.
@@ -356,7 +397,7 @@ class Worker(threading.Thread):
         if DAILY_SUBMIT_BUDGET <= 0:
             return True, ''
         try:
-            used = _db.submitted_today(self.user_id)
+            used = self._submitted_today()
         except Exception as e:
             LOG.warning('submitted_today 조회 실패 (제출 강행): %s', e)
             return True, ''
@@ -364,23 +405,27 @@ class Worker(threading.Thread):
             # 예산 초과분은 버리지 않고 대기 큐에 — 다음 날 _drain_submit_queue 가
             # 자동 재시도한다 (2026-07-27 사장 지시).
             wid = str((metrics or {}).get('wqb_alpha_id') or '')
+            queued = False
             if wid:
                 try:
-                    if _db.submit_queue_add(
-                            self.user_id, wqb_alpha_id=wid, kind='budget',
-                            note=f'일일 예산 초과({used}/{DAILY_SUBMIT_BUDGET}) — 익일 자동 재시도',
-                            metrics=dict(metrics or {})):
+                    queued = bool(_db.submit_queue_add(
+                        self.user_id, wqb_alpha_id=wid, kind='budget',
+                        note=f'일일 예산 초과({used}/{DAILY_SUBMIT_BUDGET}) — 익일 자동 재시도',
+                        metrics=dict(metrics or {})))
+                    if queued:
                         LOG.info('제출 대기 큐 추가(budget): %s', wid)
                 except Exception as e:
                     LOG.warning('submit_queue 추가 실패(무시): %s', e)
-            return False, f'daily_budget({used}/{DAILY_SUBMIT_BUDGET})→queued'
-        try:
-            from . import reward as _reward
-            val = _reward.submission_value(metrics or {}, self_corr=self_corr)
-        except Exception:
-            return True, ''
-        if val < SUBMIT_MIN_VALUE:
-            return False, f'below_value({val:.2f}<{SUBMIT_MIN_VALUE:.2f})'
+            else:
+                # 큐는 wqb_alpha_id 로 재제출한다 — id 가 없으면 넣어도 못 쓴다.
+                LOG.warning('예산 초과인데 wqb_alpha_id 가 없어 대기 큐에 못 넣음')
+            # 넣지도 못했으면서 '→queued' 라고 적지 않는다 — 라이브 피드가 거짓말한다.
+            tail = '→queued' if queued else '→미보관'
+            return False, f'daily_budget({used}/{DAILY_SUBMIT_BUDGET}){tail}'
+        # 품질 문턱(below_value)은 2026-07-28 사장 지시로 제거했다. **낼 수 있으면 낸다.**
+        # 하루 4칸을 아끼자는 장치였는데 실측이 정반대였다 — 제출 실적이 1·1·2·4·2 건으로
+        # 대개 4칸을 못 채우면서 같은 기간 330건을 문턱으로 걸렀다. 안 쓴 예산은 이월되지
+        # 않고 사라지니, 아끼는 게 곧 버리는 것이었다. 한도를 채우면 위에서 대기 큐로 간다.
         return True, ''
 
     def _retry_stuck_submits(self, round_num: int, username: str,
@@ -471,6 +516,58 @@ class Worker(threading.Thread):
         self._log(0, f'🔐 계정 접근 가능 데이터셋 {len(ids)}종 — 팔레트를 여기로 제한')
         return ids
 
+    def _submitted_today(self) -> int:
+        """오늘 제출 수 — **WQB 실측과 우리 집계 중 큰 쪽**.
+
+        우리 집계는 UI 로 직접 낸 것을 모르고(2026-07-28: 2 vs 실측 3), WQB 쪽은
+        방금 우리가 낸 것이 아직 안 잡힐 수 있다. 예산을 넘겨 내는 쪽이 훨씬
+        나쁘므로(WQB 가 거절해 후보 하나를 버린다) 큰 값을 쓴다.
+        조회는 5분 캐시 — 게이트는 라운드마다 여러 번 불린다.
+        """
+        try:
+            local = _db.submitted_today(self.user_id)
+        except Exception:
+            local = 0
+        cached = getattr(self, '_sub_cnt_cache', None)
+        today = _db.platform_date()
+        if cached and cached[0] == today and time.time() - cached[1] < 300:
+            return max(local, cached[2])
+        try:
+            from . import wqb_api as _wqb_api
+            u, p = _db.get_user_credentials(self.user_id)[:2]
+            remote = _wqb_api.WqbApiClient(u, p).submissions_on(today)
+        except Exception as e:
+            self._log_quiet(0, f'⚠ WQB 제출 수 조회 실패(로컬 집계 사용): {e}')
+            return local
+        if remote is None:
+            return local
+        self._sub_cnt_cache = (today, time.time(), int(remote))
+        if remote > local:
+            self._log_quiet(
+                0, f'📊 오늘 제출 {remote}건 (우리 집계 {local}건) — 외부 제출 반영')
+        return max(local, int(remote))
+
+    def _account_operators(self, username: str, password: str):
+        """이 계정이 쓸 수 있는 연산자 집합. 조회 실패면 None(= 제한 없음).
+
+        데이터셋 캐시와 같은 규칙(하루 1회, 실패 시 직전 값 유지)이지만 **RC 도
+        건너뛰지 않는다** — 2026-07-28 실측으로 CONSULTANT 계정에서도 vector_proj·
+        regression_neut·regression_proj 이 막혀 있었다.
+        """
+        cached = getattr(self, '_acct_op_cache', None)
+        if cached and time.time() - cached[0] < 24 * 3600:
+            return cached[1]
+        try:
+            from . import wqb_api as _wqb_api
+            ops = _wqb_api.WqbApiClient(username, password).accessible_operators()
+        except Exception as e:
+            self._log_quiet(0, f'⚠ 계정 연산자 조회 실패(직전 값 유지): {e}')
+            return cached[1] if cached else None
+        if not ops:
+            return cached[1] if cached else None
+        self._acct_op_cache = (time.time(), ops)
+        return ops
+
     def _drain_submit_queue(self, round_num: int, username: str,
                             password: str) -> None:
         """예산 초과로 대기(kind='budget')하던 알파를 예산이 열린 날 자동 제출.
@@ -480,7 +577,7 @@ class Worker(threading.Thread):
         사람이 UI 에서 판단해 1건씩 쏜다 (2026-07-27 사장 지시).
         """
         try:
-            if _db.submitted_today(self.user_id) >= DAILY_SUBMIT_BUDGET:
+            if self._submitted_today() >= DAILY_SUBMIT_BUDGET:
                 return
             row = _db.submit_queue_next_pending(self.user_id, kind='budget')
         except Exception:
@@ -528,7 +625,16 @@ class Worker(threading.Thread):
                   level=('pass' if ok else 'info'))
 
     # ── 외부 제어 ─────────────────────────────────────────────
-    def request_pause(self) -> None:
+    def request_shutdown(self) -> None:
+        """프로세스 종료용 중단.
+
+        request_pause 와 딱 하나 다르다 — **paused 플래그를 DB 에 남기지 않는다.**
+        남기면 재시작 후 _auto_resume_workers 가 '사용자가 스스로 멈춘 것' 으로 보고
+        워커를 안 켠다(list_running_user_ids 가 paused=0 만 고른다).
+        """
+        self.request_pause(persist=False)
+
+    def request_pause(self, *, persist: bool = True) -> None:
         """pause 요청. 현재 진행 중인 batch 가 있으면 subprocess 도 즉시 kill."""
         self._stop_event.set()
         with self._lock:
@@ -542,7 +648,8 @@ class Worker(threading.Thread):
                     proc.kill()
                 except Exception:
                     pass
-        _db.set_user_running(self.user_id, running=True, paused=True)
+        if persist:
+            _db.set_user_running(self.user_id, running=True, paused=True)
 
     def request_resume(self) -> None:
         """일시정지 해제 — Worker 가 종료된 상태일 수 있으므로 새 인스턴스로 시작 필요.
@@ -1055,13 +1162,17 @@ class Worker(threading.Thread):
                 if COMBINE_LAYER_N > 0 and not is_focus and not is_spec_round:
                     from . import combine_layer
                     _cpool = _db.combine_pool(self.user_id, region=_creg)
+                    _ops = self._account_operators(username, password)
                     _ccands = combine_layer.candidates(
-                        _cpool, n=COMBINE_LAYER_N, rng=_det_rng)
+                        _cpool, n=COMBINE_LAYER_N, rng=_det_rng, operators=_ops)
                     if _ccands:
                         strategies.extend(_ccands)
+                        _nc = len(combine_layer.usable_combiners(_ops))
                         self._log(round_num,
                                   f'  🧬 재조합 레이어 — 검증 알파 풀 {len(_cpool)}개'
-                                  f'에서 결합 후보 {len(_ccands)}개 추가')
+                                  f'에서 결합 후보 {len(_ccands)}개 추가'
+                                  + (f' (쓸 수 있는 결합식 {_nc}/{len(combine_layer.COMBINERS)})'
+                                     if _ops else ''))
                 # 🧭 사냥 사다리 — 부호·회전율·Fitness 로만 막힌 강신호에 표준 처방.
                 if HUNT_LADDER_PER_ROUND > 0 and not is_spec_round:
                     from . import hunt_ladder
@@ -1271,11 +1382,74 @@ class Worker(threading.Thread):
                 except Exception:
                     pass
 
+            # 리전 채우기 — 지문/시뮬 이전이어야 한다(_stamp_region 주석 참조).
+            _n_reg = _stamp_region(
+                strategies, str(getattr(_constraint, 'region', '') or '').upper() or None)
+            if _n_reg:
+                self._log_quiet(round_num, f'리전 미지정 후보 {_n_reg}개에 조건 리전 주입')
+
             # 캐시 hit 분리 (settings-aware 키: code_hash + settings_fingerprint).
             cached_results: list[dict] = []
             to_simulate: list[dict] = []
             _novelty_n = 0
             seen: set[str] = set()
+            # idx → 저장된 alphas.id. **시뮬이 끝나는 즉시** 채워진다.
+            alpha_id_by_idx: dict[int, int] = {}
+            def _alpha_entry(r: dict) -> dict:
+                """시뮬 결과 1건 → alphas 행. 즉시 저장과 라운드 끝 저장이 **같은
+                한 곳**을 쓴다 — 두 벌로 두면 반드시 어긋난다."""
+                i = int(r.get('idx') or 0)
+                _m = dict(r.get('metrics') or {})
+                # delay-aware 캐시 stamp — 갓 시뮬한 결과엔 이번 라운드 강제 delay를,
+                # 캐시 재사용분엔 원본 _delay 를 그대로 둔다.
+                if not r.get('cached'):
+                    _m['_delay'] = str(forced_delay)
+                _meta = meta_by_idx.get(i) or {}
+                return {
+                    'idx': i, 'code': r.get('code', ''), 'desc': r.get('desc', ''),
+                    'pass_count': int(r.get('pass_count') or 0),
+                    'pass_items': r.get('pass_items') or [],
+                    'fail_count': int(r.get('fail_count') or 0),
+                    'fail_items': r.get('fail_items') or [],
+                    'error_count': int(r.get('error_count') or 0),
+                    'pending_count': int(r.get('pending_count') or 0),
+                    'submitted': r.get('submitted', False),
+                    'submit_status': r.get('submit_status', ''),
+                    'error_text': r.get('error_text', ''),
+                    'metrics': _m,
+                    'is_status': r.get('is_status') or {},
+                    'mode': r.get('mode', ''),
+                    'cached': bool(r.get('cached')),
+                    'phase': phase,
+                    'settings': settings_by_idx.get(i, {}),
+                    'delay': forced_delay,
+                    'self_corr': r.get('self_corr'),
+                    # 세대(lineage)는 시뮬 결과가 아니라 생성 시 유전체가 안다.
+                    'generation': int((genome_by_idx.get(i) or {}).get('generation') or 0),
+                    # 귀속(v6) — 부모 알파 id·변이 축·바뀐 유전자.
+                    'parent_alpha_id': _meta.get('parent_alpha_id'),
+                    'origin': _meta.get('origin'),
+                    'directive': _meta.get('directive'),
+                    'genes_changed': _meta.get('genes_changed'),
+                    # 이 알파를 낳은 LLM 전략스펙 (NULL = 순수 GA 산).
+                    'spec_id': _meta.get('spec_id'),
+                    # 유전체 원본 — 다음 라운드가 코드에서 역추출하지 않고 이걸 읽는다.
+                    'genome': genome_by_idx.get(i),
+                }
+
+            def _persist(r: dict) -> None:
+                """알파 1건을 즉시 저장. 라운드 끝까지 미루면 그 사이 재시작에
+                통째로 날아가고, 캐시도 비어 같은 식을 다시 시뮬한다
+                (2026-07-28 실측: 중단된 라운드 2개가 alphas 0건, 캐시히트 0)."""
+                i = int(r.get('idx') or 0)
+                if i in alpha_id_by_idx or (r.get('error_text') or '').strip():
+                    return          # 에러 행은 캐시 대상이 아니라 라운드 끝에서 처리
+                try:
+                    alpha_id_by_idx[i] = _db.insert_alpha(
+                        self.user_id, round_id, round_num, _alpha_entry(r))
+                except Exception as _e:
+                    self._log_quiet(round_num, f'⚠ 즉시 저장 실패(라운드 끝 재시도): {_e}')
+
             settings_by_idx: dict[int, dict] = {
                 int(s['idx']): (s.get('settings') or {}) for s in strategies
             }
@@ -1345,10 +1519,12 @@ class Worker(threading.Thread):
                     self._batch_proc_holder['proc'] = None
                 # 알파 한 개가 끝날 때마다 partial_fn 으로 즉시 결과를 흘려보낸다.
                 _seen_idx: set[int] = set()
+
                 def _on_partial(obj: dict, _round_num=round_num):
                     s_idx = int(obj.get('idx') or 0)
                     if s_idx in _seen_idx:
                         return
+                    _persist(obj)
                     _seen_idx.add(s_idx)
                     status = obj.get('status') or ''
                     err_t = (obj.get('error_text') or '').strip()
@@ -1571,53 +1747,12 @@ class Worker(threading.Thread):
                     all_results.extend(results)
 
             # 결과 저장 + feedback / errors 누적 (UI 로그는 PASS 만 노출).
-            alpha_id_by_idx: dict[int, int] = {}   # idx → 방금 저장한 alphas.id
             for r in all_results:
-                # delay-aware 캐시용 stamp — 갓 시뮬한 결과엔 이번 라운드 강제 delay 를,
-                # 캐시 재사용 결과(cached)엔 원본 _delay 를 그대로 보존한다.
-                _metrics = dict(r.get('metrics') or {})
-                if not r.get('cached'):
-                    _metrics['_delay'] = str(forced_delay)
-                alpha_entry = {
-                    'idx': r['idx'],
-                    'code': r['code'],
-                    'desc': r.get('desc', ''),
-                    'pass_count': int(r.get('pass_count') or 0),
-                    'pass_items': r.get('pass_items') or [],
-                    'fail_count': int(r.get('fail_count') or 0),
-                    'fail_items': r.get('fail_items') or [],
-                    'error_count': int(r.get('error_count') or 0),
-                    'pending_count': int(r.get('pending_count') or 0),
-                    'submitted': r.get('submitted', False),
-                    'submit_status': r.get('submit_status', ''),
-                    'error_text': r.get('error_text', ''),
-                    'metrics': _metrics,
-                    'is_status': r.get('is_status') or {},
-                    'mode': r.get('mode', ''),
-                    'cached': bool(r.get('cached')),
-                    'phase': phase,
-                    'settings': settings_by_idx.get(int(r['idx']), {}),
-                    'delay': forced_delay,
-                    'self_corr': r.get('self_corr'),
-                    # 세대(lineage)는 시뮬 결과가 아니라 생성 시 유전체가 안다.
-                    'generation': int((genome_by_idx.get(int(r['idx'])) or {})
-                                      .get('generation') or 0),
-                    # 귀속(v6) — 부모 알파 id·변이 축·바뀐 유전자. 시뮬 결과 r 이
-                    # 아니라 생성 계획(meta_by_idx)이 안다.
-                    'parent_alpha_id': (meta_by_idx.get(int(r['idx'])) or {})
-                                       .get('parent_alpha_id'),
-                    'origin': (meta_by_idx.get(int(r['idx'])) or {}).get('origin'),
-                    'directive': (meta_by_idx.get(int(r['idx'])) or {}).get('directive'),
-                    'genes_changed': (meta_by_idx.get(int(r['idx'])) or {})
-                                     .get('genes_changed'),
-                    # 이 알파를 낳은 LLM 전략스펙 (NULL = 순수 GA 산).
-                    'spec_id': (meta_by_idx.get(int(r['idx'])) or {}).get('spec_id'),
-                    # 유전체 원본을 그대로 영속화 — 다음 라운드가 코드에서 역추출하지 않고
-                    # 이걸 읽는다. 이게 세대를 잇는 유일한 통로다.
-                    'genome': genome_by_idx.get(int(r['idx'])),
-                }
-                alpha_id_by_idx[int(r['idx'])] = _db.insert_alpha(
-                    self.user_id, round_id, round_num, alpha_entry)
+                # 저장은 _persist 가 시뮬 종료 즉시 이미 했을 수 있다 — 그 경우 건너뛴다.
+                # 여기 남는 건 에러 행과, 즉시 저장이 실패했던 행이다.
+                if int(r.get('idx') or 0) not in alpha_id_by_idx:
+                    alpha_id_by_idx[int(r['idx'])] = _db.insert_alpha(
+                        self.user_id, round_id, round_num, _alpha_entry(r))
                 _sid = (meta_by_idx.get(int(r['idx'])) or {}).get('spec_id')
                 if _sid:
                     try:
@@ -2116,6 +2251,8 @@ def _skip_reason_ko(sub_st: str) -> str:
         return f'예산 리셋 대기 {r[len("submit_hold"):].split("→")[0].strip("()")} → 대기 큐'
     if r.startswith('blocking_fail'):
         return f'WQB 가 반드시 거절 — {r[len("blocking_fail"):].strip("()")}'
+    if r.startswith('already_rejected'):
+        return f'같은 식이 이미 거절됨 — {r[len("already_rejected"):].strip("()")}'
     if r.startswith('fieldset_cooldown'):
         return '같은 필드 조합이 최근 반복 거절돼 24h 보류'
     if r.startswith('family_corr_wall'):

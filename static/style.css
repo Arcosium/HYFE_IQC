@@ -720,3 +720,7 @@ table.pop-table td.num { text-align: right; font-family: var(--mono); }
   color: var(--ink); font-weight: 700; border-bottom-color: var(--red);
 }
 .tab-page[hidden] { display: none; }
+
+/* 제출 대기 선택 삭제 (2026-07-28) — 체크 칸은 내용이 없으니 폭을 잡아 두지 않는다 */
+.sq-pick { width: 26px; text-align: center; }
+.sq-pick input { margin: 0; vertical-align: middle; }

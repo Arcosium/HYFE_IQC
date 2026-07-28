@@ -34,8 +34,14 @@ _SIM_QUOTA_WARN = float(os.environ.get('IQC_SIM_QUOTA_WARN', '1000'))
 # ── 시뮬 폴링 (2026-07-21 재조정) ────────────────────────────────────────────
 # 라이브 에러의 75%(400건 중 299건)가 'sim TIMEOUT: poll deadline' 이었다 — WQB 가
 # 실패시킨 게 아니라 우리가 720초에 포기한 것이다. D0·TOP3000·10년 IS 시뮬은 대기열까지
-# 포함하면 12분을 넘기는 게 정상이라, 마감을 30분으로 올리고 정체 감지로 보완한다.
-_POLL_DEADLINE_S = float(os.environ.get('IQC_SIM_POLL_DEADLINE_S', '1800'))
+# 포함하면 12분을 넘기는 게 정상이라, 마감을 올리고 정체 감지로 보완한다.
+#
+# 2026-07-28 재조정 30분 → 60분. 실측(r5 ph3): 라운드 꼬리에 접수된 4개가 **30분 내내
+# progress=None**(= WQB 대기열에서 시작조차 안 됨) 이다 마감에 걸려 통째로 버려졌고,
+# 그 한 판 처리량이 16.8 → 8.8 완료/시간으로 반토막 났다. 대기열에 오래 앉는 건
+# 고장이 아니다 — 진짜 멈춘 시뮬은 아래 _POLL_STALL_S 가 따로 잡는다. 기다리는 스레드는
+# 어차피 자기 후보 말고 할 일이 없으니, 포기해서 후보를 버리는 것보다 기다리는 게 싸다.
+_POLL_DEADLINE_S = float(os.environ.get('IQC_SIM_POLL_DEADLINE_S', '3600'))
 # 진행이 이 시간 동안 전혀 없으면 마감 전이라도 포기(슬롯 반환). 대기열에서 오래 머무는
 # 것과 진짜 멈춘 것을 구분하기 위한 값이라 마감의 절반 정도로 넉넉히 잡는다.
 _POLL_STALL_S = float(os.environ.get('IQC_SIM_POLL_STALL_S', '900'))
@@ -301,6 +307,10 @@ class WqbApiClient:
         else:
             self.session_file = session_file
         self._authed = False
+        # 429(동시 시뮬 한도) 응답을 프로세스당 한 번만 통째로 남긴다. **한도가 몇 개인지는
+        # 공개 문서에 없고**(2026-07-28 확인: IQC 가이드라인·컨설턴트 페이지 모두 무언급),
+        # WQB 가 이 응답에서 직접 말해 준다 — 여태 body 를 안 읽고 버렸다.
+        self._rl_body_logged = False
         self.persona_required = False
         self.persona_url = None
         self.last_auth_status_code = None
@@ -1016,6 +1026,34 @@ class WqbApiClient:
             LOG.warning('alpha %s description PATCH err: %s', alpha_id, e)
             return False
 
+    @staticmethod
+    def _rejection_reason(body_j) -> str | None:
+        """응답의 is.checks 에서 **FAIL 만** 골라 사람이 읽을 사유로. 없으면 None.
+
+        ⚠ 이름만 적으면 안 된다(2026-07-28 사장 지적). gJ9ea3ZJ 는 노트가
+        `rejected:LOW_SHARPE; LOW_FITNESS; LOW_GLB_EMEA_SHARPE (http_403)` 인데
+        **지금 그 알파를 조회하면 셋 다 WARNING** 이다 — 제출 시점 평가와 조회 시점
+        평가가 다르기 때문이다. 그때 WQB 가 준 값·기준을 같이 남겨야 나중에 대조가
+        되고, "표시가 틀렸다" 로 읽히지 않는다.
+        """
+        if not isinstance(body_j, dict):
+            return None
+        checks = ((body_j.get('is') or {}).get('checks')) or []
+        failed = [c for c in checks if str(c.get('result') or '').upper() == 'FAIL']
+        if not failed:
+            return None
+        # ⚠ 앞 3개만 자르면 **결정적인 체크가 잘려 나간다**(2026-07-28). WQB 체크 순서상
+        #   LOW_SHARPE·LOW_FITNESS·LOW_GLB_* 가 맨 앞이고 REGULAR_SUBMISSION·
+        #   POWER_POOL_CORRELATION 처럼 진짜로 막는 것은 한참 뒤에 온다 — 잘린 자리에
+        #   답이 있었다. FAIL 은 애초에 몇 개 안 되니 전부 남긴다(노트 컬럼은 300자).
+        out = []
+        for c in failed:
+            name = str(c.get('name') or 'FAIL')
+            val, lim = c.get('value'), c.get('limit')
+            out.append(f'{name}({val} vs {lim})'
+                       if val is not None and lim is not None else name)
+        return '; '.join(out)
+
     def submit_alpha(self, alpha_id: str, stop_event=None,
                      deadline_s: float | None = None) -> tuple[bool, str]:
         """Submit an alpha using the official UI/API contract.
@@ -1072,12 +1110,8 @@ class WqbApiClient:
                     body = r.json()
                 except Exception:
                     body = None
-                checks = []
-                if isinstance(body, dict):
-                    checks = (((body.get('is') or {}).get('checks')) or [])
-                failed = [c for c in checks if str(c.get('result') or '').upper() == 'FAIL']
-                if failed:
-                    reason = '; '.join(str(c.get('name') or c.get('result') or 'FAIL') for c in failed[:3])
+                reason = self._rejection_reason(body)
+                if reason:
                     return False, f'rejected:{reason}'
                 return True, 'submitted'
 
@@ -1100,12 +1134,22 @@ class WqbApiClient:
                 body_j = r.json()
             except Exception:
                 body_j = None
-            if isinstance(body_j, dict):
-                checks = (((body_j.get('is') or {}).get('checks')) or [])
-                failed = [c for c in checks if str(c.get('result') or '').upper() == 'FAIL']
-                if failed:
-                    reason = '; '.join(str(c.get('name') or 'FAIL') for c in failed[:3])
-                    return False, f'rejected:{reason} (http_{r.status_code})'
+            # 거절 응답은 하루 4건뿐이라 통째로 남겨도 로그가 붐비지 않는다. 이름만
+            # 저장하면 나중에 왜 거절됐는지 재구성할 길이 없다(위 _rejection_reason 참조).
+            if r.status_code not in (404,):
+                # 800자로 자르니 checks 배열 한가운데서 끊겨 JSON 파싱이 안 됐다
+                # (2026-07-28 첫 실사용). 하루 몇 건뿐이라 통째로 남긴다.
+                LOG.warning('alpha submit http_%s %s — body=%s', r.status_code, alpha_id,
+                            (getattr(r, 'text', '') or '')[:4000])
+            reason = self._rejection_reason(body_j)
+            if reason:
+                # **이미 제출된 알파도 여기로 떨어진다.** 사장이 BRAIN UI 로 직접 낸 뒤
+                # 우리 큐에서 버튼을 누르면 WQB 가 거절하는데, 그걸 '거절' 로 적으면
+                # 제출된 알파가 대기 큐에 거절 상태로 눌러앉는다(2026-07-28 gJ9ea3ZJ).
+                # 거절은 드무니(하루 몇 건) 실측 GET 한 번이 싸다.
+                if self._verify_submitted(alpha_id):
+                    return True, 'submitted (이미 제출됨 — stage=OS 확인)'
+                return False, f'rejected:{reason} (http_{r.status_code})'
             # ⚠ 404 맹점 (2026-07-27 진단): 제출이 **완료되면** /alphas/{id}/submit
             #   리소스가 사라져 폴링 GET 이 404 를 받는다. 7/23·7/25 실제 제출 성공
             #   2건이 'submit_http_404' 실패로 기록돼 통계·게이트에서 증발했다.
@@ -1144,10 +1188,76 @@ class WqbApiClient:
             LOG.warning('submit network err: %s', e); return None
         self._capture_sim_quota(r)
         if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
+            if not self._rl_body_logged:
+                self._rl_body_logged = True
+                LOG.warning('429 동시한도 응답 — body=%s / limit-headers=%s',
+                            (getattr(r, 'text', '') or '')[:300],
+                            {k: v for k, v in (r.headers or {}).items()
+                             if 'limit' in k.lower() or 'retry' in k.lower()})
             return 'RATE_LIMITED'
         if r.status_code not in (200, 201):
+            # 여태 아무 말 없이 None 을 뱉었다 — 워커엔 '제출 응답 없음' 으로만 보여
+            # **왜** 죽었는지 알 길이 없었다(2026-07-28 실측: 한 라운드 18개 중 4개가
+            # 여기서 조용히 증발, 전부 합성 코드). 형제 submit_super_simulation 은
+            # 처음부터 body 를 남긴다 — 정규 경로만 빠져 있었다.
+            LOG.warning('submit http_%s: %s', r.status_code,
+                        (getattr(r, 'text', '') or '')[:200])
             return None
         return r.headers.get('Location') or r.headers.get('location')
+
+    def submissions_on(self, date_str: str) -> int | None:
+        """WQB 가 세는 그 날짜의 제출 수. 조회 실패면 None(호출부가 폴백).
+
+        ⚠ 우리 DB 집계(submit_attempts)는 **우리가 낸 것만** 센다. 사장이 BRAIN UI 에서
+        직접 내면 모르고, 그만큼 예산을 남았다고 착각해 초과 제출을 시도한다
+        (2026-07-28: 우리 집계 2건 vs WQB 실측 3건).
+        """
+        if not self._ensure_auth():
+            return None
+        try:
+            r = self.session.get(f'{BASE}/users/self/activities/submissions',
+                                 timeout=_HTTP_TIMEOUT, headers={'Accept': _API_ACCEPT})
+        except Exception as e:
+            LOG.warning('제출 활동 조회 실패: %s', e)
+            return None
+        if not r.ok:
+            return None
+        try:
+            recs = ((r.json().get('records') or {}).get('records')) or []
+        except Exception:
+            return None
+        for row in recs:
+            try:
+                if str(row[0]) == date_str:
+                    return int(row[1])
+            except (IndexError, TypeError, ValueError):
+                continue
+        return 0        # 기록에 없으면 그날은 0건 (조회는 성공했다)
+
+    def accessible_operators(self) -> set:
+        """이 **계정이 쓸 수 있는** 연산자 이름 집합. 실패하면 빈 집합(= 제한 없음 취급).
+
+        2026-07-28 실측(CONSULTANT 계정): 82개. vector_neut 은 되지만 vector_proj·
+        regression_neut·regression_proj 은 안 된다 — 컨설턴트라고 전부 열리는 게
+        아니라서 계정 종류로 넘겨짚으면 안 된다.
+        """
+        if not self._ensure_auth():
+            return set()
+        try:
+            r = self.session.get(f'{BASE}/operators', timeout=_HTTP_TIMEOUT,
+                                 headers={'Accept': _API_ACCEPT})
+        except Exception as e:
+            LOG.warning('operators 조회 실패: %s', e)
+            return set()
+        if not r.ok:
+            return set()
+        try:
+            j = r.json()
+        except Exception:
+            return set()
+        items = j if isinstance(j, list) else (j.get('results') or [])
+        return {str(x.get('name')) for x in items
+                if isinstance(x, dict) and x.get('name')}
 
     def accessible_datasets(self, region: str, universe: str, delay) -> set:
         """이 **계정이 실제로 접근 가능한** dataset.id 집합. 실패하면 빈 집합.
@@ -1288,6 +1398,7 @@ class WqbApiClient:
         last = {'status': None, 'alpha': None, 'message': None, 'progress': None}
         last_change = start
         prev_mark = None
+        n_auth = 0              # 연속 401/403 횟수
         while True:
             now = _time.monotonic()
             if now - start >= deadline_s:
@@ -1303,6 +1414,18 @@ class WqbApiClient:
                                      headers={'Accept': _API_ACCEPT})
                 j = r.json() if r.ok else {}
                 readable = bool(r.ok)
+                # 세션이 죽으면(401/403) 폴링은 회복되지 않는다 — 재인증은 사용자 생체
+                # 인증이 필요해서 이 루프 안에서 일어날 수 없다. 그런데 못 읽는 턴은
+                # 아래에서 '대기열'로 보고 넘어가므로, 마감(3600초)을 꼬박 태우고 나서야
+                # TIMEOUT 이 뜬다(2026-07-28 실측: 인증 사망 라운드 1건이 97분).
+                # 세션 갱신 레이스로 한 번 튀는 건 봐주고, 두 번 연속이면 포기한다.
+                if r.status_code in (401, 403):
+                    n_auth += 1
+                    if n_auth >= 2:
+                        reason = f'auth dead (http_{r.status_code})'
+                        break
+                else:
+                    n_auth = 0
                 ra = r.headers.get('Retry-After') or r.headers.get('retry-after')
                 if ra:
                     try:
@@ -1317,7 +1440,12 @@ class WqbApiClient:
             last = {'status': j.get('status'), 'alpha': j.get('alpha'),
                     'message': j.get('message'), 'progress': j.get('progress')}
             if last['status'] in ('COMPLETE', 'ERROR', 'FAIL', 'WARNING'):
-                LOG.debug('sim 완료 %.0fs status=%s', now - start, last['status'])
+                # 옛 마감(=지금 마감의 절반)을 넘겨 끝난 건은 INFO 로 올린다 — 마감을
+                # 올린 게 실제로 후보를 살렸는지, 꼬리가 어디까지 늘어지는지 보려면
+                # 이 숫자가 필요하다. 평상시 건은 DEBUG 라 로그가 붐비지 않는다.
+                _el = now - start
+                (LOG.info if _el > deadline_s * 0.5 else LOG.debug)(
+                    'sim 완료 %.0fs status=%s', _el, last['status'])
                 return last
             # ⚠ **응답을 못 읽은 턴은 정체로 세면 안 된다.** 8워커가 5초마다 긁으면 폴링
             #   자체가 429 를 맞는데, 그때 j={} 라 status=None 이 되어 (None, None) 이

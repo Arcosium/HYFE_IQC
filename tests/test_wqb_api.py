@@ -281,7 +281,10 @@ def test_submit_alpha_403_with_failed_checks_classified_as_rejected():
     c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
     ok, status = c.submit_alpha('A1')
     assert ok is False
-    assert status.startswith('rejected:LOW_SHARPE; LOW_FITNESS')
+    # 이름만이 아니라 **값 vs 기준**까지 남는다 (2026-07-28) — 나중에 알파를 조회했을 때
+    # 같은 체크가 WARNING 으로 보여도 제출 시점에 뭐가 FAIL 이었는지 대조할 수 있어야 한다.
+    assert status.startswith('rejected:LOW_SHARPE(-0.0 vs 1.58); LOW_FITNESS(-0.0 vs 1.0)')
+    assert 'LOW_TURNOVER' not in status, 'PASS 체크가 사유에 섞였다'
     assert 'http_403' in status
 
 

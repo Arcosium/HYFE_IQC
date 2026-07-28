@@ -29,13 +29,52 @@ _CONCURRENCY_DEFAULT = 8
 # ⚠ 2026-07-27 실측으로 그 일이 실제로 벌어지고 있었다. 600s 는 sim 이 ~130s 이던 시절
 #   값인데, GLB·TOPDIV3000·10년 IS 시뮬은 **약 1,200s** 다(r3: 성공 2건에 라운드 1,243s).
 #   그래서 라운드마다 8개 중 2~6개가 600s 를 태우고 429 로 죽었다 — 슬롯이 모자란 게
-#   아니라 **기다리다 만 것**이다. 폴링 마감(_POLL_DEADLINE_S=1800)과 같은 눈금으로 올린다.
-_RL_DEADLINE_S = float(os.environ.get('HYFE_IQC_RC_RL_DEADLINE_S', '1800'))
+#   아니라 **기다리다 만 것**이다. 폴링 마감(_POLL_DEADLINE_S)과 같은 눈금으로 올린다.
+#   2026-07-28: 폴링 마감을 3600 으로 올리며 같이 올린다 — 눈금이 어긋나면 슬롯 대기자가
+#   sim 이 끝나기도 전에 포기해 후보를 버린다(아래 테스트가 이 관계를 지킨다).
+_RL_DEADLINE_S = float(os.environ.get('HYFE_IQC_RC_RL_DEADLINE_S', '3600'))
 _RL_BACKOFF_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_S', '8'))
 # 백오프 상한 = **슬롯이 빈 뒤 그걸 알아채기까지의 최대 지연**이다. 45s 였을 땐 슬롯
 # 하나가 빌 때마다 평균 20초 넘게 놀았다. 대기자가 여럿이라 한꺼번에 몰리지 않도록
 # 지터를 섞는다(thundering herd 방지). 2026-07-27.
 _RL_BACKOFF_CAP_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_CAP_S', '15'))
+
+
+# ── 진행 중 시뮬 추적 (종료 시 취소용) ──────────────────────────────────────
+# ⚠ 2026-07-28 실측. 서비스가 죽으면 폴링 스레드도 같이 죽는데, **WQB 쪽 시뮬은 계속
+#   돈다** — 취소를 안 보내기 때문이다. 그 유령들이 동시 슬롯을 물고 있어서, 재시작
+#   직후 라운드는 빈 슬롯 1개로 시작했다(스레드 8개 중 7개가 t=0 부터 대기, 첫 결과가
+#   30분 뒤). stop_event 만으로는 느리다 — 폴링 스레드가 Retry-After 로 최대 60초
+#   자고 있어 그때까지 취소가 안 나간다. 그래서 URL 을 들고 있다가 직접 DELETE 한다.
+_INFLIGHT: dict[str, object] = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _track_inflight(url: str, client) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT[url] = client
+
+
+def _untrack_inflight(url: str) -> None:
+    with _INFLIGHT_LOCK:
+        _INFLIGHT.pop(url, None)
+
+
+def cancel_all_inflight() -> int:
+    """진행 중인 시뮬 전부에 DELETE. 취소한 개수 반환. 실패는 삼킨다(종료 경로)."""
+    with _INFLIGHT_LOCK:
+        items = list(_INFLIGHT.items())
+        _INFLIGHT.clear()
+    n = 0
+    for url, client in items:
+        try:
+            client.cancel(url)
+            n += 1
+        except Exception:
+            pass
+    if n:
+        LOG.warning('종료 — 진행 중 시뮬 %d건 취소 (슬롯 반환)', n)
+    return n
 
 
 def _default_concurrency() -> int:
@@ -201,7 +240,9 @@ class ApiBackend:
                 return None
             url = self._client.submit_simulation(code, settings)
             if url != 'RATE_LIMITED':
-                if waited:
+                # url 이 None 이어도 '접수' 로 찍던 버그 — 제출 실패가 성공 로그를
+                # 달고 나와, 라운드 실패를 슬롯 문제로 오독하게 만들었다.
+                if waited and url:
                     # 슬롯을 얼마나 기다렸는지 남긴다 — 실효 동시 슬롯 수를 추측이 아니라
                     # 관측으로 알게 해 준다(2026-07-27). 0 이면 여유, 길면 한도에 붙었다.
                     LOG.info('슬롯 대기 %.0fs 후 접수', _time.monotonic() - start)
@@ -217,7 +258,7 @@ class ApiBackend:
 
     @staticmethod
     def _check_submit_gate(submit_gate, metrics, self_corr, fail_items=None,
-                           genome=None):
+                           genome=None, code=None):
         """제출 차단/예산/품질 게이트. gate 미지정이면 항상 통과(기존 '무조건 제출' 동작).
 
         WQB 컨설턴트는 **하루 4건**만 제출할 수 있다(Power Pool 문서). 2026-07 규칙
@@ -233,14 +274,19 @@ class ApiBackend:
         try:
             ok, reason = submit_gate(metrics or {}, self_corr,
                                      fail_items=list(fail_items or []),
-                                     genome=genome)
+                                     genome=genome, code=code)
         except TypeError:
             # 구 시그니처 호환 — 게이트 교체 중에도 제출은 살린다.
             try:
                 ok, reason = submit_gate(metrics or {}, self_corr,
-                                         fail_items=list(fail_items or []))
+                                         fail_items=list(fail_items or []),
+                                         genome=genome)
             except TypeError:
-                ok, reason = submit_gate(metrics or {}, self_corr)
+                try:
+                    ok, reason = submit_gate(metrics or {}, self_corr,
+                                             fail_items=list(fail_items or []))
+                except TypeError:
+                    ok, reason = submit_gate(metrics or {}, self_corr)
         except Exception as e:
             LOG.warning('submit_gate err (제출 강행): %s', e)
             return True, ''
@@ -264,7 +310,11 @@ class ApiBackend:
                 return self._err(s, 'pause로 취소', mode='cancelled')
             return self._err(s, 'simulation 제출 실패 (submit 응답 없음)')
 
-        pr = self._client.poll(url, stop_event=stop_event)
+        _track_inflight(url, self._client)
+        try:
+            pr = self._client.poll(url, stop_event=stop_event)
+        finally:
+            _untrack_inflight(url)
         status = pr.get('status')
 
         if status == 'CANCELLED':
@@ -307,7 +357,7 @@ class ApiBackend:
                 # 각자 밖에서 예산을 읽으면 전부 '아직 여유 있음' 을 보고 한도를 넘긴다.
                 gate_ok, gate_reason = self._check_submit_gate(
                     submit_gate, metrics, corr, is_status.get('fail'),
-                    genome=s.get('genome'))
+                    genome=s.get('genome'), code=code)
                 if not gate_ok:
                     submit_status = f'submit_skipped:{gate_reason}'
                 else:
@@ -353,11 +403,10 @@ class ApiBackend:
 
         if partial_fn:
             try:
-                partial_fn({
-                    'idx': idx, 'status': mode, 'error_text': '',
-                    'is_status': is_status, 'metrics': metrics,
-                    'submit_status': submit_status, 'submitted': bool(submit_ok),
-                })
+                # 결과 전체를 넘긴다. 워커가 이걸로 **즉시 DB 에 쓴다** — 예전엔 요약만
+                # 줘서 라운드 끝까지 기다려야 했고, 그 사이 재시작하면 끝난 시뮬이
+                # 통째로 사라졌다(2026-07-28: 재시작 5회 × 최대 18건, 캐시히트 0).
+                partial_fn({**out, 'status': mode})
             except Exception as e:
                 LOG.warning('partial_fn err: %s', e)
 

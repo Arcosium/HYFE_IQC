@@ -392,6 +392,31 @@ def test_retry_gives_up_only_after_the_budget(monkeypatch):
     assert clock['t'] >= wb._RL_DEADLINE_S
 
 
+def test_failed_submit_is_not_logged_as_accepted(monkeypatch, caplog):
+    """슬롯을 기다린 뒤 submit 이 None 을 뱉으면 '접수' 로 찍으면 안 된다.
+
+    2026-07-28 실측: 한 라운드 18개 중 4개가 400 으로 죽었는데 로그엔 전부
+    '슬롯 대기 N초 후 접수' 였다 — 실패가 성공 로그를 달고 나와 라운드 손실을
+    슬롯 문제로 오독했다.
+    """
+    import logging
+    import server.wqb_backend as wb
+    clock = {'t': 0.0}
+    monkeypatch.setattr(wb._time, 'monotonic', lambda: clock['t'])
+    monkeypatch.setattr(wb._time, 'sleep', lambda s: clock.__setitem__('t', clock['t'] + s))
+    n = {'i': 0}
+
+    def _submit(self, c, s):
+        n['i'] += 1
+        return 'RATE_LIMITED' if n['i'] == 1 else None   # 대기 후 실패
+
+    be = wb.ApiBackend.__new__(wb.ApiBackend)
+    be._client = type('C', (), {'submit_simulation': _submit})()
+    with caplog.at_level(logging.INFO, logger=wb.LOG.name):
+        assert be._submit_with_retry('rank(close)', {}, None) is None
+    assert '접수' not in caplog.text, f'실패를 접수로 찍었다: {caplog.text}'
+
+
 # ── 빈 슬롯 없이 돌기 (2026-07-27 사장 지시) ────────────────────────────────
 # 후보 수 == 슬롯 수면 sim 하나가 끝나도 집어 갈 다음 후보가 없어 그 슬롯이 라운드
 # 끝까지 논다. sim 이 ~20분이라 낭비가 크다 — 후보를 슬롯보다 많이 줘야 한다.

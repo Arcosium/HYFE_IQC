@@ -652,6 +652,36 @@ def record_submit_attempt(conn, user_id: int, round_num: int, idx: int, code: st
     )
 
 
+#: 거절 이력을 '아직 유효한 판정'으로 볼 기간. **영구가 아니다** — Power Pool·테마
+#: 조건이 바뀌면 같은 알파가 통과할 수 있으므로(2026-07-28 사장 지적) 하루면 만료된다.
+#: 테마 경계가 UTC 자정(=KST 09:00)이라 하루가 자연스러운 단위이고, 이 코드베이스의
+#: 다른 보류 벽(fieldset_cooldown·family_corr_wall)도 같은 24h 를 쓴다.
+REJECT_MEMORY_S = float(os.environ.get('IQC_REJECT_MEMORY_S', str(24 * 3600)))
+
+
+def code_rejected_before(user_id: int, code: str,
+                         since_s: float | None = None) -> str | None:
+    """같은 식이 **최근에** WQB 에 거절당했으면 그 사유. 없으면 None.
+
+    ⚠ 2026-07-28 실측 루프. 후보 생성이 결정론이라 재시작/재방문 때 **같은 식이 다시
+    만들어지고**, 시뮬 결과는 캐시에서 나오므로 같은 알파를 또 제출한다 — 알파
+    1YzG86aM 이 16:06 과 16:20 에 똑같은 5개 FAIL 로 두 번 거절됐다. 같은 식이면
+    판정도 같으니 두 번째부터는 보낼 이유가 없다(stuck_submits 는 이미 이 규칙을
+    code_hash 로 쓰고 있었는데, 본 제출 경로만 빠져 있었다).
+    """
+    if not code:
+        return None
+    init()
+    window = REJECT_MEMORY_S if since_s is None else float(since_s)
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT submit_status FROM submit_attempts WHERE user_id=? AND code=? "
+            "AND submitted=0 AND submit_status LIKE 'rejected:%' AND ts>? "
+            'ORDER BY ts DESC LIMIT 1',
+            (user_id, code, time.time() - window)).fetchone()
+    return str(row['submit_status']) if row else None
+
+
 def day_start_ts(now: float | None = None) -> float:
     """일일 제출 예산의 리셋 경계 = **미국 동부시간 자정** (여름 KST 13:00 / 겨울 14:00).
 
@@ -672,6 +702,22 @@ def day_start_ts(now: float | None = None) -> float:
         tz = _dt.timezone(_dt.timedelta(hours=-4))
     local = _dt.datetime.fromtimestamp(ts, tz)
     return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def platform_date(now: float | None = None) -> str:
+    """WQB 가 쓰는 '오늘' 날짜 문자열(YYYY-MM-DD, America/New_York).
+
+    `/users/self/activities/submissions` 의 records 가 이 날짜로 오므로, 제출 수를
+    대조하려면 같은 눈금이어야 한다. 경계 정의는 day_start_ts 와 동일하다.
+    """
+    import datetime as _dt
+    ts = time.time() if now is None else float(now)
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo('America/New_York')
+    except Exception:
+        tz = _dt.timezone(_dt.timedelta(hours=-4))
+    return _dt.datetime.fromtimestamp(ts, tz).strftime('%Y-%m-%d')
 
 
 def submitted_today(user_id: int, now: float | None = None) -> int:
@@ -2150,20 +2196,28 @@ def submit_queue_add(user_id: int, *, wqb_alpha_id: str, kind: str,
         return cur.rowcount > 0
 
 
+#: 대기 큐에서 **내려가는** 상태 — 사람이 더 할 일이 없는 종착점.
+#:   skipped   = 더 이상 낼 일이 없다고 결론난 것 (2026-07-27 사장 지시)
+#:   submitted = 제출에 성공한 것. 성공하면 즉시 내린다 (2026-07-28 사장 지시) —
+#:               '대기' 목록에 이미 끝난 것이 남아 있으면 목록의 뜻이 흐려진다.
+_QUEUE_DONE_STATUSES = ('skipped', 'submitted')
+
+
 def submit_queue_list(user_id: int, limit: int = 60,
                       include_skipped: bool = False) -> list[dict[str, Any]]:
-    """대기 큐 목록. **skipped 는 기본 제외** (2026-07-27 사장 지시).
+    """대기 큐 목록. **끝난 항목(skipped·submitted)은 기본 제외**.
 
-    skipped 는 '이 알파는 더 이상 낼 일이 없다' 고 결론난 항목이라 목록에 남으면
-    사람이 판단해야 할 것들 사이에 섞여 눈만 어지럽힌다 (제출 내역에서 스킵을 뺀 것과
-    같은 이유). 감사 목적이면 include_skipped=True 로 볼 수 있다.
+    남아야 하는 건 '아직 판단·행동이 필요한 것' 뿐이다. 감사 목적이면
+    include_skipped=True 로 전부 볼 수 있다(제출 내역의 scope='all' 과 같은 규칙).
     """
     init()
-    _f = '' if include_skipped else " AND COALESCE(status,'') != 'skipped'"
+    _ph = ','.join('?' * len(_QUEUE_DONE_STATUSES))
+    _f = '' if include_skipped else f" AND COALESCE(status,'') NOT IN ({_ph})"
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             f'SELECT * FROM submit_queue WHERE user_id=?{_f} ORDER BY id DESC LIMIT ?',
-            (user_id, int(limit))).fetchall()
+            (user_id, *(() if include_skipped else _QUEUE_DONE_STATUSES),
+             int(limit))).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -2187,6 +2241,24 @@ def submit_queue_get(qid: int) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         d['metrics'] = {}
     return d
+
+
+def submit_queue_delete(user_id: int, ids) -> int:
+    """대기 큐에서 지정한 행을 **영구 삭제**. 지운 개수 반환.
+
+    본인 행만 지운다(user_id 조건) — 큐는 사용자별 제출 예약이라 남의 것을 지우면
+    그 사람의 제출이 사라진다. 존재하지 않는 id 는 조용히 무시한다(멱등).
+    """
+    wanted = [int(i) for i in (ids or []) if str(i).strip().lstrip('-').isdigit()]
+    if not wanted:
+        return 0
+    init()
+    with _DB_LOCK, _connect() as conn:
+        ph = ','.join('?' * len(wanted))
+        cur = conn.execute(
+            f'DELETE FROM submit_queue WHERE user_id=? AND id IN ({ph})',
+            (user_id, *wanted))
+        return int(cur.rowcount or 0)
 
 
 def submit_queue_mark(qid: int, status: str, note: str | None = None) -> None:
