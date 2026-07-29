@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;900&family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <!-- ⚠ Cloudflare 가 css/js 를 4시간 엣지캐시(max-age=14400 덮어씀) — 배포 시 반드시 ?v= 를 올릴 것 -->
-  <link rel="stylesheet" href="/style.css?v=34" />
+  <link rel="stylesheet" href="/style.css?v=36" />
 </head>
 <body>
   <header class="topbar">
@@ -123,20 +123,10 @@
         <span class="value" id="tile-rounds">0</span>
         <span class="sub">세대 사이클 누적</span>
       </div>
-      <div class="stat-tile t-acc">
-        <span class="micro">엘리트 Seed</span>
-        <span class="value" id="tile-seed">0</span>
-        <span class="sub" id="tile-seed-sub">교차/변이 모집단</span>
-      </div>
       <div class="stat-tile t-mut">
         <span class="micro">Focus 대기</span>
         <span class="value" id="tile-focus">0</span>
         <span class="sub">정향변이 sub-round</span>
-      </div>
-      <div class="stat-tile t-xo">
-        <span class="micro">최고 세대</span>
-        <span class="value" id="tile-gen">g0</span>
-        <span class="sub">도달한 진화 깊이</span>
       </div>
       <div class="stat-tile t-acc">
         <span class="micro">제출 성공</span>
@@ -242,7 +232,7 @@
             <span class="lg"><span class="sw mut"></span>변이 mut</span>
             <span class="lg"><span class="sw xo"></span>교차 xo</span>
             <span class="lg"><span class="sw etc"></span>개편 전</span>
-            <span class="lg"><span class="sw best"></span>라운드 최고</span>
+            <span class="lg"><span class="sw lineage"></span>계보 부모→자식</span>
             <span class="lg"><span class="sw sub"></span>제출됨</span>
           </div>
           <div class="seg-toggle" id="evo-metric">
@@ -265,7 +255,8 @@
       <div class="evo-comp-label micro">세대 구성 — 라운드별 탐색·변이·교차 비율</div>
     </section>
 
-    <section class="grid-2">
+    <!-- 왼쪽 = GA 파이프라인 + Sharpe×Turnover, 오른쪽 = 정향변이 학습(두 줄에 걸침) -->
+    <section class="grid-evo">
       <div class="card-block collapsible" data-fold-key="pipeline" aria-label="GA 파이프라인">
         <div class="card-head" role="button" tabindex="0">
           <h2>GA 파이프라인 <span class="micro">Transition Flow</span></h2>
@@ -334,34 +325,20 @@
             </span>
             <span class="pl-count" id="pl-submit-count">0</span>
           </div>
-          <div class="pl-loop">→ 결과·FAIL 사유가 다음 세대 생성에 피드백됩니다</div>
         </div>
       </div>
 
-      <div class="card-block collapsible" data-fold-key="population" aria-label="최신 세대 상세">
-          <div class="card-head" role="button" tabindex="0">
-            <h2>최신 세대 상세 <span class="micro">Latest Population</span></h2>
-            <div class="card-tools"><span class="micro" id="pop-round-label"></span><span class="rs-chev" aria-hidden="true">▾</span></div>
-          </div>
-          <div class="pop-table-wrap">
-            <table class="pop-table" id="pop-table">
-              <thead>
-                <tr>
-                  <th>#</th><th>오리진</th><th>유전자</th><th>PASS</th><th>Sharpe</th><th>상태</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          <div class="empty-msg" id="pop-empty">아직 세대 데이터가 없습니다.</div>
-        </div>
-      </div>
-    </section>
-
-    <section class="grid-2" aria-label="성과 분석 · 학습 현황">
       <div class="card-block collapsible" data-fold-key="scatter">
         <div class="card-head" role="button" tabindex="0">
-          <h2>Sharpe × Turnover <span class="micro">Trade-off · Pareto</span></h2>
-          <div class="card-tools"><span class="micro">◆ 파레토 프론트 · 점선 = 게이트(Sharpe≥1.25·Turnover≤0.7)</span><span class="rs-chev" aria-hidden="true">▾</span></div>
+          <h2><span id="scatter-title">Sharpe × Turnover</span> <span class="micro">Trade-off · Pareto</span></h2>
+          <div class="card-tools">
+            <div class="seg-toggle" id="scatter-axes" role="radiogroup" aria-label="산점도 축">
+              <button type="button" data-pair="sharpe:turnover" class="active">S×TO</button>
+              <button type="button" data-pair="sharpe:fitness">S×FIT</button>
+              <button type="button" data-pair="turnover:fitness">TO×FIT</button>
+            </div>
+            <span class="micro">◆ 파레토 · 점선=게이트</span><span class="rs-chev" aria-hidden="true">▾</span>
+          </div>
         </div>
         <div class="scatter-wrap" id="scatter-wrap">
           <svg id="scatter-chart" role="img" aria-label="Sharpe 대 Turnover 산점도 · 파레토 프론트"></svg>
@@ -369,7 +346,7 @@
           <div class="evo-empty" id="scatter-empty" hidden>turnover·sharpe 지표가 있는 시뮬 데이터가 아직 없습니다.</div>
         </div>
       </div>
-      <div class="card-block collapsible" data-fold-key="directive">
+      <div class="card-block collapsible evo-side" data-fold-key="directive">
         <div class="card-head" role="button" tabindex="0">
           <h2>정향변이 학습 <span class="micro">Directive Learning · Thompson Sampling</span></h2>
           <div class="card-tools"><span class="micro">FAIL 사유 × 변이 축 — 실제로 고친 비율</span><span class="rs-chev" aria-hidden="true">▾</span></div>
@@ -394,7 +371,6 @@
             <button type="button" data-sort="sharpe" class="active">SHARPE</button>
             <button type="button" data-sort="fitness">FITNESS</button>
             <button type="button" data-sort="turnover">TURNOVER↓</button>
-            <button type="button" data-sort="self_corr">CORR↓</button>
           </div>
           <span class="micro preflight-stat" id="preflight-stat"></span>
         </div>
@@ -405,20 +381,46 @@
             <tr>
               <th>#</th><th>오리진</th><th>Sharpe</th><th>Fitness</th><th>Turnover</th><th>Corr</th><th>PASS</th><th>설정</th><th>상태</th>
             </tr>
+            <!-- 필드별 조건 필터 — ">1", ">=1.2", "<0.5" 처럼 적으면 AND 로 걸린다.
+                 Turnover·Corr 는 화면 표기(%)와 같은 단위로 받는다. -->
+            <tr class="lb-filters">
+              <th></th><th></th>
+              <th><input type="text" data-lbf="sharpe" placeholder=">1" aria-label="Sharpe 필터"></th>
+              <th><input type="text" data-lbf="fitness" placeholder=">1.2" aria-label="Fitness 필터"></th>
+              <th><input type="text" data-lbf="turnover" placeholder="&lt;70" aria-label="Turnover 필터(%)"></th>
+              <th><input type="text" data-lbf="self_corr" placeholder="&lt;0.7" aria-label="Corr 필터"></th>
+              <th><input type="text" data-lbf="pass_count" placeholder=">3" aria-label="PASS 필터"></th>
+              <th></th><th></th>
+            </tr>
           </thead>
           <tbody></tbody>
         </table>
         <div class="empty-msg" id="lb-empty">아직 데이터가 없습니다.</div>
+        <div class="lb-pager" id="lb-pager" hidden></div>
       </div>
     </section>
 
     </div>
 
+    <!-- 알파 상세 — 리더보드 행 클릭. 네이티브 <dialog> (ESC·백드롭·포커스 트랩 무료).
+         tab-page **밖**에 둔다 — 부모가 [hidden] 이면 top-layer 로 올라가도 렌더되지 않는다. -->
+    <dialog id="alpha-dlg" class="alpha-dlg" aria-label="알파 상세">
+      <div class="ad-head">
+        <h3 id="ad-title">알파 상세</h3>
+        <button type="button" class="mini-btn" id="ad-close">닫기</button>
+      </div>
+      <div class="ad-body" id="ad-body"></div>
+      <div class="ad-foot">
+        <span class="micro" id="ad-msg"></span>
+        <button type="button" class="mini-btn" id="ad-queue">제출 대기 목록에 추가</button>
+      </div>
+    </dialog>
+
     <div class="tab-page" id="page-queue" hidden>
 
     <section class="card-block collapsible" id="sq-card" data-fold-key="sq" aria-label="제출 대기">
       <div class="card-head">
-        <h2>제출 대기 <span class="micro">Submit Queue · 테마 보류 / 예산 초과</span></h2>
+        <h2>제출 대기 <span class="micro">Submit Queue</span></h2>
         <div class="card-tools">
           <button type="button" class="mini-btn" id="sq-del" disabled>선택 삭제</button>
         </div>
@@ -466,13 +468,15 @@
         <ol>
           <li><b>운영</b> 탭에서 <b>시작</b>을 누릅니다. 그게 전부입니다 — 조건을 안 걸면
             기본값으로 돕니다.</li>
-          <li>WQB 생체인증(Persona) 안내가 뜨면 한 번 완료해야 시뮬이 돕니다.</li>
+          <li>WQB 생체인증(Persona) 안내가 뜨면 링크를 눌러 한 번 완료해야 시뮬이 돕니다.
+            인증이 끝나면 <b>창이 자동으로 닫히고 세션도 자동 저장</b>됩니다 —
+            '완료했습니다' 버튼은 자동 감지가 실패했을 때의 예비 수단입니다.</li>
           <li><b>탐색 조건</b>에 자연어나 필터 문법을 넣어 범위를 좁힐 수 있습니다.
             재시작 없이 다음 라운드부터 적용됩니다.</li>
         </ol>
 
         <h3>제출 방식 — 자동 / 목록</h3>
-        <p><b>제출 대기</b> 탭 맨 위에서 고릅니다.</p>
+        <p><b>운영</b> 탭 <b>제출 내역</b> 카드 오른쪽 위에서 고릅니다.</p>
         <ul>
           <li><b>자동 제출</b> — 기준을 통과하면 곧바로 제출합니다. 사람이 볼 필요가 없습니다.</li>
           <li><b>목록에 추가</b> — 제출하지 않고 목록에만 쌓습니다. 직접 <b>[제출]</b> 을
@@ -486,8 +490,11 @@
         <h3>탭 안내</h3>
         <ul>
           <li><b>운영</b> — 전략 리서치, 제출 성공 내역, 실시간 로그</li>
-          <li><b>진화 분석</b> — 세대별 궤적, 밴딧 Arm 현황, 상위 알파</li>
-          <li><b>제출 대기</b> — 제출 방식 토글 + 보류/대기 중인 알파</li>
+          <li><b>진화 분석</b> — 세대별 궤적, 산점도(축 선택), 정향변이 학습, 리더보드.
+            리더보드는 각 열 아래 칸에 <code>&gt;1</code>, <code>&gt;=1.2</code>,
+            <code>&lt;0.7</code> 처럼 적으면 조건이 AND 로 걸립니다(회전율은 % 단위).</li>
+          <li><b>제출 대기</b> — 보류/대기 중인 알파. 제출 방식 토글은 <b>운영</b> 탭의
+            제출 내역 카드에 있습니다.</li>
         </ul>
       </div>
 
@@ -504,7 +511,9 @@
             알파는 예산이 열릴 때까지 큐에서 기다립니다.</li>
           <li><b>끊긴 제출을 자동 회수</b>합니다. 타임아웃·5xx 로 결과를 못 받은 제출을
             다음 라운드에 다시 확인합니다.</li>
-          <li>예산을 넘겨 제출 못 한 알파는 대기 큐에 쌓였다가 <b>다음 날 자동 제출</b>됩니다.</li>
+          <li>예산을 넘겨 제출 못 한 알파는 대기 큐에 쌓였다가, <b>예산이 리셋되면
+            (KST 13:00) 그날 한도(4건)를 채울 때까지 연달아 자동 제출</b>됩니다.
+            단 제출 방식이 <b>목록에 추가</b>면 자동 제출하지 않습니다.</li>
         </ul>
         <h3>SuperAlpha (알파의 알파)</h3>
         <p>데이터필드가 아니라 <b>이미 제출한 내 OS 알파들을 재료로</b> 상위 신호를 만드는
@@ -567,6 +576,6 @@
     </div>
   </main>
 
-  <script src="/app.js?v=34" defer></script>
+  <script src="/app.js?v=36" defer></script>
 </body>
 </html>

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import re
 import signal
 import threading
 import time
@@ -68,6 +69,10 @@ FOCUS_MIN_SHARPE = float(os.environ.get('HYFE_IQC_FOCUS_MIN_SHARPE', '1.0'))
 # submit_queue(kind=budget)로 넘겨 다음 날 자동 드레인한다.
 # 리셋 경계는 **UTC 자정 = KST 09:00** (db.day_start_ts).
 DAILY_SUBMIT_BUDGET = int(os.environ.get('IQC_DAILY_SUBMIT_BUDGET', '4'))
+# 대기 큐 제출 확인 주기 — 제출은 라운드와 **별개 경로**다(전용 티커 스레드).
+# 예산 리셋(미 동부 자정 = KST 13:00) 직후에 바로 나가야 하므로 촘촘히 본다.
+# 큐가 비어 있으면 인덱스 조회 한 번(수 μs)으로 끝나 비용이 사실상 없다.
+_DRAIN_TICK_S = float(os.environ.get('IQC_DRAIN_TICK_S', '60'))
 
 # ── 결정론 레이어 (2026-07-26, WQB AAF·smilee 이식) — LLM 비용 0 ─────────────
 # ① 재조합(combine_layer): 탐색 라운드에서 검증된 IS 알파 둘을 결합해 후보 추가.
@@ -570,33 +575,95 @@ class Worker(threading.Thread):
 
     def _drain_submit_queue(self, round_num: int, username: str,
                             password: str) -> None:
-        """예산 초과로 대기(kind='budget')하던 알파를 예산이 열린 날 자동 제출.
+        """대기 큐를 그날 예산이 찰 때까지 비운다 — **라운드와 무관한 별개 경로**.
 
-        라운드당 1건 — 시뮬 쿼터 0 소모(영속화된 wqb_alpha_id 로 직접 제출).
+        2026-07-29 사장 지시: 제출은 시뮬 라운드와 아무 상관이 없다. 라운드 경계에
+        묶여 있으면 예산이 열려도 라운드가 끝날 때까지(40~70분) 묵는다. 그래서 이제
+        전용 티커 스레드만 이걸 부른다(라운드 시작 시 호출은 제거).
+
+        각 대기 건을 **한 번씩** 내본다:
+          · 성공 → 큐에서 삭제(제출 내역에는 남는다)
+          · 거절 → status='rejected' 로 목록에 그대로 둔다(자동 재시도 없음)
+        제출 방식이 '목록에 추가'(list)면 아무것도 자동 제출하지 않는다.
+        """
+        try:
+            if _db.get_submit_mode(self.user_id) == 'list':
+                return
+        except Exception as e:
+            LOG.warning('제출 모드 조회 실패 (큐 드레인 생략): %s', e)
+            return
+        # 한도만큼만 돈다 — 게이트가 보류시키면 _drain_one 이 None 으로 루프를 끊는다.
+        # 이번 판에 이미 건드린 행은 다시 집지 않는다 — 일시 거절로 pending 에 되돌린
+        # 행을 곧바로 재선택하면 그 한 건이 루프를 독점해 뒤의 대기 건이 굶는다.
+        tried: set[int] = set()
+        for _ in range(max(1, DAILY_SUBMIT_BUDGET)):
+            if self._stop_event.is_set():
+                return
+            rid = self._drain_one(round_num, username, password, skip=tried)
+            if rid is None:
+                return
+            tried.add(rid)
+
+    @staticmethod
+    def _rejection_looks_spurious(client, wqb_alpha_id: str) -> bool:
+        """거절 직후 WQB 가 보는 체크에 FAIL 이 하나도 없으면 '다시 내볼 만하다'고 본다.
+
+        제출 판정은 주(week)마다 바뀐다 — 고회전 면제·테마·피라미드 배수가 갈아끼워지고,
+        같은 알파가 어떤 주엔 통과하고 어떤 주엔 떨어진다(2026-07-29 사장 판단).
+        그래서 한 번의 403 으로 영구 폐기하지 않고 **딱 한 번** 더 내본다.
+        거절은 일일 예산을 쓰지 않으므로 재시도 비용은 API 호출 한 번뿐이다.
+        판단 불가면 False — 거절을 함부로 무효화하지 않는다(fail-closed).
+        """
+        try:
+            h = client.harvest_alpha(wqb_alpha_id) or {}
+            st = h.get('is_status') or {}
+            if not st:
+                return False
+            return not st.get('fail')
+        except Exception as e:
+            LOG.warning('거절 재확인 실패(거절 유지): %s', e)
+            return False
+
+    def _drain_one(self, round_num: int, username: str, password: str,
+                   skip=()) -> int | None:
+        """대기 큐에서 1건 제출. 시도한 행 id 를 반환(더 볼 게 없으면 None).
+
+        시뮬 쿼터 0 소모 — 영속화된 wqb_alpha_id 로 직접 제출한다.
         kind='theme'(테마 미충족)은 자동 드레인하지 않는다 — 테마가 바뀐 뒤
         사람이 UI 에서 판단해 1건씩 쏜다 (2026-07-27 사장 지시).
         """
         try:
+            # 대기 건 조회(DB, 공짜)를 먼저 한다 — 예산 조회는 WQB 실측을 타므로,
+            # 큐가 비었는데 주기마다 API 를 두드리는 낭비를 막는다.
+            rows = [r for r in _db.submit_queue_list(self.user_id, limit=200)
+                    if r.get('kind') == 'budget' and r.get('status') == 'pending'
+                    and int(r['id']) not in set(skip)]
+            if not rows:
+                return None
+            row = min(rows, key=lambda r: int(r['id']))      # 오래된 것부터
             if self._submitted_today() >= DAILY_SUBMIT_BUDGET:
-                return
-            row = _db.submit_queue_next_pending(self.user_id, kind='budget')
+                return None
         except Exception:
-            return
-        if not row:
-            return
+            return None
         wid = str(row.get('wqb_alpha_id') or '')
         ok_gate, reason = self._submit_gate(row.get('metrics') or {}, None,
                                             fail_items=[], genome=None)
         if not ok_gate:
             if not reason.startswith('daily_budget'):
                 _db.submit_queue_mark(row['id'], 'pending', f'게이트 보류: {reason}')
-            return
-        self._log(round_num, f'  📤 제출 대기 큐 드레인 — {wid} (예산 내 자동 재시도)')
+            return None
+        # 🔒 선점 — 네트워크에 나가기 **전에** 'submitting' 으로 찍어 남이 못 집게 한다.
+        #   2026-07-29 실측: 드레인 두 갈래(라운드 훅 + 티커)가 같은 pending 행을 동시에
+        #   집어 같은 알파를 두 번 제출했다(제출은 4분씩 걸려 그동안 계속 pending 이었다).
+        #   대시보드의 수동 [제출] 버튼과도 같은 규약을 쓴다(app.py 도 'submitting' 선점).
+        _db.submit_queue_mark(row['id'], 'submitting', '자동 제출 진행 중…')
+        self._log(round_num, f'  📤 대기 큐 제출 시도 — {wid}')
         try:
             from . import wqb_api as _wqb_api
             client = _wqb_api.WqbApiClient(username, password)
             if not client.authenticate():
-                return
+                _db.submit_queue_mark(row['id'], 'pending', 'WQB 인증 실패 — 재시도 가능')
+                return None
             try:
                 from . import alpha_description as _adesc
                 if row.get('code'):
@@ -604,12 +671,35 @@ class Worker(threading.Thread):
                         wid, _adesc.build(str(row['code']), genome=None, settings={}))
             except Exception:
                 pass
-            ok, st = client.submit_alpha(wid, stop_event=self._stop_event,
-                                         deadline_s=600)
+            # 제출은 계정당 하나씩 — 라운드 시뮬 스레드의 제출과 섞이면 429 로 서로를
+            # 죽인다. 티커 스레드에서도 도니 프로세스 전역 락으로 직렬화한다.
+            from . import wqb_backend as _wb
+            with _wb.SUBMIT_LOCK:
+                ok, st = client.submit_alpha(wid, stop_event=self._stop_event,
+                                             deadline_s=600)
         except Exception as e:
-            self._log_quiet(round_num, f'⚠ 큐 드레인 예외(무시): {e}')
-            return
-        _db.submit_queue_mark(row['id'], 'submitted' if ok else 'rejected', st[:200])
+            # 선점만 해두고 죽으면 그 행이 영영 잠긴다 — 반드시 되돌린다.
+            _db.submit_queue_mark(row['id'], 'pending', f'예외: {str(e)[:120]} — 재시도 가능')
+            self._log_quiet(round_num, f'⚠ 대기 큐 제출 예외(무시): {e}')
+            return None
+        # 성공하면 큐에서 **없앤다** — 목록은 '아직 낼 것' 만 보여야 한다(사장 지시).
+        # 기록은 제출 내역(record_submit_attempt)과 alphas 테이블에 그대로 남는다.
+        # 거절은 그대로 둔다 — 사람이 보고 판단하며, 자동 재시도는 하지 않는다.
+        if ok:
+            try:
+                _db.submit_queue_delete(self.user_id, [row['id']])
+            except Exception as e:
+                LOG.warning('큐 삭제 실패(상태만 갱신): %s', e)
+                _db.submit_queue_mark(row['id'], 'submitted', st[:200])
+        elif ('재시도' not in (row.get('note') or '')
+              and self._rejection_looks_spurious(client, wid)):
+            # 지금 FAIL 이 0 인데 제출만 막혔다 → 주간 기준이 바뀌면 통과할 수 있다.
+            # 노트에 표식을 남겨 **한 번만** 더 낸다(다음 거절은 확정).
+            _db.submit_queue_mark(row['id'], 'pending',
+                                  f'1회 재시도 대기 ({st[:100]})')
+            self._log(round_num, f'  ↩ 대기 큐 — {wid} 는 한 번 더 내본다(주간 기준 변동 대비)')
+        else:
+            _db.submit_queue_mark(row['id'], 'rejected', st[:200])
         if row.get('alpha_pk'):
             try:
                 _db.set_alpha_submit_result(int(row['alpha_pk']), ok, st)
@@ -621,8 +711,11 @@ class Worker(threading.Thread):
         except Exception:
             pass
         self._log(round_num,
-                  ('  🚀 큐 드레인 제출 성공!' if ok else f'  📝 큐 드레인 결과: {st[:80]}'),
+                  (f'  🚀 대기 큐 제출 완료 — {wid} (목록에서 제거)' if ok
+                   else f'  ⛔ 대기 큐 제출 거절 — {wid}: {st[:70]} (목록에 남김)'),
                   level=('pass' if ok else 'info'))
+        # 거절은 예산을 쓰지 않는다 — 다음 대기 건을 이어서 시도한다.
+        return int(row['id'])
 
     # ── 외부 제어 ─────────────────────────────────────────────
     def request_shutdown(self) -> None:
@@ -663,8 +756,36 @@ class Worker(threading.Thread):
         return self._stop_event.is_set()
 
     # ── 메인 루프 ─────────────────────────────────────────────
+    def _drain_ticker(self) -> None:
+        """예산 리셋을 **라운드 경계까지 기다리지 않는다**.
+
+        드레인이 라운드 시작 시점에만 돌면, 리셋(미 동부 자정 = KST 13:00)이 라운드
+        중간에 걸릴 때 큐가 그 라운드가 끝날 때까지 묵는다 — 2026-07-29 실측: 13:00 에
+        예산이 열렸는데 12:31 에 시작한 라운드 때문에 45분을 그냥 기다렸다.
+        제출은 시뮬 쿼터를 쓰지 않고 SUBMIT_LOCK 으로 직렬화되므로 라운드 중에 내도 안전하다.
+        """
+        # 재시작으로 중단된 선점('submitting')은 이 프로세스엔 주인이 없다 — 되돌린다.
+        # (부팅 직후라 수동 제출이 진행 중일 수 없어 안전하다)
+        try:
+            for _r in _db.submit_queue_list(self.user_id, limit=200):
+                if _r.get('status') == 'submitting':
+                    _db.submit_queue_mark(_r['id'], 'pending', '재시작으로 중단 — 재시도 대기')
+        except Exception as e:
+            LOG.warning('중단된 선점 복구 실패(무시): %s', e)
+        while not self._stop_event.wait(timeout=_DRAIN_TICK_S):
+            try:
+                creds = _db.get_user_credentials(self.user_id)
+                if not creds:
+                    continue
+                u, p = creds[0], creds[1]
+                self._drain_submit_queue(0, u, p)
+            except Exception as e:
+                LOG.warning('드레인 티커 실패(무시): %s', e)
+
     def run(self) -> None:
         try:
+            threading.Thread(target=self._drain_ticker, daemon=True,
+                             name=f'hyfe-drain-{self.user_id}').start()
             self._main_loop()
         finally:
             _db.set_user_running(self.user_id, running=False, paused=False)
@@ -926,10 +1047,9 @@ class Worker(threading.Thread):
                 self._retry_stuck_submits(round_num, username, password)
             except Exception as e:
                 self._log_quiet(round_num, f'⚠ 제출 재시도 블록 실패(무시): {e}')
-            try:
-                self._drain_submit_queue(round_num, username, password)
-            except Exception as e:
-                self._log_quiet(round_num, f'⚠ 큐 드레인 블록 실패(무시): {e}')
+        # ⚠ 대기 큐 제출은 여기서 부르지 않는다 — 라운드와 **완전히 별개**로,
+        #   _drain_ticker 스레드가 주기적으로 돌린다(2026-07-29 사장 지시).
+        #   라운드에 묶으면 예산이 열려도 라운드가 끝날 때까지 큐가 묵는다.
 
         # GA 엘리트 seed 풀 — 최근 윈도우에서 selection_score 상위 유전체를 그대로 가져온다.
         # ⚠ 코드에서 유전체를 역추출하지 않는다. 그건 손실 압축이라 자식이 부모를 복제조차
@@ -974,7 +1094,7 @@ class Worker(threading.Thread):
         if _dropped_seeds:
             self._log(round_num,
                       f'  ⚠ 조건과 안 맞는 시드 {_dropped_seeds}개 제외 '
-                      f'(남은 시드 {len(seed_genomes)}개) — 개조하면 원본 구조가 깨진다')
+                      f'(남은 시드 {len(seed_genomes)}개)')
 
         _bandit_on = run_config.is_bandit_enabled()
         pass_total = 0
@@ -1090,14 +1210,14 @@ class Worker(threading.Thread):
             if is_focus:
                 kind_label = 'correlation 회피' if focus_kind == 'correlation' else 'fail 개선'
                 self._log(round_num,
-                          f'1) 8 Genome 알파 생성 중 [{kind_label} — 정향변이] '
+                          f'1) 알파 생성 중 [{kind_label} — 정향변이] '
                           f'(model={model_label}, 부모 #{parent_idx}, fix="{fail_desc[:50]}")...')
             else:
                 _sg = (f'g{max(int(g.get("generation") or 0) for g in seed_genomes)}'
                        if seed_genomes else '없음')
                 _ss = (f'{max(s["_score"] for s in seeds):.3f}' if seeds else '-')
                 self._log(round_num,
-                          f'1) 8 Genome 알파 생성 중 (model={model_label}, '
+                          f'1) 알파 생성 중 (model={model_label}, '
                           f'seed {len(seed_genomes)}개 교차/변이 + 탐색 — '
                           f'최고세대 {_sg}, 최고점수 {_ss})...')
 
@@ -1505,10 +1625,8 @@ class Worker(threading.Thread):
 
             if do_simulate and not self._stop_event.is_set():
                 batch = to_simulate
-                _sim_mode = 'WQB API 동시'
                 self._log(round_num,
-                          f'  ── 라운드 시뮬 시작 ({_sim_mode}) — 알파 {len(batch)}개 '
-                          f'#{[s_["idx"] for s_ in batch]}')
+                          f'  ── 라운드 시뮬 시작 #{[s_["idx"] for s_ in batch]}')
                 # 어떤 전략을 테스트하는지 (idx + desc) 로그에 한 줄씩 노출.
                 for s_ in batch:
                     desc_short = (s_.get('desc') or '').strip()
@@ -1584,6 +1702,32 @@ class Worker(threading.Thread):
                                           f'큐에 보관 (다음 테마 주간 재시도)')
                         except Exception:
                             pass
+                    # ⑤ 제출 거절 → **대기 큐로 회수**. 제출 판정은 주마다 바뀌므로
+                    #   (고회전 면제·테마·피라미드 배수 교체) 그 자리에서 버리지 않고
+                    #   지금 FAIL 이 0 인 알파는 큐에 넣어 티커가 한 번 더 낸다.
+                    #   상관·테마 거절은 각자 전용 경로가 있으므로 제외.
+                    if (submit_status.startswith('rejected:')
+                            and 'CORRELATION' not in submit_status.upper()
+                            and 'PURE_POWER_POOL' not in submit_status.upper()):
+                        try:
+                            _m = dict(obj.get('metrics') or {})
+                            _wid = str(_m.get('wqb_alpha_id') or '')
+                            from . import wqb_api as _wapi
+                            if _wid and self._rejection_looks_spurious(
+                                    _wapi.WqbApiClient(username, password), _wid):
+                                _code = ''
+                                for _b in batch:
+                                    if int(_b.get('idx') or 0) == s_idx:
+                                        _code = _b.get('code', ''); break
+                                if _db.submit_queue_add(
+                                        self.user_id, wqb_alpha_id=_wid, kind='budget',
+                                        code=_code, metrics=_m,
+                                        note='제출 거절 — 기준 변동 대비 1회 재시도 대기'):
+                                    self._log(_round_num,
+                                              f'      📥 #{s_idx} 제출 거절 — 대기 큐에서 '
+                                              f'한 번 더 시도')
+                        except Exception as e:
+                            self._log_quiet(_round_num, f'⚠ 거절 회수 실패(무시): {e}')
                     # ④ 상관 거절 즉시 캡처 — DB 기록은 라운드 끝이라, 같은 라운드의
                     # 형제 제출을 막으려면 여기(부분 결과 스트림)에서 잡아야 한다.
                     if (submit_status.startswith('rejected:')
@@ -1982,24 +2126,30 @@ class Worker(threading.Thread):
                               f'  focus 후보 {_dropped}개 보류 — 라운드당 상위 '
                               f'{FOCUS_MAX_PER_ROUND}개만 연마(예산 보호)')
 
-                # PROD/SELF_CORRELATION 거절 부모 (2026-07-23) — 체크는 전부 통과했는데
-                # 상관 벽에서만 죽은 알파. 신호 자체는 검증된 것이므로 버리지 않고
-                # **탈상관 방향**(중립화 교체·resid·필드 교체)으로 연마 큐에 넣는다.
-                # fail_desc 의 'correlation' 을 directed_mutation 이 인식해 그쪽 축을
-                # 고른다. _classify_focus 는 FAIL 0 이라 이들을 못 잡는다 — 별도 수집.
-                _corr_parents = [
+                # 제출 거절 부모 — IS 체크는 전부 통과했는데 **제출에서** 죽은 알파.
+                # 신호 자체는 검증된 것이라 버리지 않고, 거절 사유를 그대로 개선 방향으로
+                # 삼아 연마 큐에 넣는다. _classify_focus 는 FAIL 0 이라 이들을 못 잡는다.
+                #
+                # 2026-07-23 엔 상관(CORRELATION) 거절만 잡았는데, 2026-07-29 실측으로
+                # **고회전 거절이 훨씬 많다**: LOW_GLB_EMEA_SHARPE 등으로 거절된 HT 알파가
+                # 라운드마다 나오는데 전부 버려지고 있었다(58k5agYM·E5ezrEqL).
+                # 거절 사유가 곧 '무엇을 고쳐야 하는가' 다 — mutation_learn.categorize 가
+                # 이름으로 축을 고른다(…SHARPE→signal, …FITNESS→fitness, SUB_…→sub_universe,
+                # CORRELATION→correlation). 사장 지시로 모든 거절 사유로 넓혔다.
+                _rej_parents = [
                     r for r in all_results
                     if not r.get('cached')
                     and str(r.get('submit_status') or '').startswith('rejected:')
-                    and 'CORRELATION' in str(r.get('submit_status') or '').upper()
-                ][:1]                       # 라운드당 1개 — 예산 보호
-                for _cp in _corr_parents:
+                ][:2]                       # 라운드당 2개 — 예산 보호
+                for _cp in _rej_parents:
                     if any(x is _cp for x in focus_candidates):
                         continue
                     focus_candidates.append(_cp)
+                    _why = str(_cp.get('submit_status') or '')
+                    _axis = ('탈상관' if 'CORRELATION' in _why.upper() else '거절 사유')
                     self._log(round_num,
-                              f"  🧭 상관 거절 부모 #{_cp.get('idx')} — 탈상관 연마 "
-                              f"대상으로 추가 ({str(_cp.get('submit_status'))[:60]})")
+                              f"  🧭 제출 거절 부모 #{_cp.get('idx')} — {_axis} 연마 "
+                              f"대상으로 추가 ({_why[:60]})")
 
                 if focus_candidates:
                     new_q = _db.get_focus_queue(self.user_id)
@@ -2018,12 +2168,12 @@ class Worker(threading.Thread):
                         ]
                         fd = ' / '.join([d for d in fail_descs if d])[:200]
                         if not fd:
-                            # 상관 거절 부모 — IS 체크는 전부 PASS 라 fail 항목이 없다.
-                            # 거절 사유를 실어야 directed_mutation 이 탈상관 축을 고른다.
+                            # 제출 거절 부모 — IS 체크는 전부 PASS 라 fail 항목이 없다.
+                            # 거절 사유를 실어야 directed_mutation 이 고칠 축을 고른다.
                             _ss = str(a.get('submit_status') or '')
-                            if 'CORRELATION' in _ss.upper():
+                            if _ss.startswith('rejected:'):
                                 fd = (_ss.split(':', 1)[-1].strip()[:200]
-                                      or 'PROD_CORRELATION')
+                                      or 'SUBMIT_REJECTED')
                         for ph in range(1, PHASES_PER_PARENT + 1):
                             new_q.append({
                                 'parent_round_num': round_num,
@@ -2100,16 +2250,41 @@ class Worker(threading.Thread):
         LOG.info('[round %d] %s', round_num, s[:300])
 
 
+# 신호에 영향이 없는 노브 — 여기만 바뀐 변형은 '새 실험'이 아니라 **같은 알파**다.
+# ts_backfill(field, N) 의 N 은 결측치를 며칠 전 값으로 메울지만 정한다. 결측이 드문
+# 필드에선 신호가 한 톨도 안 바뀌는데, 코드 해시는 달라져 캐시를 못 타고 풀 시뮬을 태운다.
+# 2026-07-29 실측: 최근 3일 '♻ 신규화' 알파 203건이 앞선 알파와 지표가 **완전히 동일**했다
+# (#63: backfill 120→96→144, 셋 다 S=1.50·TO=0.2926). 신규성 압력이 쿼터를 태우고
+# 정보는 0을 얻고 있었다 — 사장 지적으로 발견.
+_SIGNAL_NEUTRAL_RX = (
+    re.compile(r'(ts_backfill\s*\([^,()]+,\s*)\d+(\s*\))'),
+)
+
+
+def _signal_form(code: str) -> str:
+    """신호에 무관한 노브를 자리표시자로 지워, 두 코드가 '같은 실험'인지 비교한다."""
+    out = str(code or '')
+    for rx in _SIGNAL_NEUTRAL_RX:
+        out = rx.sub(r'\1N\2', out)
+    return out
+
+
 def _novelty_rewrite(user_id: int, code: str, fp: str, seen: set) -> str | None:
     """이미 시뮬한 (code, settings) 조합을 **아직 안 해본** 근처 변형으로 바꿔본다.
 
     alpha_mutate 의 수치/연산자 변형을 순서대로 시도해 (code_hash, fp) 가 캐시에도
     이번 라운드(seen)에도 없는 첫 변형을 돌려준다. 없으면 None(캐시 응답 유지).
     순수 변형 + 캐시 조회뿐이라 싸다. 예외는 호출부가 아니라 여기서 삼킨다.
+
+    ⚠ 해시가 다르다고 새 실험이 아니다 — 신호가 안 바뀌는 노브만 건드린 변형은
+      건너뛴다(_signal_form). 이게 없으면 캐시를 우회해 같은 알파를 다시 시뮬한다.
     """
     try:
         from . import alpha_mutate as _am
+        _base = _signal_form(code)
         for v in _am.mutate(code, max_variants=12, include_negation=False):
+            if _signal_form(v) == _base:
+                continue                      # 신호가 같은 변형 = 같은 실험
             if f'{_db.code_hash(v)}:{fp}' in seen:
                 continue
             if result_cache.lookup(user_id, v, fp) is None:
@@ -2250,7 +2425,7 @@ def _skip_reason_ko(sub_st: str) -> str:
     if r.startswith('submit_hold'):
         return f'예산 리셋 대기 {r[len("submit_hold"):].split("→")[0].strip("()")} → 대기 큐'
     if r.startswith('blocking_fail'):
-        return f'WQB 가 반드시 거절 — {r[len("blocking_fail"):].strip("()")}'
+        return r[len('blocking_fail'):].strip('()')
     if r.startswith('already_rejected'):
         return f'같은 식이 이미 거절됨 — {r[len("already_rejected"):].strip("()")}'
     if r.startswith('fieldset_cooldown'):

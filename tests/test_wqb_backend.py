@@ -436,7 +436,8 @@ def test_pool_refills_a_freed_slot_immediately(monkeypatch):
     live, peak, done = {'n': 0}, {'n': 0}, []
     lock = threading.Lock()
 
-    def fake_run_one(self, s, forced_delay, partial_fn, stop_event, submit_gate=None):
+    def fake_run_one(self, s, forced_delay, partial_fn, stop_event, submit_gate=None,
+                     tail_event=None):
         with lock:
             live['n'] += 1
             peak['n'] = max(peak['n'], live['n'])
@@ -456,3 +457,34 @@ def test_pool_refills_a_freed_slot_immediately(monkeypatch):
     assert len(out) == 12 and len(done) == 12, '후보 일부가 처리되지 않았다'
     assert peak['n'] <= 4, f'동시 실행이 슬롯 수를 넘었다: {peak["n"]}'
     assert peak['n'] == 4, f'슬롯을 다 못 채웠다: {peak["n"]}'
+
+
+def test_tail_cut_gives_up_on_never_started_straggler(monkeypatch):
+    """r11 #7 회귀 — 형제가 다 끝났는데 대기열에서 시작조차 못 한 건은 마감(3600s)을
+    다 태우지 않고 유예 뒤 포기해야 한다. 마감은 그대로 두고 이 경우만 자른다."""
+    monkeypatch.setattr(wb, '_TAIL_GRACE_S', 0.05)
+    monkeypatch.setattr(wb, '_TAIL_MAX_PENDING', 2)
+
+    class StragglerClient(FakeClient):
+        def poll(self, url, stop_event=None, abort_event=None, **k):
+            if not url.endswith('_99'):     # 형제는 즉시 완료
+                return super().poll(url, stop_event=stop_event)
+            # 죽은 접수 — status 를 영영 못 받는다. abort 를 기다린다.
+            assert abort_event is not None, 'poll 이 꼬리 절단 신호를 못 받고 있다'
+            assert abort_event.wait(5), '꼬리 절단이 걸리지 않았다(마감까지 태울 판)'
+            return {'status': 'TIMEOUT', 'alpha': None,
+                    'message': 'tail cut (형제 완료 후에도 대기열에서 미시작)', 'progress': None}
+
+    class C(StragglerClient):
+        def submit_simulation(self, expr, settings):
+            return 'https://api.worldquantbrain.com/simulations/SIM' + expr
+
+    be = wb.ApiBackend('e', 'p', client=C())
+    batch = ([{'idx': i, 'code': f'_0{i}', 'desc': '', 'settings': {}} for i in range(1, 4)]
+             + [{'idx': 99, 'code': '_99', 'desc': '', 'settings': {}}])
+    out = be.simulate_batch(batch)
+
+    assert len(out) == 4, '꼬리를 잘랐다고 결과가 사라지면 안 된다'
+    straggler = [r for r in out if r['idx'] == 99][0]
+    assert straggler['mode'] == 'error' and 'tail cut' in straggler['error_text']
+    assert all(r['mode'] == 'pass' for r in out if r['idx'] != 99), '형제까지 잘렸다'

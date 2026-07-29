@@ -123,7 +123,24 @@ def test_harvested_alpha_is_submittable_end_to_end(harvested):
 
 # ── 일일 제출 예산 ───────────────────────────────────────────────────────────
 
-def test_submit_gate_allows_then_blocks_at_budget(monkeypatch):
+
+@pytest.fixture
+def no_live_submission_count(monkeypatch):
+    """_submitted_today 의 **WQB 실측 조회**를 끊는다 (테스트 격리).
+
+    로컬 집계만 monkeypatch 하면 반쪽이다 — 실측이 살아 있어서 그날 실계정 제출이
+    4건이면 예산 게이트 테스트가 환경 때문에 실패한다(2026-07-29 실측).
+    """
+    from server import wqb_api as _api
+
+    class _NoRemote:
+        def __init__(self, *a, **k): pass
+        def submissions_on(self, day): return None      # None → 로컬 집계 사용
+
+    monkeypatch.setattr(_api, 'WqbApiClient', _NoRemote)
+
+
+def test_submit_gate_allows_then_blocks_at_budget(monkeypatch, no_live_submission_count):
     """예산 소진 시 제출이 막혀야 한다 (하루 4건 — Power Pool 문서)."""
     from server import worker as w
 
@@ -145,7 +162,7 @@ def test_submit_gate_allows_then_blocks_at_budget(monkeypatch):
     assert ok is False and 'daily_budget' in reason
 
 
-def test_submit_gate_fails_open_on_db_error(monkeypatch):
+def test_submit_gate_fails_open_on_db_error(monkeypatch, no_live_submission_count):
     """게이트 버그가 제출을 통째로 막으면 안 된다 — 불확실하면 제출한다."""
     from server import worker as w
 
@@ -170,7 +187,7 @@ def test_backend_skips_submit_when_gate_refuses():
         def submit_simulation(self, code, settings):
             return 'http://sim'
 
-        def poll(self, url, stop_event=None):
+        def poll(self, url, stop_event=None, **k):
             return {'status': 'COMPLETE', 'alpha': 'a1'}
 
         def harvest_alpha(self, aid):

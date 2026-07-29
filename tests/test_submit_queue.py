@@ -45,3 +45,227 @@ def test_mark_and_next_pending(isolated_db):
     # theme 은 자동 드레인 대상이 아니다 — budget 조회에 안 섞임
     db.submit_queue_mark(db.submit_queue_next_pending(uid, 'budget')['id'], 'rejected')
     assert db.submit_queue_next_pending(uid, kind='budget') is None
+
+
+def test_drain_fills_daily_budget_and_respects_list_mode(isolated_db, monkeypatch):
+    """예산 리셋(KST 13:00) 뒤 대기분은 **한도까지 연속** 자동 제출한다.
+    단 제출 방식이 '목록에 추가'(list)면 한 건도 자동 제출하지 않는다."""
+    from server import worker as w
+
+    uid = isolated_db
+    for wid in ('Q1', 'Q2', 'Q3', 'Q4', 'Q5'):
+        db.submit_queue_add(uid, wqb_alpha_id=wid, kind='budget')
+
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = __import__('threading').Event()
+    monkeypatch.setattr(w, '_db', db)
+    monkeypatch.setattr(w, 'DAILY_SUBMIT_BUDGET', 4)
+    sent = []
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: len(sent))
+    monkeypatch.setattr(w.Worker, '_submit_gate',
+                        lambda self, *a, **k: (True, ''))
+    monkeypatch.setattr(w.Worker, '_log', lambda self, *a, **k: None)
+    monkeypatch.setattr(w.Worker, '_log_quiet', lambda self, *a, **k: None)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def authenticate(self): return True
+        def set_alpha_description(self, *a, **k): pass
+        def submit_alpha(self, wid, **k):
+            sent.append(wid)
+            return True, 'submitted'
+
+    from server import wqb_api
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeClient)
+
+    db.set_submit_mode(uid, 'list')
+    wk._drain_submit_queue(1, 'u', 'p')
+    assert sent == [], '목록 모드인데 자동 제출됐다'
+
+    db.set_submit_mode(uid, 'auto')
+    wk._drain_submit_queue(1, 'u', 'p')
+    assert sent == ['Q1', 'Q2', 'Q3', 'Q4'], f'한도까지 안 비웠다: {sent}'
+    assert db.submit_queue_next_pending(uid, kind='budget')['wqb_alpha_id'] == 'Q5'
+
+
+def test_drain_runs_on_a_timer_not_only_at_round_start(isolated_db, monkeypatch):
+    """예산 리셋이 라운드 중간에 걸려도 큐가 그 라운드 끝까지 묵으면 안 된다.
+
+    2026-07-29 실측: 13:00 에 예산이 열렸는데 12:31 시작 라운드 때문에 45분을 기다렸다.
+    티커 스레드가 주기적으로 드레인을 돌린다.
+    """
+    import threading
+    from server import worker as w
+
+    uid = isolated_db
+    db.submit_queue_add(uid, wqb_alpha_id='T1', kind='budget')
+    db.set_submit_mode(uid, 'auto')
+
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = threading.Event()
+    drained = threading.Event()
+    monkeypatch.setattr(w, '_DRAIN_TICK_S', 0.01)
+    monkeypatch.setattr(w._db, 'get_user_credentials', lambda _uid: ('u', 'p', None))
+    monkeypatch.setattr(w.Worker, '_drain_submit_queue',
+                        lambda self, rn, u, p: drained.set())
+
+    t = threading.Thread(target=wk._drain_ticker, daemon=True)
+    t.start()
+    assert drained.wait(3), '티커가 드레인을 부르지 않았다'
+    wk._stop_event.set()
+    t.join(timeout=3)
+
+
+def test_drain_skips_wqb_budget_lookup_when_queue_is_empty(isolated_db, monkeypatch):
+    """큐가 비면 WQB 실측 조회까지 가면 안 된다 — 5분마다 헛 API 호출이 된다."""
+    from server import worker as w
+
+    uid = isolated_db
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = __import__('threading').Event()
+    called = []
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: called.append(1) or 0)
+    assert wk._drain_one(0, 'u', 'p') is None
+    assert not called, '빈 큐인데 예산 조회를 했다'
+
+
+def test_success_removes_from_queue_rejection_stays(isolated_db, monkeypatch):
+    """성공은 목록에서 없애고, 거절은 남긴다 (2026-07-29 사장 지시).
+
+    목록은 '아직 낼 것' 만 보여야 한다. 제출 기록은 제출 내역에 따로 남으므로
+    큐에서 지워도 이력이 사라지지 않는다. 거절은 사람이 보고 판단할 몫이라 남긴다.
+    """
+    import threading
+    from server import worker as w
+
+    uid = isolated_db
+    db.submit_queue_add(uid, wqb_alpha_id='OK1', kind='budget')
+    db.submit_queue_add(uid, wqb_alpha_id='NO1', kind='budget')
+    db.set_submit_mode(uid, 'auto')
+
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = threading.Event()
+    monkeypatch.setattr(w, 'DAILY_SUBMIT_BUDGET', 4)
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: 0)
+    monkeypatch.setattr(w.Worker, '_submit_gate', lambda self, *a, **k: (True, ''))
+    monkeypatch.setattr(w.Worker, '_log', lambda self, *a, **k: None)
+    monkeypatch.setattr(w.Worker, '_log_quiet', lambda self, *a, **k: None)
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def authenticate(self): return True
+        def set_alpha_description(self, *a, **k): pass
+        def submit_alpha(self, wid, **k):
+            return (True, 'submitted') if wid == 'OK1' else (False, 'rejected:LOW_FITNESS')
+
+    from server import wqb_api
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeClient)
+
+    wk._drain_submit_queue(0, 'u', 'p')
+
+    left = {r['wqb_alpha_id']: r['status'] for r in db.submit_queue_list(uid, limit=20)}
+    assert 'OK1' not in left, '제출 성공 건이 목록에 남아 있다'
+    assert left.get('NO1') == 'rejected', '거절 건이 사라졌거나 상태가 틀리다'
+    assert db.submit_queue_next_pending(uid, kind='budget') is None, '거절 건을 자동 재시도하면 안 된다'
+
+
+def test_two_drainers_cannot_grab_the_same_row(isolated_db, monkeypatch):
+    """드레인이 겹쳐 돌아도 같은 알파를 두 번 제출하면 안 된다.
+
+    2026-07-29 실측: 라운드 훅과 티커가 같은 pending 행을 집어 A17rzm9R 를 두 번 냈다
+    (제출은 4분 걸려 그동안 계속 pending 이었다). 네트워크 전에 'submitting' 으로 선점한다.
+    """
+    import threading
+    from server import worker as w
+
+    uid = isolated_db
+    db.submit_queue_add(uid, wqb_alpha_id='ONE', kind='budget')
+    db.set_submit_mode(uid, 'auto')
+
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = threading.Event()
+    monkeypatch.setattr(w, 'DAILY_SUBMIT_BUDGET', 4)
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: 0)
+    monkeypatch.setattr(w.Worker, '_submit_gate', lambda self, *a, **k: (True, ''))
+    monkeypatch.setattr(w.Worker, '_log', lambda self, *a, **k: None)
+    monkeypatch.setattr(w.Worker, '_log_quiet', lambda self, *a, **k: None)
+
+    sent, in_flight = [], threading.Event()
+
+    class SlowClient:
+        def __init__(self, *a, **k): pass
+        def authenticate(self): return True
+        def set_alpha_description(self, *a, **k): pass
+        def submit_alpha(self, wid, **k):
+            sent.append(wid)
+            in_flight.set()
+            _time.sleep(0.3)              # 실제로도 수 분 걸린다
+            return False, 'rejected:LOW_FITNESS'
+
+    import time as _time
+    from server import wqb_api
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', SlowClient)
+
+    t = threading.Thread(target=wk._drain_one, args=(0, 'u', 'p'), daemon=True)
+    t.start()
+    assert in_flight.wait(3), '첫 드레인이 시작되지 않았다'
+    # 제출이 아직 진행 중인 사이에 두 번째 드레인이 같은 행을 집으면 안 된다
+    assert wk._drain_one(0, 'u', 'p') is None, '진행 중인 행을 다른 드레인이 또 집었다'
+    t.join(timeout=5)
+    assert sent == ['ONE'], f'같은 알파를 중복 제출했다: {sent}'
+
+
+def test_rejected_alpha_gets_exactly_one_more_try(isolated_db, monkeypatch):
+    """제출 판정은 주마다 바뀐다 — 403 한 번으로 영구 폐기하지 않고 한 번 더 낸다.
+
+    단 **한 번만**. 두 번째 거절은 확정이다(무한 재시도로 WQB 를 두드리지 않는다).
+    지금 FAIL 이 남아 있는 알파는 애초에 재시도 대상이 아니다.
+    """
+    import threading
+    from server import worker as w
+
+    uid = isolated_db
+    db.submit_queue_add(uid, wqb_alpha_id='WEEKLY', kind='budget')
+    db.submit_queue_add(uid, wqb_alpha_id='TRULYBAD', kind='budget')
+    db.set_submit_mode(uid, 'auto')
+
+    wk = w.Worker.__new__(w.Worker)
+    wk.user_id = uid
+    wk._stop_event = threading.Event()
+    monkeypatch.setattr(w, 'DAILY_SUBMIT_BUDGET', 4)
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: 0)
+    monkeypatch.setattr(w.Worker, '_submit_gate', lambda self, *a, **k: (True, ''))
+    monkeypatch.setattr(w.Worker, '_log', lambda self, *a, **k: None)
+    monkeypatch.setattr(w.Worker, '_log_quiet', lambda self, *a, **k: None)
+
+    tries = []
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def authenticate(self): return True
+        def set_alpha_description(self, *a, **k): pass
+        def submit_alpha(self, wid, **k):
+            tries.append(wid)
+            return False, 'rejected:LOW_SHARPE(1.5 vs 1.58)'
+        def harvest_alpha(self, wid):
+            fails = [] if wid == 'WEEKLY' else [{'name': 'LOW_SHARPE'}]
+            return {'metrics': {}, 'is_status': {'pass': [], 'fail': fails,
+                                                 'error': [], 'pending': []}}
+
+    from server import wqb_api
+    monkeypatch.setattr(wqb_api, 'WqbApiClient', FakeClient)
+
+    wk._drain_submit_queue(0, 'u', 'p')          # 1회차
+    st = {r['wqb_alpha_id']: r['status'] for r in db.submit_queue_list(uid, limit=20)}
+    assert st.get('WEEKLY') == 'pending', 'FAIL 0 인데 재시도 기회를 안 줬다'
+    assert st.get('TRULYBAD') == 'rejected', 'FAIL 남은 알파까지 되살리면 안 된다'
+
+    wk._drain_submit_queue(0, 'u', 'p')          # 2회차 — 재시도분 소진
+    st = {r['wqb_alpha_id']: r['status'] for r in db.submit_queue_list(uid, limit=20)}
+    assert st.get('WEEKLY') == 'rejected', '두 번째 거절은 확정이어야 한다'
+    assert tries.count('WEEKLY') == 2, f'재시도가 정확히 1회가 아니다: {tries}'

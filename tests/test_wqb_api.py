@@ -150,6 +150,33 @@ def test_poll_until_complete():
                  deadline_s=30, sleep=lambda _: None)
     assert res['status'] == 'COMPLETE' and res['alpha'] == 'AB1'
 
+def test_submit_401_rereads_session_and_retries_once():
+    """제출도 폴링과 같은 갱신 레이스를 탄다 — 401 이면 디스크 세션을 다시 읽고 1회 재시도.
+
+    2026-07-29 실측: 세션 갱신 직후 라운드의 7건이 '제출 응답 없음' 으로 증발했다.
+    """
+    sess = FakeSession()
+    sess.queue[('POST', '/simulations')] = [
+        FakeResp(401),
+        FakeResp(201, headers={'Location': 'https://api.worldquantbrain.com/simulations/SIM9'}),
+    ]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    reloads = []
+    c._load_session = lambda: (reloads.append(1), True)[1]
+    url = c.submit_simulation('rank(close)', {'region': 'USA', 'delay': 1})
+    assert url.endswith('/simulations/SIM9'), '갱신 세션으로 재시도하지 않았다'
+    assert len(reloads) == 1
+
+
+def test_submit_401_gives_up_after_one_retry():
+    """재시도해도 401 이면 무한 재귀 없이 None — 조용한 무한루프가 제일 나쁘다."""
+    sess = FakeSession()
+    sess.queue[('POST', '/simulations')] = [FakeResp(401), FakeResp(401)]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    c._load_session = lambda: True
+    assert c.submit_simulation('rank(close)', {'region': 'USA', 'delay': 1}) is None
+
+
 def test_submit_rate_limited():
     sess = FakeSession()
     sess.queue[('POST', '/simulations')] = [FakeResp(429)]

@@ -34,7 +34,7 @@ from . import worker as _worker
 from . import run_config as _run_config
 from . import wqb_data_service as _wqb_data_service
 
-LOG = logging.getLogger('hyfe.app')
+LOG = logging.getLogger('genomicwqb.app')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s')
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +69,33 @@ def _ensure_house_rc_account() -> None:
             LOG.info('house RC 계정 보정: %s', _wqb_data_service.HOUSE_RC_USERNAME)
     except Exception as e:
         LOG.warning('house RC 보정 skip: %s', e)
+
+
+def _install_shutdown_handler() -> None:
+    """SIGTERM/SIGINT 에 진행 중인 WQB 시뮬을 취소하고 종료한다.
+
+    ⚠ 2026-07-28 실측. 안 하면 시뮬이 WQB 쪽에서 계속 돌며 동시 슬롯을 물고, 재시작
+    직후 라운드가 빈 슬롯 1개로 시작한다 — 스레드 8개 중 7개가 t=0 부터 대기했고
+    첫 결과가 30분 뒤에 나왔다(id5470 을 죽이고 시작한 id5471).
+
+    워커에는 request_shutdown 을 쓴다(request_pause 가 아니다) — paused 플래그를
+    남기면 재시작 후 자동 재개가 이 사용자를 건너뛴다.
+    """
+    import signal as _signal
+
+    def _on_term(signum, _frame):
+        try:
+            n = _worker.shutdown_all()
+            LOG.warning('signal %s — 시뮬 %d건 취소 후 종료', signum, n)
+        except Exception as e:
+            LOG.warning('종료 정리 실패(그대로 종료): %s', e)
+        raise SystemExit(0)
+
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        try:
+            _signal.signal(_sig, _on_term)
+        except (ValueError, OSError) as e:      # 메인 스레드가 아니면 등록 불가
+            LOG.warning('signal %s 핸들러 등록 skip: %s', _sig, e)
 
 
 def _auto_resume_workers() -> None:
@@ -119,24 +146,29 @@ def _status_payload(uid: int) -> dict[str, Any]:
     account_type = _db.get_account_type(uid)
     is_rc = account_type == 'research_consultant'
     s['account_type'] = account_type
-    s['genome_model'] = 'rc-api-genome' if is_rc else 'standard-playwright-genome'
-    s['backtester_mode'] = 'WQB API concurrent' if is_rc else 'Playwright browser'
-    s['save_policy'] = (
-        'RC: completed alpha마다 API 제출 시도 (직렬화 + 429 재시도)'
-        if is_rc else
-        'Non-RC: 7 basic PASS + self-correlation ≤ 0.7 알파만 저장'
-    )
+    s['submit_mode'] = _db.get_submit_mode(uid)
+    # ⚠ 이 세 문자열은 2026-07-27 까지 옛 Playwright 시대 표현이 남아 사실과 달랐다
+    #   ('Non-RC 는 브라우저로 돌고 제출 안 함'). 시뮬은 계정 종류와 무관하게 REST API
+    #   단일이고(2026-07-13 Playwright 제거), 제출도 양쪽 다 시도한다. 실제 차이만 적는다.
+    s['genome_model'] = 'rc-api-genome' if is_rc else 'standard-genome'
+    s['backtester_mode'] = 'WQB API concurrent'
+    # save_policy(파이프라인 '게이트' 줄에 붙던 정책 설명)는 2026-07-29 사장 지시로 삭제.
+    # 소비처가 UI 한 곳뿐이었다.
     # GA(유전 알고리즘) 상태 — UI Evolution 패널이 소비.
     try:
-        seed_pool = len(_db.best_alphas_for_seeding(uid, top_n=5, min_pass_count=5))
+        _seeds = _db.elite_seeds(uid, top_n=5)
     except Exception:
-        seed_pool = 0
+        _seeds = []
+    seed_pool = len(_seeds)
+    seed_generation = max(
+        (int((s.get('genome') or {}).get('generation') or 0) for s in _seeds), default=0)
     try:
         focus_len = len(_db.get_focus_queue(uid))
     except Exception:
         focus_len = 0
     bandit_on = _run_config.is_bandit_enabled()
-    s['ga'] = {'seed_pool': seed_pool, 'focus_queue': focus_len, 'bandit': bandit_on}
+    s['ga'] = {'seed_pool': seed_pool, 'focus_queue': focus_len, 'bandit': bandit_on,
+               'seed_generation': seed_generation}
     s['ga_policy'] = (
         f'엘리트 seed {seed_pool}개 교차/변이 + 탐색'
         if seed_pool else '무작위 탐색 (엘리트 seed 수집 전)'
@@ -269,8 +301,11 @@ def api_login():
 def api_register():
     """신규 사용자 전용 가입 — WQB 자격증명만 검증한다.
 
-    이미 등록된 username 이면 409. account_type 화이트리스트 적용
-    (standard/research_consultant, 그 외는 standard 로 강등).
+    이미 등록된 username 이면 409.
+    account_type 은 **묻지 않고 측정한다** — /authentication 이 주는 permissions 의
+    CONSULTANT 표식으로 정한다(2026-07-27). 예전엔 가입 폼 라디오 버튼이 정했는데,
+    자기 신고라 실제 WQB 권한과 어긋날 수 있었고 그걸 바로잡을 승급 검사도
+    '로그인 되면 RC' 라 게이트 구실을 못 했다.
     Gemini API 키는 2026-07-03부터 받지 않는다 (Genome GA 전환으로 불필요).
     기존 사용자 로그인은 /api/login 을 사용할 것.
     """
@@ -278,9 +313,6 @@ def api_register():
     wqb_username = (body.get('wqb_username') or '').strip()
     wqb_password = (body.get('wqb_password') or '').strip()
     remember = bool(body.get('remember', True))
-    account_type = (body.get('account_type') or 'standard').strip()
-    if account_type not in ('standard', 'research_consultant'):
-        account_type = 'standard'
 
     if not (wqb_username and wqb_password):
         return _err('missing_fields', '아이디 / 비밀번호가 필요합니다', 400)
@@ -300,7 +332,7 @@ def api_register():
 
     try:
         LOG.info('register attempt (WQB validation): %s', wqb_username)
-        result = _auth.validate_login(wqb_username, wqb_password, account_type=account_type)
+        result = _auth.validate_login(wqb_username, wqb_password)
     finally:
         with _LOGIN_LOCK_LOCK:
             _LOGIN_IN_FLIGHT.discard(wqb_username)
@@ -310,7 +342,14 @@ def api_register():
                  wqb_username, result.get('reason'), result.get('detail'))
         return jsonify(result), 401
 
+    account_type = result.get('account_type') or 'standard'
     uid = _db.upsert_user(wqb_username, wqb_password, '', account_type=account_type)
+    # 능력 탐침이 정한 백엔드를 저장 — 시뮬은 REST API 단일이다(Playwright 제거).
+    if result.get('backend') == 'api':
+        try:
+            _db.set_backend(uid, 'api')
+        except Exception:
+            pass
     return _issue_session(uid, wqb_username, remember)
 
 
@@ -341,7 +380,7 @@ def api_m_login():
 
 def _issue_session(uid: int, wqb_username: str, remember: bool) -> Response:
     """세션 발급 + 쿠키 세팅 + 응답."""
-    token = «REDACTED»
+    token = _db.create_session(uid)
     resp = jsonify({'ok': True, 'reason': 'ok', 'user_id': uid,
                     'wqb_username': wqb_username})
     cookie_kwargs = dict(
@@ -358,7 +397,13 @@ def _issue_session(uid: int, wqb_username: str, remember: bool) -> Response:
 
 @app.route('/api/account/upgrade-to-rc', methods=['POST'])
 def api_upgrade_to_rc():
-    """Research Consultant 계정으로 전환 — WQB API 로 RC 자격 확인 후 account_type 갱신."""
+    """WQB 실제 권한을 다시 읽어 account_type 을 **동기화**한다 (승급·강등 양방향).
+
+    ⚠ 예전엔 'WQB API 로그인 성공 = RC' 로 판정했는데, 일반 계정도 API Basic 인증이
+    통과하므로(auth.probe_wqb_backend 주석) 로그인만 되면 누구나 RC 가 됐다 —
+    게이트 구실을 못 했다. 이제 /authentication 이 주는 permissions 배열의
+    CONSULTANT 표식으로 판정한다 (2026-07-27 실측).
+    """
     uid = _current_user_id()
     if not uid:
         return _err('not_logged_in', '로그인이 필요합니다', 401)
@@ -369,8 +414,14 @@ def api_upgrade_to_rc():
     v = _auth.validate_wqb_api(username, password)
     if not v.get('ok'):
         return jsonify(v), 400
-    _db.set_account_type(uid, 'research_consultant')
-    return jsonify({'ok': True, 'account_type': 'research_consultant'})
+    at = _auth.account_type_for(v.get('permissions'))
+    _db.set_account_type(uid, at)
+    if at != 'research_consultant':
+        return jsonify({'ok': False, 'reason': 'wqb_not_consultant',
+                        'account_type': at,
+                        'detail': 'WQB 계정에 CONSULTANT 권한이 없습니다. '
+                                  'Research Consultant 승인 후 다시 시도하세요.'}), 400
+    return jsonify({'ok': True, 'account_type': at})
 
 
 @app.route('/api/account/wqb-persona-status', methods=['GET'])
@@ -382,6 +433,10 @@ def api_wqb_persona_status():
     미완료 persona 상태에서 WQB 가 BIOMETRICS_THROTTLED(429)를 매번 재무장시켜
     throttle 가 영원히 안 풀린다(사장님 "버튼 안 눌림" 버그의 근본 원인).
     세션도 pending challenge 도 없을 때만 인증 1회로 신규 challenge 를 발급한다.
+
+    ⚠ persona_url 은 **여기서 돌려주지 않는다**(항상 ''). 링크 해석은 inquiry 를 재개시켜
+    사용자가 열어 둔 인증 페이지를 죽이므로, 사용자가 링크를 누르는 순간에만
+    /api/account/wqb-persona-link 로 발급한다. 여기선 challenge 존재 여부만 알린다.
     """
     uid = _current_user_id()
     if not uid:
@@ -391,26 +446,31 @@ def api_wqb_persona_status():
         return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
     u, p, _ = creds
     account_type = _db.get_account_type(uid)
-    # 1) 저장된 세션이 살아있으면 biometric 불필요 — POST /authentication 호출 없이 반환.
+    # 1) 미완료 persona challenge(.pending)가 있으면 **세션이 아직 살아 있어도** 먼저 알린다.
+    #    session_keeper 가 만료 30분 전 선제 갱신(refresh_token)에서 persona 를 요구받으면
+    #    .pending 만 만들고 살아있는 세션은 그대로 두는데, 예전엔 '세션 유효 → 인증 불필요'
+    #    fast-path 가 이를 가려서 — 30분 전 알림을 받고 들어와도 인증 버튼이 안 떴다
+    #    (만료 전 선인증이 불가능했다). resolve=False — 파일만 읽는다(네트워크 0건).
+    #    사용자가 브라우저에서 완료 후 '완료' 버튼을 누르면 그때 complete_persona()
+    #    가 단 한 번 POST 한다. 여기서 POST 하면 throttle 재무장 루프가 된다.
     try:
-        from .wqb_api import WqbApiClient, _is_public_persona_url
+        from .wqb_api import WqbApiClient
         c = WqbApiClient(u, p)
+        pend = c.pending_persona(resolve=False)
+        if pend is not None:
+            authed = False
+            try:
+                authed = bool(c._load_session() and c._session_valid())
+            except Exception:
+                authed = False
+            return jsonify({'persona_required': True,
+                            'persona_url': '',
+                            'inquiry': pend.get('inquiry', ''),
+                            'authenticated': authed,
+                            'account_type': account_type})
+        # 1.5) pending 이 없고 저장된 세션이 살아있으면 biometric 불필요 — POST 없이 반환.
         if c._load_session() and c._session_valid():
             return jsonify({'persona_required': False, 'authenticated': True,
-                            'account_type': account_type})
-        # 1.5) 미완료 persona challenge(.pending)가 있으면 그 URL 을 POST 없이 반환.
-        #      사용자가 브라우저에서 완료 후 '완료' 버튼을 누르면 그때 complete_persona()
-        #      가 단 한 번 POST 한다. 여기서 POST 하면 throttle 재무장 루프가 된다.
-        #      persona_url 이 빈 값(일시 해석 실패)이어도 pending 이 존재하는 한 새
-        #      challenge 를 발급하지 않는다 — UI 가 "링크 준비 중" 을 띄우고 재시도.
-        pend = c.pending_persona()
-        if pend is not None:
-            pu = pend.get('persona_url', '')
-            if not _is_public_persona_url(pu):
-                pu = ''
-            return jsonify({'persona_required': True,
-                            'persona_url': pu,
-                            'inquiry': pend.get('inquiry', ''),
                             'account_type': account_type})
     except Exception:
         pass
@@ -423,21 +483,10 @@ def api_wqb_persona_status():
             return jsonify({'persona_required': False, 'authenticated': True,
                             'account_type': account_type})
         if c.persona_required:
-            pend = c.pending_persona() or {}
-            persona_url = pend.get('persona_url') or ''
-            if not _is_public_persona_url(persona_url):
-                persona_url = ''
-            inquiry = pend.get('inquiry', '')
-            if not inquiry and persona_url:
-                try:
-                    from urllib.parse import urlparse, parse_qs
-                    q = parse_qs(urlparse(persona_url).query)
-                    inquiry = (q.get('inquiry') or q.get('inquiry-id') or [''])[0]
-                except Exception:
-                    inquiry = ''
+            pend = c.pending_persona(resolve=False) or {}
             return jsonify({'persona_required': True,
-                            'persona_url': persona_url,
-                            'inquiry': inquiry,
+                            'persona_url': '',
+                            'inquiry': pend.get('inquiry', ''),
                             'account_type': account_type})
         if getattr(c, 'last_auth_status_code', None) == 429:
             return jsonify({'persona_required': False, 'rate_limited': True,
@@ -447,6 +496,110 @@ def api_wqb_persona_status():
         pass
     return jsonify({'persona_required': False, 'ok': False,
                     'account_type': account_type})
+
+
+@app.route('/api/account/wqb-persona-watch', methods=['GET'])
+def api_wqb_persona_watch():
+    """모바일 앱 폴링 전용 — 미완료 persona challenge(.pending)만 읽는다.
+
+    /api/account/wqb-persona-status 를 그대로 폴링하면 안 된다: 저장 세션도 .pending 도
+    없을 때 그 엔드포인트는 WQB 에 POST /authentication 을 날려 새 challenge 를 발급하는데,
+    60초마다 그러면 BIOMETRICS_THROTTLED(429) 가 영구 재무장된다.
+
+    여기서는 WQB 로 나가는 네트워크 호출이 **0건**이다 — 로컬 .pending 파일만 본다.
+    'persona_required' 는 곧 "처리 대기 중인 바이오 인증 challenge 가 있다" 는 뜻이고,
+    그게 정확히 앱이 알림을 띄워야 하는 시점이다.
+
+    ⚠ persona_url 은 항상 '' 이다. 예전엔 여기서 링크를 해석해 돌려줬는데, 그 해석
+    (`GET /authentication/persona?inquiry=…`) 이 inquiry 를 재개시켜 **직전 Persona 세션을
+    무효화**한다. 60초마다 그러면 사용자가 인증 중인 페이지가 계속 죽어 무한 새로고침 끝에
+    'session expired' 가 뜬다(사장 보고 2026-07-10). 앱은 URL 없는 알림을 받으면 앱을 열고,
+    링크는 사용자가 누를 때 /api/account/wqb-persona-link 가 그 시점에 발급한다.
+    """
+    uid = _current_user_id()
+    if not uid:
+        return _err('not_logged_in', '로그인이 필요합니다', 401)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
+    u, p, _ = creds
+    try:
+        from .wqb_api import WqbApiClient
+        pend = WqbApiClient(u, p).pending_persona(resolve=False)
+    except Exception:
+        LOG.exception('persona-watch 조회 실패 uid=%s', uid)
+        return jsonify({'persona_required': False, 'ok': False})
+    if pend is None:
+        return jsonify({'persona_required': False, 'ok': True})
+    return jsonify({'persona_required': True, 'ok': True,
+                    'persona_url': '',
+                    'inquiry': pend.get('inquiry', '')})
+
+
+@app.route('/api/account/wqb-persona-link', methods=['POST'])
+def api_wqb_persona_link():
+    """사용자가 '인증 페이지 열기' 를 누른 그 순간에만 브라우저용 Persona 링크를 발급한다.
+
+    POST 인 이유: 조회가 아니라 **상태를 바꾸는 호출**이다. WQB 에 GET 하면 inquiry 가
+    재개되며 새 hosted-flow 세션이 나오고 직전 세션은 무효가 된다. 그래서 폴링·페이지
+    진입 경로에서는 절대 부르지 않는다.
+
+    challenge 가 이미 죽었으면(WQB 410 Gone) pending_persona 가 .pending 을 지우므로,
+    그 자리에서 authenticate() 로 새 challenge 를 한 번 발급해 링크를 돌려준다.
+
+    body `{"force": true}` — 사용자가 **'인증 링크 재발급'** 버튼을 누른 경우.
+    링크를 열었더니 Persona 가 'session expired' 를 띄우는 상황(hosted 세션이 이미
+    죽었지만 WQB 쪽 challenge 는 살아 있어 자동 재발급 조건에 안 걸린다)은 사용자가
+    스스로 빠져나올 방법이 없었다. force 면 저장된 challenge 를 **무조건 버리고**
+    mint_challenge() 로 새로 발급한다. 대가: 직전 링크는 그 순간 무효가 되고
+    POST /authentication 이 1회 나간다(429 throttle 이 있으니 자동 경로에서는 금지 —
+    사용자가 명시적으로 누를 때만 이 플래그가 온다).
+    """
+    uid = _current_user_id()
+    if not uid:
+        return _err('not_logged_in', '로그인이 필요합니다', 401)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_credentials', '자격증명을 찾을 수 없습니다', 400)
+    u, p, _ = creds
+    force = bool((request.get_json(silent=True) or {}).get('force'))
+    from .wqb_api import WqbApiClient, _is_public_persona_url
+    try:
+        c = WqbApiClient(u, p)
+        # 선제 갱신 마커(source='refresh') — session_keeper 가 만료 30분 전에 만든
+        # challenge 는 살아있는 세션 쿠키 아래에서 발급돼, 해석하면 이미 죽은 hosted
+        # 세션이 나온다(열자마자 'session expired', 2026-07-16 사장 보고). 사용자가
+        # 지금 눌렀으니 만료-후와 동일한 검증된 경로로 **그 자리에서** 새로 발급한다.
+        _raw = getattr(c, '_read_pending', lambda: None)()
+        if force or (_raw is not None and str(_raw.get('source') or '') == 'refresh'):
+            if force:
+                LOG.info('persona 링크 강제 재발급 요청 uid=%s', uid)
+            if c.mint_challenge():
+                return jsonify({'ok': True, 'authenticated': True, 'persona_required': False})
+            if getattr(c, 'last_auth_status_code', None) == 429:
+                return jsonify({'ok': False, 'reason': 'rate_limited', 'persona_required': True,
+                                'detail': 'WQB 인증 호출 한도(분당 5회) 초과 — 1분 후 다시 눌러주세요.'})
+            if not c.persona_required:
+                return _err('persona_unavailable', 'WQB 인증에 실패했습니다', 400)
+            # mint 성공 → 아래 pending_persona(resolve=True) 가 fresh challenge 를 해석한다.
+        pend = c.pending_persona(resolve=True)
+        if pend is None:
+            # 죽은 challenge 였다(또는 애초에 없었다) → 새로 발급하고 다시 해석.
+            if c.authenticate():
+                return jsonify({'ok': True, 'authenticated': True, 'persona_required': False})
+            if not c.persona_required:
+                return _err('persona_unavailable', 'WQB 인증에 실패했습니다', 400)
+            pend = c.pending_persona(resolve=True) or {}
+        url = pend.get('persona_url') or ''
+        if not _is_public_persona_url(url):
+            # 일시 해석 실패 — challenge 는 살아 있다. 재발급하지 말고 재시도를 안내한다.
+            return jsonify({'ok': False, 'reason': 'resolving', 'persona_required': True,
+                            'detail': 'biometric 링크를 준비 중입니다 — 잠시 후 다시 눌러주세요.'})
+        return jsonify({'ok': True, 'persona_required': True,
+                        'persona_url': url, 'inquiry': pend.get('inquiry', '')})
+    except Exception as e:
+        LOG.exception('persona-link 발급 실패 uid=%s', uid)
+        return _err('persona_failed', f'링크 발급 실패: {e}', 400)
 
 
 @app.route('/api/account/wqb-persona-complete', methods=['POST'])
@@ -472,7 +625,7 @@ def api_wqb_persona_complete():
 def api_logout():
     token = request.cookies.get(SESSION_COOKIE) or ''
     if token:
-        «REDACTED»
+        _db.delete_session(token)
     resp = jsonify({'ok': True})
     resp.delete_cookie(SESSION_COOKIE, path='/')
     return resp
@@ -545,21 +698,53 @@ def api_status():
     return jsonify({'ok': True, **_status_payload(uid)})
 
 
-@app.route('/api/delay_mode', methods=['GET', 'POST'])
-def api_delay_mode():
-    """delay 테스트 모드 조회/변경. '0' | '1' | 'mix'. 워커가 매 라운드 새로 읽어
-    재시작 없이 다음 라운드부터 반영된다."""
+# delay 는 이제 탐색 조건(/api/constraint)의 `delay=0|1` 이 정한다. 옛 /api/delay_mode
+# 토글은 같은 값을 두 곳에서 정해(조건 vs 모드) 조건을 걸어도 다른 delay 로 도는 사고를
+# 냈으므로 2026-07-22 제거했다.
+
+
+@app.route('/api/constraint', methods=['GET', 'POST', 'DELETE'])
+def api_constraint():
+    """탐색 조건 조회/설정/해제.
+
+    Power Pool 주간 테마처럼 **기한이 있는** 조건이 대부분이라, 걸기만큼 **끄기가
+    중요하다**. 주가 바뀌면 즉시 풀 수 있어야 낡은 조건으로 라운드를 낭비하지 않는다.
+    워커가 매 라운드 새로 읽으므로 재시작 없이 다음 라운드부터 반영된다.
+
+    POST  {"text": "region=USA & delay=1 & …"}  또는 자연어
+    DELETE (또는 POST 에 빈 text) → 해제
+    """
     uid, err = _require_user()
     if err:
         return err
+
+    def _payload():
+        raw = _run_config.get_constraint_text()
+        spec = _run_config.get_constraint()
+        return {'ok': True, 'text': raw,
+                'active': spec is not None,
+                'summary': spec.describe() if spec else '',
+                'unparsed': list(spec.unparsed) if spec else []}
+
     if request.method == 'GET':
-        return jsonify({'ok': True, 'mode': _run_config.get_delay_mode()})
-    mode = str((request.get_json(silent=True) or {}).get('mode', '')).strip().lower()
-    try:
-        saved = _run_config.set_delay_mode(mode)
-    except ValueError:
-        return _err('bad_mode', "mode 는 '0' | '1' | 'mix' 중 하나여야 합니다.", 400)
-    return jsonify({'ok': True, 'mode': saved})
+        return jsonify(_payload())
+    if request.method == 'DELETE':
+        _run_config.set_constraint_text('')
+        return jsonify(_payload())
+
+    text = str((request.get_json(silent=True) or {}).get('text', '') or '').strip()
+    if not text:
+        _run_config.set_constraint_text('')
+        return jsonify(_payload())
+    from . import constraint_spec as _cspec
+    spec = _cspec.parse(text)
+    if spec.is_empty():
+        # 아무것도 해석 못 한 조건을 저장하면 '걸었다고 믿는데 실제로는 무제약' 이 된다.
+        return _err('bad_constraint',
+                    '조건을 하나도 해석하지 못했습니다. 예: '
+                    "region=USA & delay=1 & universe=TOP1000 & datasets not in ['pv1']", 400)
+    _run_config.set_constraint_text(text)
+    return jsonify(_payload())
 
 
 @app.route('/api/m_recent', methods=['GET'])
@@ -627,6 +812,11 @@ def api_logs():
     uid, err = _require_user()
     if err:
         return err
+    tail = _int_arg('tail', 0)
+    if tail > 0:
+        # 초기 로딩 — 마지막 n 줄만 (비우기 지점 존중). backlog 전체 재생 금지.
+        return jsonify({'ok': True,
+                        'logs': _db.list_logs_tail(uid, n=min(tail, 5000))})
     since = _int_arg('since', 0)
     limit = _int_arg('limit', 500)
     rows = _db.list_logs_since(uid, since_id=since, limit=limit)
@@ -725,6 +915,273 @@ def api_errors():
     return jsonify({'ok': True, 'errors': _db.list_error_patterns(uid, limit=100)})
 
 
+@app.route('/api/research', methods=['POST'])
+def api_research():
+    """전략 리서치 요청 — 웹 근거 수집 → LLM 가설 → 타입드 유전체 후보 생성.
+
+    산출물(strategy_specs)은 워커가 다음 라운드에 초기 개체로 소비한다.
+    요청을 넣지 않으면 워커는 지금처럼 무작위 GA 를 돈다(이 엔드포인트는 선택 사항).
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    query = str(data.get('query') or '').strip()
+    if not query:
+        return _err('bad_request', '요청 내용이 비어 있습니다', 400)
+    if len(query) > 500:
+        return _err('bad_request', '요청은 500자 이내로 적어주세요', 400)
+    from . import pipeline as _pipeline
+    try:
+        run_id = _pipeline.start(uid, query)
+    except RuntimeError as e:
+        return _err('busy', str(e), 409)
+    except ValueError as e:
+        return _err('bad_request', str(e), 400)
+    return jsonify({'ok': True, 'run_id': run_id})
+
+
+@app.route('/api/research/status', methods=['GET'])
+def api_research_status():
+    """최근(또는 지정) 리서치 런의 진행 상황 + 가설 + 전략 후보."""
+    uid, err = _require_user()
+    if err:
+        return err
+    from . import pipeline as _pipeline
+    run_id = request.args.get('run_id', type=int)
+    run = _db.get_research_run(run_id) if run_id else _db.latest_research_run(uid)
+    if not run or int(run.get('user_id') or 0) != uid:
+        return jsonify({'ok': True, 'run': None, 'running': _pipeline.is_running(uid),
+                        'specs': _db.spec_counts(uid)})
+    hypos = _db.list_hypotheses(int(run['id']))
+    specs = _db.list_specs_for_run(int(run['id']))
+    by_hypo: dict[int, list] = {}
+    for s in specs:
+        by_hypo.setdefault(int(s['hypothesis_id']), []).append({
+            'id': s['id'], 'code': s['code'], 'status': s['status'],
+            'why': s['why'], 'delay': s['delay'], 'genome': s['genome'],
+            'alpha_id': s['alpha_id'],
+        })
+    for h in hypos:
+        h['specs'] = by_hypo.get(int(h['id']), [])
+    run.pop('evidence', None)   # 근거 원문은 수만 자 — 목록 응답에 싣지 않는다
+    return jsonify({
+        'ok': True,
+        'run': run,
+        'hypotheses': hypos,
+        'running': _pipeline.is_running(uid),
+        'specs': _db.spec_counts(uid),
+    })
+
+
+@app.route('/api/learning', methods=['GET'])
+def api_learning():
+    """온라인 학습 현황 — '어떤 조정이 어떤 지표를 나아지게 했나' 대시보드 데이터.
+
+    directives: (부모 fail category × 적용 변이 축) 성공률 행렬 (귀속 엣지 집계).
+    axes/operators: 최근 축·연산자별 효과 리더보드 (db.axis_effectiveness 등).
+    bandit: arm 별 평균 보상·방문수 (settings 3종 + family/combine).
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    axes = {ax: _db.axis_effectiveness(uid, ax)
+            for ax in ('universe', 'neutralization', 'decay')}
+    operators = _db.operator_effectiveness(uid)
+    directives = [
+        {'category': c, 'directive': d,
+         'n': v['n'], 'wins': v['wins'], 'win_rate': v['win_rate']}
+        for (c, d), v in sorted(_db.directive_stats(uid).items())
+    ]
+    return jsonify({
+        'ok': True,
+        'axes': axes,
+        'operators': operators,
+        'directives': directives,
+        'bandit': _db.bandit_stats(uid),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 제출 대기 큐 (2026-07-27) — 테마 미충족 보관(수동 재제출) + 예산 초과 대기
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/submit_mode', methods=['GET', 'POST'])
+def api_submit_mode():
+    """제출 모드 조회/변경 — 'auto'(자동 제출) | 'list'(대기 목록에만 추가).
+
+    사용자별 설정이다(users.submit_mode). 제출은 되돌릴 수 없고 일일 예산을 쓰므로,
+    남의 계정이 자기 뜻과 다르게 실제 제출을 내는 일이 없어야 한다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    if request.method == 'GET':
+        return jsonify({'ok': True, 'submit_mode': _db.get_submit_mode(uid)})
+    mode = ((request.get_json(silent=True) or {}).get('submit_mode') or '').strip()
+    if mode not in _db.SUBMIT_MODES:
+        return _err('bad_mode', f'submit_mode 는 {" | ".join(_db.SUBMIT_MODES)} 중 하나여야 합니다', 400)
+    return jsonify({'ok': True, 'submit_mode': _db.set_submit_mode(uid, mode)})
+
+
+@app.route('/api/submit_queue', methods=['GET'])
+def api_submit_queue():
+    uid, err = _require_user()
+    if err:
+        return err
+    return jsonify({'ok': True, 'rows': _db.submit_queue_list(uid)})
+
+
+@app.route('/api/submit_queue/add', methods=['POST'])
+def api_submit_queue_add():
+    """리더보드 상세에서 알파 1건을 대기 목록에 넣는다 (kind='manual').
+
+    WQB alpha id 는 클라이언트가 준 값을 쓰지 않고 서버가 DB 에서 다시 읽는다 —
+    그대로 믿으면 남의 알파를 자기 큐에 넣을 수 있다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    a = _db.get_alpha_by_id(uid, int(body.get('alpha_pk') or 0))
+    if not a:
+        return _err('not_found', '알파를 찾을 수 없습니다', 404)
+    wid = str((a.get('metrics') or {}).get('wqb_alpha_id') or '')
+    if not wid:
+        return _err('no_wqb_id', 'WQB alpha id 가 없는 알파입니다 (시뮬 실패/캐시)', 400)
+    added = _db.submit_queue_add(uid, wqb_alpha_id=wid, kind='manual',
+                                 code=a.get('code') or '', alpha_pk=int(a['id']),
+                                 note='리더보드에서 수동 추가',
+                                 metrics=dict(a.get('metrics') or {}))
+    status = 'pending'
+    if not added:
+        # 이미 있는 행. skipped 로 내려가 있으면 '추가' 를 누른 뜻대로 되살린다.
+        # submitted 는 건드리지 않는다 — 끝난 것을 되돌리면 중복 제출이 된다.
+        row = next((r for r in _db.submit_queue_list(uid, limit=500, include_skipped=True)
+                    if r['wqb_alpha_id'] == wid and r['kind'] == 'manual'), None)
+        status = (row or {}).get('status') or 'pending'
+        if row and status == 'skipped':
+            _db.submit_queue_mark(int(row['id']), 'pending', '리더보드에서 다시 추가')
+            added, status = True, 'pending'
+    return jsonify({'ok': True, 'added': added, 'status': status, 'wqb_alpha_id': wid})
+
+
+@app.route('/api/submit_queue/delete', methods=['POST'])
+def api_submit_queue_delete():
+    """대기 큐에서 선택한 항목 삭제 (2026-07-28 사장 지시).
+
+    'submitting' 인 행은 지우지 않는다 — 제출이 진행 중인데 행을 없애면 결과를
+    기록할 자리가 사라진다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    ids = body.get('ids')
+    if ids is None and body.get('id') is not None:
+        ids = [body.get('id')]
+    if not isinstance(ids, list) or not ids:
+        return _err('bad_ids', '삭제할 id 목록이 필요합니다', 400)
+    busy = [int(r['id']) for r in _db.submit_queue_list(uid, limit=500,
+                                                        include_skipped=True)
+            if r['status'] == 'submitting']
+    targets = [i for i in ids if int(i) not in busy]
+    return jsonify({'ok': True, 'deleted': _db.submit_queue_delete(uid, targets),
+                    'skipped_busy': len(ids) - len(targets)})
+
+
+@app.route('/api/submit_queue/submit', methods=['POST'])
+def api_submit_queue_submit():
+    """대기 큐 1건 수동 제출 — 백그라운드 스레드로 시도하고 상태를 갱신한다.
+
+    사전 체크 없이 곧장 제출을 시도한다(거절은 예산 미소모 — 테마가 바뀌었는지는
+    WQB 의 판정이 진실이므로 미리 재지 않는다). UI 는 목록 폴링으로 결과를 본다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    row = _db.submit_queue_get(int(body.get('id') or 0))
+    if not row or row['user_id'] != uid:
+        return _err('not_found', '큐 항목이 없습니다', 404)
+    if row['status'] not in ('pending', 'rejected'):
+        return _err('bad_state', f"이미 {row['status']} 상태입니다")
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_creds', '자격증명이 없습니다', 400)
+    _db.submit_queue_mark(row['id'], 'submitting', '수동 제출 진행 중…')
+
+    def _do(qid: int, wid: str, code: str, alpha_pk, username: str, password: str):
+        from . import wqb_api as _wqb_api
+        try:
+            client = _wqb_api.WqbApiClient(username, password)
+            if not client.authenticate():
+                _db.submit_queue_mark(qid, 'pending', 'WQB 인증 실패 — 재시도 가능')
+                return
+            try:
+                from . import alpha_description as _adesc
+                if code:
+                    client.set_alpha_description(
+                        wid, _adesc.build(code, genome=None, settings={}))
+            except Exception:
+                pass
+            ok, st = client.submit_alpha(wid, deadline_s=600)
+            _db.submit_queue_mark(qid, 'submitted' if ok else 'rejected', st[:200])
+            if alpha_pk:
+                _db.set_alpha_submit_result(int(alpha_pk), ok, st)
+            _db.record_submit_attempt(uid, 0, 0, code or wid, ok, f'[manual-queue] {st}')
+        except Exception as e:
+            _db.submit_queue_mark(qid, 'pending', f'예외: {str(e)[:150]} — 재시도 가능')
+
+    threading.Thread(
+        target=_do,
+        args=(row['id'], row['wqb_alpha_id'], row.get('code') or '',
+              row.get('alpha_pk'), creds[0], creds[1]),
+        daemon=True, name=f'queue-submit-{row["id"]}').start()
+    return jsonify({'ok': True, 'id': row['id'], 'status': 'submitting'})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑤ 슈퍼알파 (AAF SuperAlpha 이식) — env 게이트, 자동 제출 없음
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/superalpha/run', methods=['POST'])
+def api_superalpha_run():
+    """OS 알파 풀 위의 슈퍼알파 리서치 1런을 백그라운드로 시작한다.
+
+    게이트: IQC_SUPERALPHA=1 + RC 계정. body(옵션): {seed_plus, n}.
+    결과는 /api/superalpha/runs 로 조회 — 제출은 하지 않는다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    if os.environ.get('IQC_SUPERALPHA', '0') != '1':
+        return _err('disabled', 'IQC_SUPERALPHA=1 로 켜야 합니다', 403)
+    if _db.get_account_type(uid) != 'research_consultant':
+        return _err('not_rc', '슈퍼알파는 RC 계정 전용입니다', 403)
+    creds = _db.get_user_credentials(uid)
+    if not creds:
+        return _err('no_creds', '자격증명이 없습니다', 400)
+    body = request.get_json(silent=True) or {}
+    try:
+        seed_plus = int(body.get('seed_plus', 10))
+        n = max(1, min(int(body.get('n', 6)), 15))
+    except (TypeError, ValueError):
+        return _err('bad_request', 'seed_plus/n 은 정수여야 합니다')
+    from . import superalpha as _superalpha
+    _superalpha.start_background(uid, creds[0], creds[1],
+                                 seed_plus=seed_plus, n=n)
+    return jsonify({'ok': True, 'seed_plus': seed_plus, 'n': n})
+
+
+@app.route('/api/superalpha/runs', methods=['GET'])
+def api_superalpha_runs():
+    uid, err = _require_user()
+    if err:
+        return err
+    return jsonify({'ok': True, 'runs': _db.superalpha_runs_list(uid)})
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 헬스 + 진단
 # ─────────────────────────────────────────────────────────────────────────────
@@ -742,6 +1199,13 @@ def main():
     if interrupted:
         LOG.info('interrupted stale open rounds on startup: %d', interrupted)
     _auto_resume_workers()
+    # 세션 keep-alive — API 백엔드 계정의 토큰을 만료 전에 갱신해 얼굴 인증을 없앤다.
+    try:
+        from . import session_keeper
+        session_keeper.start()
+    except Exception as e:
+        LOG.warning('session keeper 시작 실패(무시): %s', e)
+    _install_shutdown_handler()
     port = int(os.environ.get('HYFE_IQC_PORT', '8088'))
     # 코드 기본값도 안전하게 루프백 (run.sh/systemd 없이 직접 실행해도 공개망
     # 직접 노출 방지). LAN/공인 IP 공개는 HYFE_IQC_HOST=0.0.0.0 으로 명시.

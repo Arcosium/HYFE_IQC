@@ -56,7 +56,7 @@ We recommend you also go through the [classical 5-factor FAMA French-Model](http
 - Risk-neutralized alphas are alphas that show orthogonal and unique returns after accounting for market, industries and style factors.
 - Choose "Slow Factors" or "Fast Factors" / "Slow + Fast factors" in neutralization settings depending on the signal's turnover.
 - Start searching for innovative ideas through risk-neutralized alphas!
-- Read “[How to start risk neutralize research](https://support.worldquantbrain.com/hc/en-us/community/posts/16107745494807-Ri«REDACTED»)?” on the forum .
-- Read " [Risk Neutralized Alpha: How to choose risk factors’ set?](https://support.worldquantbrain.com/hc/en-us/community/posts/16133457218199-Ri«REDACTED»)**"** on the forum .
+- Read “[How to start risk neutralize research](https://support.worldquantbrain.com/hc/en-us/community/posts/16107745494807-Risk-Neutralized-Alpha-How-to-start-risk-neutralize-research-)?” on the forum .
+- Read " [Risk Neutralized Alpha: How to choose risk factors’ set?](https://support.worldquantbrain.com/hc/en-us/community/posts/16133457218199-Risk-Neutralized-Alpha-How-to-choose-risk-factors-set-)**"** on the forum .
 
 **WorldQuant defines alphas as mathematical models that seek to predict the future price movements of various financial instruments*

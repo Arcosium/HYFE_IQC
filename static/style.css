@@ -322,7 +322,7 @@ html, body {
 /* ═══════════════════════════ 스탯 타일 행 ══════════════════════════════ */
 .stat-row {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-top: 1px solid var(--rule);
   border-bottom: 1px solid var(--hairline);
   margin-bottom: 0;
@@ -358,11 +358,85 @@ html, body {
 .evo-legend .sw.mut  { background: var(--o-mut); }
 .evo-legend .sw.xo   { background: var(--o-xo); }
 .evo-legend .sw.etc  { background: var(--o-etc); }
-.evo-legend .sw.best { background: transparent; width: 14px; height: 0; border-top: 2px solid var(--red); }
+/* 계보 선은 뿌리마다 hue 가 다르다 — 범례는 대표 3색을 겹쳐 "여러 갈래"임을 보인다. */
+.evo-legend .sw.lineage {
+  background: transparent; width: 16px; height: 0;
+  border-top: 2px solid hsl(200 38% 42%);
+  box-shadow: 0 3px 0 -1px hsl(90 38% 42%), 0 -3px 0 -1px hsl(340 38% 42%);
+}
 .evo-legend .sw.sub  { background: transparent; border: 1.5px solid var(--ink); }
 
-/* 사용설명서 — 읽는 글이라 본문 폭을 재는 단(段)으로 가둔다(한 줄 45~75자). */
-.help-body { max-width: 68ch; font-family: var(--sans); font-size: 14px; line-height: 1.75; }
+/* ── 리더보드 쪽 번호 ── */
+.lb-pager { display: flex; gap: 4px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.lb-pager button {
+  font-family: var(--mono); font-size: 11px; min-width: 24px; padding: 3px 6px;
+  background: var(--paper); color: var(--ink-soft);
+  border: 1px solid var(--hairline); cursor: pointer;
+}
+.lb-pager button:hover { background: var(--paper-dim); color: var(--ink); }
+.lb-pager button.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.lb-pager .micro { margin-left: 8px; }
+.lb-row { cursor: pointer; }
+.lb-row:hover { background: var(--paper-dim); }
+.lb-row:focus-visible { outline: 2px solid var(--red); outline-offset: -2px; }
+
+/* ── 알파 상세 다이얼로그 ── */
+.alpha-dlg {
+  width: min(720px, calc(100vw - 32px)); max-height: 86vh; padding: 0;
+  background: var(--paper); color: var(--ink);
+  border: 1px solid var(--rule); box-shadow: 0 18px 48px rgba(28, 25, 20, 0.24);
+}
+.alpha-dlg::backdrop { background: rgba(28, 25, 20, 0.42); }
+.ad-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--rule);
+  position: sticky; top: 0; background: var(--paper); z-index: 1;
+}
+.ad-head h3 { margin: 0; font-family: var(--serif); font-size: 16px; font-weight: 600; }
+.ad-head .mini-btn { margin-left: auto; }
+.ad-body { padding: 16px 18px; overflow: auto; max-height: calc(86vh - 116px); }
+.ad-body h4 {
+  margin: 18px 0 8px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-faint);
+}
+.ad-meta {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+  margin: 0; font-size: 12px;
+}
+.ad-meta dt { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.ad-meta dd { margin: 0; font-family: var(--mono); color: var(--ink); word-break: break-all; }
+.ad-stats { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hairline-soft); }
+.ad-stats span { display: flex; flex-direction: column; gap: 2px; }
+.ad-stats em { font-style: normal; font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); }
+.ad-stats b { font-family: var(--serif); font-size: 19px; font-weight: 600; }
+.ad-code {
+  margin: 0; padding: 10px 12px; background: var(--paper-dim);
+  border: 1px solid var(--hairline-soft); font-family: var(--mono); font-size: 12px;
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word; overflow-x: auto;
+}
+.ad-code.err { color: var(--red-deep); }
+.ad-checks { display: flex; gap: 6px; flex-wrap: wrap; }
+.ad-chip {
+  font-family: var(--mono); font-size: 11px; padding: 3px 7px;
+  border: 1px solid var(--hairline);
+}
+.ad-chip.pass { color: var(--ok); border-color: rgba(63, 107, 69, 0.45); }
+.ad-chip.fail { color: var(--red-deep); border-color: rgba(140, 47, 26, 0.45); background: var(--red-soft); }
+.ad-foot {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 18px; border-top: 1px solid var(--rule); background: var(--paper-dim);
+}
+.ad-foot .mini-btn { margin-left: auto; }
+.ad-foot .micro { color: var(--ink-soft); }
+
+/* 사용설명서 — PC 화면 가로를 다 쓴다(2026-07-29 사장 지시). 한 줄이 너무 길어지지
+   않게 넓은 화면에서만 2단으로 흘린다 — 폭을 줄이는 게 아니라 단을 늘리는 방식. */
+.help-body { max-width: none; font-family: var(--sans); font-size: 14px; line-height: 1.75; }
+@media (min-width: 1000px) {
+  .help-body { column-count: 2; column-gap: 44px; column-rule: 1px solid var(--hairline); }
+  .help-body h3 { break-after: avoid; }
+  .help-body p, .help-body ul, .help-body ol { break-inside: avoid; }
+}
 .help-body h3 {
   font-family: var(--serif); font-size: 15px; font-weight: 600; color: var(--ink);
   margin: 26px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--hairline);
@@ -440,6 +514,16 @@ html, body {
 .scatter-tip .tt-genes { margin-top: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); word-break: break-all; border-top: 1px solid var(--hairline); padding-top: 5px; }
 .hp-empty { padding: 30px 16px; }
 .lb-table td.num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+/* 리더보드 필드 필터 — 헤더 밑에 붙는 한 줄 입력(">1", "<0.7") */
+.lb-filters th { padding: 0 12px 6px 0; border-bottom: 1px solid var(--rule); }
+.lb-filters input {
+  width: 100%; min-width: 52px; box-sizing: border-box;
+  font-family: var(--mono); font-size: 11px; text-align: right;
+  padding: 3px 5px; color: var(--ink);
+  background: var(--paper-dim); border: 1px solid var(--hairline);
+}
+.lb-filters input:focus { outline: none; border-color: var(--red); }
+.lb-filters input.bad { border-color: var(--red); color: var(--red); }
 .preflight-stat { color: var(--ink-faint); margin-left: 8px; }
 
 /* ═══════════════════ 파이프라인 + 세대 사다리 그리드 ═══════════════════ */
@@ -448,6 +532,18 @@ html, body {
 .grid-2 .card-block { margin-bottom: 0; }
 .grid-2 > *:first-child { padding-right: 28px; }
 .grid-2 > *:last-child { padding-left: 28px; border-left: 1px solid var(--hairline); }
+
+/* 진화 분석 — 왼쪽에 GA 파이프라인/산점도를 쌓고, 정향변이 학습이 오른쪽 두 줄을 다 쓴다. */
+.grid-evo {
+  display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  align-items: start; margin-bottom: 0;
+}
+.grid-evo > * { min-width: 0; padding-right: 28px; }
+.grid-evo .card-block { margin-bottom: 0; }
+.grid-evo > .evo-side {
+  grid-column: 2; grid-row: 1 / span 2;
+  padding-right: 0; padding-left: 28px; border-left: 1px solid var(--hairline);
+}
 
 /* — GA 파이프라인 흐름 — 카드 대신 번호 매긴 항목 목록 */
 .pipeline { padding: 0 0 6px; display: flex; flex-direction: column; }
@@ -478,12 +574,6 @@ html, body {
 .pl-edge { height: 14px; margin-left: 16px; border-left: 1px dashed var(--hairline); }
 .is-running .pl-edge { border-left-color: var(--red); animation: edgepulse 1.6s ease-in-out infinite; }
 @keyframes edgepulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-
-.pl-loop {
-  margin: 6px 0 0 16px;
-  font-size: 10.5px; font-family: var(--mono);
-  color: var(--ink-faint); letter-spacing: 0.06em;
-}
 
 /* — 세대 사다리 — */
 
@@ -675,6 +765,12 @@ table.pop-table td.num { text-align: right; font-family: var(--mono); }
   .grid-2 { grid-template-columns: 1fr; }
   .grid-2 > *:first-child { padding-right: 0; }
   .grid-2 > *:last-child { padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); margin-top: 20px; }
+  .grid-evo { grid-template-columns: 1fr; }
+  .grid-evo > * { padding-right: 0; }
+  .grid-evo > .evo-side {
+    grid-column: 1; grid-row: auto;
+    padding-left: 0; border-left: 0; border-top: 1px solid var(--rule); margin-top: 20px;
+  }
 }
 @media (max-width: 760px) {
   .screen { padding: 14px 14px 40px; }

@@ -1350,6 +1350,15 @@ def list_recent_alphas(user_id: int, limit: int = 60) -> list[dict[str, Any]]:
     return [_alpha_view(r) for r in rows]
 
 
+def get_alpha_by_id(user_id: int, alpha_pk: int) -> dict[str, Any] | None:
+    """알파 1건 — **본인 것만**. 리더보드 상세 보기 / 수동 큐 추가용."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute('SELECT * FROM alphas WHERE id=? AND user_id=?',
+                           (int(alpha_pk), user_id)).fetchone()
+    return _alpha_view(row) if row else None
+
+
 def list_submitted_alphas(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
     """WQB Submit 클릭이 발생한 모든 알파 — 성공 / 거절 둘 다 포함, 최신순.
 

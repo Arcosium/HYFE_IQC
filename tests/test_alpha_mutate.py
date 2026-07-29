@@ -248,3 +248,31 @@ class TestMutate(unittest.TestCase):
             for tok in adv_tokens:
                 self.assertIn(tok, {'adv20', 'adv60', 'adv120'},
                               f'Unexpected adv token {tok!r} in variant: {v!r}')
+
+
+# ── 신규성 압력이 '같은 알파'를 다시 시뮬하던 회귀 (2026-07-29 사장 지적) ──────────
+def test_novelty_rewrite_skips_signal_neutral_knobs(monkeypatch, tmp_path):
+    """해시가 달라도 신호가 같으면 새 실험이 아니다.
+
+    실측: #63 이 backfill 120→96→144 로만 바뀌며 세 번 시뮬됐고 결과는 전부
+    S=1.50·TO=0.2926 로 동일했다. 최근 3일 이런 중복이 203건 — 쿼터만 태우고
+    정보는 0이었다. 신호 무관 노브만 바뀐 변형은 신규화 후보에서 제외한다.
+    """
+    from server import worker as w
+
+    base = ('ts_decay_linear(rank(ts_av_diff('
+            'winsorize(ts_backfill(fld_a, 120), std=4),120)), 12)')
+
+    # 신호 형태 비교: backfill 만 다르면 같고, 실제 노브가 바뀌면 다르다
+    assert w._signal_form(base) == w._signal_form(base.replace('fld_a, 120', 'fld_a, 96'))
+    assert w._signal_form(base) != w._signal_form(base.replace('),120)', '),252)'))
+    assert w._signal_form(base) != w._signal_form(base.replace(', 12)', ', 20)'))
+
+    # _novelty_rewrite 는 backfill 만 바꾼 변형을 고르지 않는다
+    import server.alpha_mutate as _am
+    monkeypatch.setattr(_am, 'mutate',
+                        lambda code, **k: [base.replace('fld_a, 120', 'fld_a, 96'),
+                                           base.replace('),120)', '),252)')])
+    monkeypatch.setattr(w.result_cache, 'lookup', lambda *a, **k: None)
+    out = w._novelty_rewrite(1, base, 'fp', set())
+    assert out == base.replace('),120)', '),252)'), f'신호 무관 변형을 골랐다: {out}'

@@ -1174,7 +1174,8 @@ class WqbApiClient:
         except Exception:
             return False
 
-    def submit_simulation(self, expr: str, settings: dict) -> str | None:
+    def submit_simulation(self, expr: str, settings: dict,
+                          _retry_auth: bool = False) -> str | None:
         if not self._ensure_auth():
             return None
         body = {'type': 'REGULAR', 'settings': self._full_settings(settings), 'regular': expr}
@@ -1195,6 +1196,12 @@ class WqbApiClient:
                             {k: v for k, v in (r.headers or {}).items()
                              if 'limit' in k.lower() or 'retry' in k.lower()})
             return 'RATE_LIMITED'
+        if r.status_code in (401, 403) and not _retry_auth:
+            # 갱신 레이스 — 새 토큰은 디스크에 있고 이 스레드만 옛 쿠키다(poll 과 동일 함정).
+            # 디스크에서 다시 읽고 딱 한 번 재시도한다(인증 POST 없음 → throttle 위험 0).
+            if self._load_session():
+                LOG.info('submit %s — 갱신된 세션을 다시 읽고 1회 재시도', r.status_code)
+                return self.submit_simulation(expr, settings, _retry_auth=True)
         if r.status_code not in (200, 201):
             # 여태 아무 말 없이 None 을 뱉었다 — 워커엔 '제출 응답 없음' 으로만 보여
             # **왜** 죽었는지 알 길이 없었다(2026-07-28 실측: 한 라운드 18개 중 4개가
@@ -1373,7 +1380,7 @@ class WqbApiClient:
         }
 
     def poll(self, progress_url: str, stop_event=None, deadline_s: int = None,
-             interval_s: float = None, sleep=None) -> dict:
+             interval_s: float = None, sleep=None, abort_event=None) -> dict:
         """시뮬 완료까지 폴링. (status, alpha, message, progress) 반환.
 
         2026-07-21 개편 — 라이브 에러의 **75%가 여기서 났다**(최근 400건 중 299건이
@@ -1388,6 +1395,11 @@ class WqbApiClient:
         3. **정체(stall) 감지.** 진행률이 IQC_SIM_POLL_STALL_S(기본 900초) 동안 한 번도
            안 움직이면 마감 전이라도 포기하고 슬롯을 반환한다 — 진짜 멈춘 시뮬에
            30분을 낭비하지 않기 위해서다.
+
+        `abort_event` (2026-07-29) — 배치의 **꼬리 절단** 신호. 형제 시뮬이 전부 끝나
+        슬롯이 비었는데도 이 시뮬이 아직 대기열에서 **시작조차 못 했으면**(status 를
+        한 번도 못 받았으면) 죽은 접수로 보고 마감 전에 포기한다. 마감(3600초)은 그대로
+        두고 이 경우만 일찍 잡는다 — r11 #7 이 형제가 다 끝난 뒤 34분을 더 태웠다.
         """
         sleep = sleep or _time.sleep
         deadline_s = _POLL_DEADLINE_S if deadline_s is None else float(deadline_s)
@@ -1399,10 +1411,17 @@ class WqbApiClient:
         last_change = start
         prev_mark = None
         n_auth = 0              # 연속 401/403 횟수
+        saw_status = False      # 한 번이라도 status 를 받았는가(= 시뮬이 시작됐는가)
+        n_blind = 0             # status 를 못 읽은 턴 수 (대기열 + 429/5xx)
         while True:
             now = _time.monotonic()
             if now - start >= deadline_s:
                 reason = 'poll deadline'
+                break
+            # 꼬리 절단 — 형제가 다 끝났는데 아직 시작조차 못 한 접수는 버린다.
+            # 이미 돌기 시작한(status 를 받은) 시뮬은 절대 건드리지 않는다.
+            if not saw_status and abort_event is not None and abort_event.is_set():
+                reason = 'tail cut (형제 완료 후에도 대기열에서 미시작)'
                 break
             if stop_event is not None and stop_event.is_set():
                 self.cancel(progress_url)
@@ -1421,6 +1440,17 @@ class WqbApiClient:
                 # 세션 갱신 레이스로 한 번 튀는 건 봐주고, 두 번 연속이면 포기한다.
                 if r.status_code in (401, 403):
                     n_auth += 1
+                    # ⚠ 죽은 게 아니라 **갱신 레이스**일 수 있다. session_keeper 가 방금
+                    #   새 토큰을 디스크(.pkl)에 썼어도, 이미 돌고 있는 폴링 스레드는
+                    #   메모리에 옛 쿠키를 들고 있어 401 을 맞는다.
+                    #   2026-07-29 실측: 12:06 에 갱신이 **성공**해 있었는데도 라운드
+                    #   17건 중 11건이 401 로 통째로 버려졌다.
+                    #   _load_session 은 순수 디스크 읽기다 — 인증 POST 를 하지 않으므로
+                    #   biometric throttle 위험이 없다. 한 번만 다시 읽고 재시도한다.
+                    if n_auth == 1 and self._load_session():
+                        LOG.info('poll 401 — 갱신된 세션을 디스크에서 다시 읽고 재시도')
+                        sleep(base_interval)
+                        continue
                     if n_auth >= 2:
                         reason = f'auth dead (http_{r.status_code})'
                         break
@@ -1451,7 +1481,10 @@ class WqbApiClient:
             #   자체가 429 를 맞는데, 그때 j={} 라 status=None 이 되어 (None, None) 이
             #   계속 같은 mark 로 찍힌다 → 멀쩡히 돌던 시뮬을 900초에 죽였다.
             #   (2026-07-21 실측: 최근 25건 중 4건이 전부 `status=None` 정체로 오판됐다.)
+            if last['status'] is not None:
+                saw_status = True
             if not readable or last['status'] is None:
+                n_blind += 1
                 # ⚠ status 가 아예 없는 200 응답은 **대기열**이다(정체가 아니다).
                 #   WQB 는 큐에 있는 동안 Retry-After 와 함께 빈 본문을 준다.
                 #   2026-07-22 실측: 이걸 정체로 세어 946초 만에 멀쩡한 시뮬을 죽였다
@@ -1467,7 +1500,10 @@ class WqbApiClient:
             sleep(wait)
         # 포기 — 슬롯 반환. 얼마나 기다렸는지 남겨야 마감값을 실측으로 조정할 수 있다.
         elapsed = _time.monotonic() - start
-        LOG.warning('sim 폴링 포기 %.0fs — %s (progress=%s)', elapsed, reason, last.get('progress'))
+        # started=False 면 WQB 대기열에서 시작조차 못 한 접수다 — 마감값이 아니라
+        # 꼬리 절단/동시 슬롯 쪽을 봐야 한다는 신호라 give-up 로그에 같이 남긴다.
+        LOG.warning('sim 폴링 포기 %.0fs — %s (progress=%s, started=%s, blind_turns=%d)',
+                    elapsed, reason, last.get('progress'), saw_status, n_blind)
         self.cancel(progress_url)
         return {'status': 'TIMEOUT', 'alpha': None,
                 'message': f'{reason} after {elapsed:.0f}s', 'progress': last.get('progress')}

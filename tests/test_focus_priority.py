@@ -334,3 +334,21 @@ class TestFocusClosenessFloor(unittest.TestCase):
         # Sharpe 만 멀어도(0.4 vs 2.0) gap≈0.8 이라 경계선 — 0.3 처럼 더 멀면 확실히 차단.
         far = closeness_score(['Sharpe of 0.3 is below cutoff of 2.'])
         self.assertLess(far, self.FLOOR)
+
+
+def test_submit_rejection_reasons_map_to_improvement_axes():
+    """제출 거절도 '무엇을 고칠지' 를 말해 준다 — 그 사유가 변이 축으로 이어져야 한다.
+
+    2026-07-29: 고회전 알파가 LOW_GLB_EMEA_SHARPE 등으로 거절되면 IS 체크는 FAIL 0 이라
+    focus 후보에서 탈락했다(라운드마다 제일 좋은 후보를 버림). 이제 거절 사유를 실어
+    보내며, 아래는 그 사유가 실제로 축을 고르게 하는지 고정한다.
+    """
+    from server.mutation_learn import categorize
+
+    rej = 'LOW_SHARPE(1.5 vs 1.58); LOW_FITNESS(0.46 vs 1.0); LOW_GLB_EMEA_SHARPE(0.69 vs 1)'
+    cats = categorize([x.strip() for x in rej.split(';')])
+    assert 'signal' in cats and 'fitness' in cats, cats
+
+    rej2 = 'LOW_SUB_UNIVERSE_SHARPE(0.4 vs 1); PROD_CORRELATION(0.8)'
+    cats2 = categorize([x.strip() for x in rej2.split(';')])
+    assert cats2 == ['sub_universe', 'correlation'], cats2

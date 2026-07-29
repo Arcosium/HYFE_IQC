@@ -7,7 +7,7 @@ import os
 import random as _rnd
 import threading
 import time as _time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as _fwait
 from . import criteria as _criteria
 from . import wqb_api
 
@@ -38,6 +38,24 @@ _RL_BACKOFF_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_S', '8'))
 # 하나가 빌 때마다 평균 20초 넘게 놀았다. 대기자가 여럿이라 한꺼번에 몰리지 않도록
 # 지터를 섞는다(thundering herd 방지). 2026-07-27.
 _RL_BACKOFF_CAP_S = float(os.environ.get('HYFE_IQC_RC_RL_BACKOFF_CAP_S', '15'))
+
+# ── 꼬리 절단 (2026-07-29) ──────────────────────────────────────────────────
+# r11 #7 실측: 형제 17건이 09:38 에 다 끝났는데 #7 은 **한 번도 시작 못 한 채**
+# 폴링 마감(3600s)을 꼬박 태우고 10:12 에 TIMEOUT 했다 — 라운드가 34분 더 서 있었다.
+# 마감을 줄이면 정상적으로 늦게 끝나는 시뮬까지 죽인다(그래서 7/28 에 60분으로 올렸다).
+# 대신 **형제가 다 끝난 뒤**에도 대기열에서 시작조차 못 한 건만 유예 후 버린다:
+# 슬롯이 다 비었는데 큐에서 안 나오면 그 접수는 죽은 것이다.
+# ⚠ 이미 돌기 시작한(status 를 받은) 시뮬은 절대 자르지 않는다 — poll() 이 그 판단을 한다.
+_TAIL_GRACE_S = float(os.environ.get('HYFE_IQC_TAIL_GRACE_S', '600'))
+# 남은 건수가 이 이하일 때부터 '꼬리'로 본다(=슬롯이 넉넉히 비었다).
+_TAIL_MAX_PENDING = int(os.environ.get('HYFE_IQC_TAIL_MAX_PENDING', '2'))
+
+
+# WQB 는 계정당 제출을 한 번에 하나만 처리한다. 제출은 **두 갈래**로 나간다 —
+# 라운드 안의 시뮬 완료 직후(sim 스레드) + 대기 큐 드레인(워커/티커 스레드).
+# 그래서 락이 ApiBackend 인스턴스에 있으면 무력하다(라운드마다 새 인스턴스 = 새 락).
+# 프로세스 전역 락 하나로 모든 제출을 직렬화한다 (2026-07-29).
+SUBMIT_LOCK = threading.Lock()
 
 
 # ── 진행 중 시뮬 추적 (종료 시 취소용) ──────────────────────────────────────
@@ -183,10 +201,9 @@ class ApiBackend:
         self._client = client or wqb_api.WqbApiClient(username, password)
         self.concurrency = (_default_concurrency() if concurrency is None
                             else max(1, min(10, int(concurrency))))
-        # WQB 는 계정당 제출을 한 번에 하나만 처리한다 — 동시 시뮬 스레드들이 완료
-        # 직후 각자 submit 을 때리면 첫 번째만 성공하고 나머지는 429 로 죽는다.
-        # 제출은 이 락으로 직렬화한다 ("무조건 제출 시도" 정책의 실효성 보장).
-        self._submit_lock = threading.Lock()
+        # 제출 직렬화 — 프로세스 전역 락을 쓴다(위 SUBMIT_LOCK 주석 참조).
+        # 인스턴스마다 새 락을 만들면 대기 큐 드레인과 라운드 제출이 서로를 못 본다.
+        self._submit_lock = SUBMIT_LOCK
 
     def simulate_batch(self, batch, *, wqb_username=None, wqb_password=None,
                        log_fn=None, proc_holder=None, partial_fn=None,
@@ -214,18 +231,33 @@ class ApiBackend:
 
         n = max(1, min(self.concurrency, len(batch)))
         out_by_idx: dict[int, dict] = {}
+        tail_event = threading.Event()
         with ThreadPoolExecutor(max_workers=n, thread_name_prefix='wqb-sim') as ex:
             futs = {ex.submit(self._run_one, s, forced_delay, _safe_partial, stop_event,
-                              submit_gate): s
+                              submit_gate, tail_event): s
                     for s in batch}
-            for fut in as_completed(futs):
-                s = futs[fut]
-                try:
-                    r = fut.result()
-                except Exception as e:  # 한 알파의 예외가 라운드 전체를 죽이지 않게
-                    LOG.warning('run_one err idx=%s: %s', s.get('idx'), e)
-                    r = self._err(s, f'sim 예외: {e}')
-                out_by_idx[int(s.get('idx') or 0)] = r
+            pending = set(futs)
+            while pending:
+                # 꼬리(남은 몇 건)만 남으면 유예 시간을 걸고 기다린다 — 그 안에 아무것도
+                # 안 끝나면 '시작조차 못 한' 잔여 건을 poll 이 포기하게 한다.
+                # out_by_idx 가 비었으면 자르지 않는다: 형제가 하나도 안 끝난 판은
+                # '슬롯이 비었다'는 근거가 없어 그냥 느린 것일 수 있다(배치 1~2건 포함).
+                tail = (len(pending) <= _TAIL_MAX_PENDING and out_by_idx
+                        and not tail_event.is_set())
+                done, pending = _fwait(pending, timeout=_TAIL_GRACE_S if tail else None,
+                                       return_when=FIRST_COMPLETED)
+                if not done and tail:
+                    LOG.warning('꼬리 절단 — 잔여 %d건이 %.0fs 동안 무진전, '
+                                '대기열 미시작 건 포기(슬롯 반환)', len(pending), _TAIL_GRACE_S)
+                    tail_event.set()
+                for fut in done:
+                    s = futs[fut]
+                    try:
+                        r = fut.result()
+                    except Exception as e:  # 한 알파의 예외가 라운드 전체를 죽이지 않게
+                        LOG.warning('run_one err idx=%s: %s', s.get('idx'), e)
+                        r = self._err(s, f'sim 예외: {e}')
+                    out_by_idx[int(s.get('idx') or 0)] = r
         # 완료 순서가 뒤섞여도 batch(idx) 순서로 정렬해 반환
         return [out_by_idx[int(s.get('idx') or 0)] for s in batch]
 
@@ -292,7 +324,8 @@ class ApiBackend:
             return True, ''
         return bool(ok), str(reason or '')
 
-    def _run_one(self, s, forced_delay, partial_fn, stop_event, submit_gate=None) -> dict:
+    def _run_one(self, s, forced_delay, partial_fn, stop_event, submit_gate=None,
+                 tail_event=None) -> dict:
         if stop_event is not None and stop_event.is_set():
             return self._err(s, 'pause로 취소', mode='cancelled')
         idx = int(s.get('idx') or 0)
@@ -312,7 +345,7 @@ class ApiBackend:
 
         _track_inflight(url, self._client)
         try:
-            pr = self._client.poll(url, stop_event=stop_event)
+            pr = self._client.poll(url, stop_event=stop_event, abort_event=tail_event)
         finally:
             _untrack_inflight(url)
         status = pr.get('status')
