@@ -1359,6 +1359,23 @@ def get_alpha_by_id(user_id: int, alpha_pk: int) -> dict[str, Any] | None:
     return _alpha_view(row) if row else None
 
 
+def get_alpha_by_code(user_id: int, code: str) -> dict[str, Any] | None:
+    """알파 1건 — 코드로, **본인 것만**, 가장 최근 시뮬.
+
+    submit_attempts(제출 내역) 에는 alpha pk 가 없고 code 만 있다. 상세 화면을 열려면
+    그 코드로 alphas 를 되짚어야 한다. idx_alphas_user_hash 를 타도록 code_hash 로 본다.
+    """
+    if not code:
+        return None
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            'SELECT * FROM alphas WHERE user_id=? AND code_hash=? ORDER BY id DESC LIMIT 1',
+            (user_id, code_hash(code)),
+        ).fetchone()
+    return _alpha_view(row) if row else None
+
+
 def list_submitted_alphas(user_id: int, limit: int = 50) -> list[dict[str, Any]]:
     """WQB Submit 클릭이 발생한 모든 알파 — 성공 / 거절 둘 다 포함, 최신순.
 
@@ -3033,13 +3050,30 @@ def stuck_submits(user_id: int, *, since_s: float = 172800.0,
 
 
 def set_alpha_submit_result(alpha_pk: int, submitted: bool,
-                            submit_status: str) -> None:
-    """재시도한 제출의 최종 상태를 해당 알파 행에 기록한다."""
+                            submit_status: str, *,
+                            user_id: int | None = None, code: str = '') -> None:
+    """재시도한 제출의 최종 상태를 해당 알파 행에 기록한다.
+
+    `alpha_pk` 가 없으면 (user_id, code) 로 찾는다 — 게이트가 대기 큐에 넣는 시점엔
+    alphas 행이 아직 없어 큐 행에 pk 가 안 남는다. pk 만 보던 동안 큐에서 거절된
+    알파의 상세는 `submit_skipped:…→queued` 에 멈춰 있고 **거절 사유가 어디에도
+    안 남았다** (2026-07-30 사장 지적).
+    """
+    pk = int(alpha_pk or 0)
     init()
     with _DB_LOCK, _connect() as conn:
+        if pk <= 0:
+            if not (user_id and code):
+                return
+            row = conn.execute(
+                'SELECT id FROM alphas WHERE user_id=? AND code_hash=? ORDER BY id DESC LIMIT 1',
+                (int(user_id), code_hash(code))).fetchone()
+            if row is None:
+                return
+            pk = int(row['id'])
         conn.execute(
             'UPDATE alphas SET submitted=?, submit_status=? WHERE id=?',
-            (1 if submitted else 0, str(submit_status or '')[:300], int(alpha_pk)))
+            (1 if submitted else 0, str(submit_status or '')[:300], pk))
 
 
 def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,

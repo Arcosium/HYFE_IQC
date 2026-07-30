@@ -272,6 +272,23 @@ def _harvest_classification(nm_u: str, ch: dict, res: str, out: dict) -> None:
         pass
 
 
+def _check_desc(name: str, value, limit, result: str) -> str:
+    """IS 체크 1건 → '<이름> of <값> is (below|above) cutoff of <컷> (RESULT)'.
+
+    ⚠ **어법이 계약이다.** directed_mutation._RX 는 이 문장형만 읽는다
+    (`'... of <값> is (below|above) cutoff of <컷>'`, 브라우저 스크레이퍼 시절 문구).
+    REST 경로가 'LOW_SHARPE: FAIL (value=…, limit=…)' 로 적는 동안 정향변이는
+    sharpe/fitness/turnover 실패를 **하나도 인식하지 못하고** generic 으로 떨어졌다
+    (2026-07-30). 숫자가 아니면 옛 표기로 폴백한다.
+    """
+    try:
+        v, lim = float(value), float(limit)
+    except (TypeError, ValueError):
+        return f'{name}: {result} (value={value}, limit={limit})'
+    where = 'below' if v < lim else 'above'
+    return f'{name} of {v} is {where} cutoff of {lim} ({result})'
+
+
 def _is_core_check(name: str) -> bool:
     """Return True for IS checks that gate submission (FAIL = 제출 차단).
 
@@ -960,7 +977,7 @@ class WqbApiClient:
                     'value': '' if v is None else str(v),
                     'cutoff': '' if lim is None else str(lim),
                     'result': res,
-                    'desc': f"{nm}: {ch.get('result')} (value={ch.get('value')}, limit={ch.get('limit')})"}
+                    'desc': _check_desc(str(nm), ch.get('value'), ch.get('limit'), res)}
             # WARNING 은 **비차단**이다 — 2026-07 개편에서 HT 분류를 얻은 알파의 표준
             # 컷(LOW_SHARPE 등)이 여기로 강등된다. 예전엔 버킷이 없어 통째로 버려졌고,
             # 그래서 '제출 가능한데 pass 도 fail 도 아닌' 알파가 보상 0 을 받았다.

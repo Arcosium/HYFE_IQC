@@ -1307,11 +1307,12 @@
   }
 
 
-  // ── 4탭 내비 (2026-07-27) — 운영 / 진화 분석 / 제출 대기 / 사용설명서 ──────
+  // ── 4탭 내비 (2026-07-30) — 운영 / 전략 리서치 / 진화 분석 / 사용설명서 ──────
+  //   제출 대기는 운영 탭 카드로 내려갔다(2026-07-30 사장 지시).
   function initMainTabs() {
     const nav = $('#main-tabs');
     if (!nav) return;
-    const pages = { ops: $('#page-ops'), evo: $('#page-evo'), queue: $('#page-queue'),
+    const pages = { ops: $('#page-ops'), rs: $('#page-rs'), evo: $('#page-evo'),
                     help: $('#page-help') };
     function show(key) {
       for (const [k, el] of Object.entries(pages)) if (el) el.hidden = k !== key;
@@ -1322,8 +1323,8 @@
       if (key === 'evo') {
         try { refreshEvolution(); refreshLearning(); refreshBest(); } catch (e) {}
       }
-      if (key === 'queue') { try { refreshSubmitQueue(); } catch (e) {} }
       if (key === 'ops') {
+        try { refreshSubmitQueue(); refreshSubmitHistory(); } catch (e) {}
         try {
           if (logPane && autoscrollEl && autoscrollEl.checked)
             logPane.scrollTop = logPane.scrollHeight;
@@ -1338,18 +1339,32 @@
   }
 
   // ── 제출 내역 (운영 탭) — 최근 제출 시도, 성공 강조 ───────────────────────
+  //   10건 단위 쪽번호(리더보드와 같은 방식) + 행 클릭 시 알파 상세 (2026-07-30 사장 지시).
+  const SH_PAGE = 10, SH_MAX_PAGES = 10;
+  let _shRows = [], _shPage = 0;
+
   async function refreshSubmitHistory() {
-    const r = await api('/api/m_submits?limit=50');
+    const r = await api('/api/m_submits?limit=' + SH_PAGE * SH_MAX_PAGES);
     if (!(r.ok && r.data && r.data.ok)) return;
     // 성공한 제출만 — 서버가 이미 걸러 보내지만, 옛 캐시 응답에도 안전하게 (2026-07-27).
-    const rows = (r.data.attempts || []).filter((a) => a.submitted);
+    _shRows = (r.data.attempts || []).filter((a) => a.submitted);
+    renderSubmitHistory();
+  }
+
+  function renderSubmitHistory() {
     const table = $('#sh-table');
     const empty = $('#sh-empty');
     if (!table) return;
     const tbody = table.querySelector('tbody');
     tbody.replaceChildren();
+    const pages = Math.min(SH_MAX_PAGES, Math.max(1, Math.ceil(_shRows.length / SH_PAGE)));
+    if (_shPage >= pages) _shPage = 0;
+    const from = _shPage * SH_PAGE;
+    const rows = _shRows.slice(from, from + SH_PAGE);
     if (empty) empty.style.display = rows.length ? 'none' : '';
     table.style.display = rows.length ? '' : 'none';
+    renderPager($('#sh-pager'), pages, _shRows.length, _shPage, SH_PAGE,
+                (p) => { _shPage = p; renderSubmitHistory(); });
     for (const a of rows) {
       const tr = document.createElement('tr');
       const td = (txt, cls) => { const c = document.createElement('td'); if (cls) c.className = cls; c.textContent = txt; return c; };
@@ -1358,12 +1373,41 @@
       tr.appendChild(td(`r${a.round_num}${a.idx ? '-#' + a.idx : ''}`, 'dim'));
       const st = String(a.submit_status || '');
       const ok = !!a.submitted;
-      const res = td(ok ? '✅ 제출' : '⛔ 거절');
+      const res = td(ok ? '✅\u00a0제출' : '⛔\u00a0거절');
       if (ok) res.style.fontWeight = '700';
       tr.appendChild(res);
-      tr.appendChild(td(st.slice(0, 70), 'dim'));
+      // 사유는 자르지 않는다 — 70자에서 말없이 끊겨 거절 조건이 사라져 보였다(2026-07-30).
+      const why = td(st, 'dim why');
+      why.title = st;
+      tr.appendChild(why);
+      makeAlphaRow(tr, 0, a.code);
       tbody.appendChild(tr);
     }
+  }
+
+  // 목록 행 → 알파 상세. 제출 내역·대기 큐엔 알파 원본이 없어 /api/alpha 로 되짚는다
+  // (pk 우선, 없으면 code_hash 매칭).
+  function makeAlphaRow(tr, pk, code) {
+    if (!pk && !code) return;
+    tr.className = (tr.className ? tr.className + ' ' : '') + 'lb-row';
+    tr.tabIndex = 0;
+    tr.title = '클릭 — 알파 상세';
+    const open = (ev) => {
+      // 체크박스·[제출] 버튼 클릭은 상세 열기가 아니다.
+      if (ev.target.closest('input, button, a')) return;
+      openAlphaRef(pk, code);
+    };
+    tr.addEventListener('click', open);
+    tr.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAlphaRef(pk, code); }
+    });
+  }
+
+  async function openAlphaRef(pk, code) {
+    const q = pk ? 'pk=' + encodeURIComponent(pk) : 'code=' + encodeURIComponent(code || '');
+    const r = await api('/api/alpha?' + q);
+    if (r.ok && r.data && r.data.ok && r.data.alpha) { openAlphaDetail(r.data.alpha); return; }
+    alert('이 알파의 상세 기록을 찾지 못했습니다 — 코드가 지워졌거나 다른 계정 기록입니다.');
   }
 
   // ── 사용설명서 (2026-07-27) — 컨설턴트 / 일반 계정 두 벌 ────────────────────
@@ -1483,6 +1527,7 @@
         act.appendChild(btn);
       }
       tr.appendChild(act);
+      makeAlphaRow(tr, Number(row.alpha_pk || 0), row.code);
       tbody.appendChild(tr);
     }
     const all = $('#sq-all');
@@ -1578,7 +1623,8 @@
     const top = rows.slice(from, from + LB_PAGE);
     if (empty) empty.style.display = top.length ? 'none' : '';
     table.style.display = top.length ? '' : 'none';
-    renderLbPager(pages, rows.length);
+    renderPager($('#lb-pager'), pages, rows.length, _lbPage, LB_PAGE,
+                (p) => { _lbPage = p; renderLeaderboard(_evoAlphas, _lbSort); });
     const td = (cls, txt) => { const c = document.createElement('td'); if (cls) c.className = cls; if (txt != null) c.textContent = txt; return c; };
     top.forEach((a, i) => {
       const o = parseOrigin(a.desc), genes = parseGenes(a.desc);
@@ -1609,9 +1655,8 @@
     });
   }
 
-  // 쪽 번호 1~10 — 필터 통과 행이 15개 이하면 아예 감춘다.
-  function renderLbPager(pages, total) {
-    const el = $('#lb-pager');
+  // 쪽 번호 1~N — 한 쪽에 다 들어가면 아예 감춘다. 리더보드·제출 내역 공용.
+  function renderPager(el, pages, total, cur, perPage, onPick) {
     if (!el) return;
     el.replaceChildren();
     el.hidden = pages <= 1;
@@ -1620,13 +1665,13 @@
       const b = document.createElement('button');
       b.type = 'button';
       b.textContent = String(p + 1);
-      b.className = p === _lbPage ? 'active' : '';
-      b.addEventListener('click', () => { _lbPage = p; renderLeaderboard(_evoAlphas, _lbSort); });
+      b.className = p === cur ? 'active' : '';
+      b.addEventListener('click', () => onPick(p));
       el.appendChild(b);
     }
     const n = document.createElement('span');
     n.className = 'micro';
-    n.textContent = `${Math.min(total, pages * LB_PAGE)} / ${total}건`;
+    n.textContent = `${Math.min(total, pages * perPage)} / ${total}건`;
     el.appendChild(n);
   }
 

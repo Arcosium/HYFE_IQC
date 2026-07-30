@@ -36,5 +36,31 @@ class TestGetAlphaById(unittest.TestCase):
         self.assertIsNone(db.get_alpha_by_id(uid + 100000, pk))
 
 
+class TestGetAlphaByCode(unittest.TestCase):
+    """제출 내역 행 → 알파 상세. submit_attempts 엔 pk 가 없어 code 로 되짚는다."""
+
+    def test_blank_and_missing_return_none(self):
+        self.assertIsNone(db.get_alpha_by_code(1, ''))
+        self.assertIsNone(db.get_alpha_by_code(999999, 'ts_rank(close, 5)'))
+
+    def test_owner_only_lookup_by_code(self):
+        db.init()
+        with db._DB_LOCK, db._connect() as conn:
+            row = conn.execute(
+                'SELECT id, user_id, code FROM alphas ORDER BY id DESC LIMIT 1').fetchone()
+        if row is None:
+            self.skipTest('alphas 비어 있음')
+        pk, uid, code = int(row['id']), int(row['user_id']), row['code']
+
+        a = db.get_alpha_by_code(uid, code)
+        self.assertIsNotNone(a)
+        self.assertEqual(a['code'], code)
+        self.assertIsInstance(a['metrics'], dict)
+        # 같은 코드의 최신 행 — pk 조회와 같은 알파를 가리켜야 한다.
+        self.assertEqual(int(a['id']), pk)
+        # 남의 계정으로는 보이지 않는다.
+        self.assertIsNone(db.get_alpha_by_code(uid + 100000, code))
+
+
 if __name__ == '__main__':
     unittest.main()

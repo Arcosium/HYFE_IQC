@@ -757,6 +757,8 @@ table.pop-table tbody tr:hover td { background: var(--paper-dim); }
 
 /* ── 학습 현황 (정향변이 학습 + 밴딧 arm) ─────────────────────────────── */
 table.pop-table td.num { text-align: right; font-family: var(--mono); }
+/* 제출 내역 '사유' — 전문 표시(자르지 않음). 긴 토큰도 칸 안에서 접는다. */
+table.pop-table td.why { overflow-wrap: anywhere; vertical-align: top; line-height: 1.5; }
 
 /* ════════════════════════════ 반응형 ═══════════════════════════════════ */
 @media (max-width: 1150px) {

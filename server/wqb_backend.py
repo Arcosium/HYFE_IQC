@@ -13,7 +13,7 @@ from . import wqb_api
 
 LOG = logging.getLogger('genomicwqb.wqb_backend')
 
-PASS_FIELDS = ('pass', 'fail', 'error', 'pending')
+PASS_FIELDS = ('pass', 'fail', 'error', 'pending', 'warning')
 
 # worker.py 와 동일 env var — 순환 import 없이 단일 진실 소스 유지.
 # 기본값 7 → 1 (2026-07-21): worker.PASS_THRESHOLD 주석의 근거 참조.

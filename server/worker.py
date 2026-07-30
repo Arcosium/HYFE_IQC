@@ -308,7 +308,9 @@ class Worker(threading.Thread):
                  for f in (fail_items or [])]
         blocking = [n for n in names if n and _criteria.is_blocking(n)]
         if blocking:
-            return False, f'blocking_fail({",".join(blocking[:3])})'
+            # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
+            # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
+            return False, f'blocking_fail({",".join(blocking)})'
         # 같은 식이 **최근** 거절당했으면 또 보내지 않는다. 후보 생성이 결정론이라
         # 재시작·재방문 때 같은 식이 다시 만들어져, 이 검사가 없으면 계속 재제출한다
         # (2026-07-28: 1YzG86aM 이 14분 간격으로 같은 FAIL 5개로 재거절).
@@ -331,6 +333,7 @@ class Worker(threading.Thread):
                     try:
                         _db.submit_queue_add(
                             self.user_id, wqb_alpha_id=wid, kind='manual',
+                            code=str(code or ''),
                             note='제출 모드=목록 — 대시보드에서 직접 제출',
                             metrics=dict(metrics or {}))
                     except Exception as e:
@@ -382,6 +385,7 @@ class Worker(threading.Thread):
                 try:
                     _db.submit_queue_add(
                         self.user_id, wqb_alpha_id=wid, kind='budget',
+                        code=str(code or ''),
                         note='예산 리셋 대기 — 보류창 해제 후 자동 제출',
                         metrics=dict(metrics or {}))
                 except Exception as e:
@@ -415,6 +419,7 @@ class Worker(threading.Thread):
                 try:
                     queued = bool(_db.submit_queue_add(
                         self.user_id, wqb_alpha_id=wid, kind='budget',
+                        code=str(code or ''),
                         note=f'일일 예산 초과({used}/{DAILY_SUBMIT_BUDGET}) — 익일 자동 재시도',
                         metrics=dict(metrics or {})))
                     if queued:
@@ -459,7 +464,7 @@ class Worker(threading.Thread):
                 return
             self._log(round_num,
                       f"  🔁 끊긴 제출 재시도 — 알파 #{c['id']} "
-                      f"({str(c.get('submit_status') or '')[:40]})")
+                      f"({_ellip(c.get('submit_status'), 200)})")
             try:
                 from . import wqb_api as _wqb_api
                 client = _wqb_api.WqbApiClient(username, password)
@@ -487,7 +492,7 @@ class Worker(threading.Thread):
                 pass
             self._log(round_num,
                       ('  🚀 재시도 제출 성공!' if ok
-                       else f'  📝 재시도 결과: {str(st)[:80]}'),
+                       else f'  📝 재시도 결과: {_ellip(st, 200)}'),
                       level=('pass' if ok else 'info'))
             return                     # 라운드당 1건만
 
@@ -700,11 +705,12 @@ class Worker(threading.Thread):
             self._log(round_num, f'  ↩ 대기 큐 — {wid} 는 한 번 더 내본다(주간 기준 변동 대비)')
         else:
             _db.submit_queue_mark(row['id'], 'rejected', st[:200])
-        if row.get('alpha_pk'):
-            try:
-                _db.set_alpha_submit_result(int(row['alpha_pk']), ok, st)
-            except Exception:
-                pass
+        try:
+            _db.set_alpha_submit_result(int(row.get('alpha_pk') or 0), ok, st,
+                                        user_id=self.user_id,
+                                        code=str(row.get('code') or ''))
+        except Exception:
+            pass
         try:
             _db.record_submit_attempt(self.user_id, round_num, 0,
                                       str(row.get('code') or wid), ok, f'[queue] {st}')
@@ -712,7 +718,7 @@ class Worker(threading.Thread):
             pass
         self._log(round_num,
                   (f'  🚀 대기 큐 제출 완료 — {wid} (목록에서 제거)' if ok
-                   else f'  ⛔ 대기 큐 제출 거절 — {wid}: {st[:70]} (목록에 남김)'),
+                   else f'  ⛔ 대기 큐 제출 거절 — {wid}: {_ellip(st, 200)} (목록에 남김)'),
                   level=('pass' if ok else 'info'))
         # 거절은 예산을 쓰지 않는다 — 다음 대기 건을 이어서 시도한다.
         return int(row['id'])
@@ -984,7 +990,8 @@ class Worker(threading.Thread):
             )
             kind_tag = '🚫 corr 회피' if focus_kind == 'correlation' else '🔧 fail 개선'
             self._log(round_num,
-                      f'═══ ROUND {_round_label(round_num, parent_idx, phase)} 시작 ({kind_tag}, on #{parent_idx}, fix: {fail_desc[:60]}) ═══',
+                      f'═══ ROUND {_round_label(round_num, parent_idx, phase)} 시작 ({kind_tag}, '
+                      f'on #{parent_idx}, fix: {_ellip(fail_desc, 140)}) ═══',
                       level='round_start')
         else:
             round_num = int((u or {}).get('last_round_num') or 0) + 1
@@ -2166,7 +2173,9 @@ class Worker(threading.Thread):
                             str(it.get('desc') or it.get('name') or '').strip()
                             for it in p_list
                         ]
-                        fd = ' / '.join([d for d in fail_descs if d])[:200]
+                        # 200자면 항목 4개쯤에서 끊긴다 — FAIL 7개짜리 부모의 뒤쪽 축이
+                        # directed_mutation 에 아예 도달하지 못했다 (2026-07-30).
+                        fd = ' / '.join([d for d in fail_descs if d])[:1000]
                         if not fd:
                             # 제출 거절 부모 — IS 체크는 전부 PASS 라 fail 항목이 없다.
                             # 거절 사유를 실어야 directed_mutation 이 고칠 축을 고른다.
@@ -2438,23 +2447,49 @@ def _skip_reason_ko(sub_st: str) -> str:
         return '오늘 같은 필드 조합을 이미 제출 — 예산 아끼려 보류'
     if r.startswith('below_value'):
         return f'품질 문턱 미달 {r[len("below_value"):].strip("()")}'
-    return r[:60]
+    return r        # 모르는 사유는 통째로 넘긴다 — 잘라내면 사유가 사유 아닌 게 된다
+
+
+def _ellip(s, n: int) -> str:
+    """한 줄 로그용 길이 제한 — 자를 땐 '…' 를 붙인다.
+
+    말없이 자르면 화면이 "이게 전부"라고 거짓말을 한다. 사유·조건 문자열은 잘렸다는 사실
+    자체가 정보다 (2026-07-30 사장 지적).
+    """
+    t = str(s or '')
+    return t if len(t) <= n else t[:n] + '…'
 
 
 def _short_metric_label(entry: dict) -> str:
-    """IS Testing Status 한 항목 → '이름(값 op cutoff)' 짧은 표기.
-    예: {'name':'Sharpe','value':'-0.06','direction':'below','cutoff':'1.25'} → 'Sharpe(-0.06<1.25)'
+    """IS Testing Status 한 항목 → '이름(값 op 컷오프)' 짧은 표기.
+    예: {'name':'LOW_SHARPE','value':'-0.06','cutoff':'1.25'} → 'LOW_SHARPE(-0.06<1.25)'
+
+    ⚠ 예전엔 `direction` 이 있을 때만 컷오프를 찍었다. REST 경로(wqb_api.harvest_alpha)는
+    direction 을 채우지 않으므로(브라우저 스크레이퍼 시절 필드) 라이브 로그가 값만 남기고
+    **조건(컷오프)을 통째로 버렸다** — 'LOW_SHARPE(-0.87)' (2026-07-30 사장 지적).
+    이제 컷오프가 있으면 항상 찍고, 방향은 direction → 숫자 비교 순으로 정한다.
+    value/cutoff 가 문자열이 아닌 경로도 있어 str() 로 받는다(.strip() 크래시 방지).
     """
-    name = (entry.get('name') or '').strip() or '?'
-    v = (entry.get('value') or '').strip()
-    cutoff = (entry.get('cutoff') or '').strip()
-    direction = (entry.get('direction') or '').strip()
-    if v and cutoff and direction:
-        op = '>' if direction == 'above' else '<'
-        return f'{name}({v}{op}{cutoff})'
-    if v:
+    if not isinstance(entry, dict):
+        # 저장된 pass_items/fail_items 는 **이름 문자열**이다 (db._insert 가 이름만 남긴다).
+        # 둘 다 받는다 — _submit_gate 와 같은 관용 규칙.
+        return str(entry or '').strip() or '?'
+    name = str(entry.get('name') or '').strip() or '?'
+    v = str(entry.get('value') if entry.get('value') is not None else '').strip()
+    cutoff = str(entry.get('cutoff') if entry.get('cutoff') is not None else '').strip()
+    direction = str(entry.get('direction') or '').strip().lower()
+    if not v:
+        return f'{name}(컷 {cutoff})' if cutoff else name
+    if not cutoff:
         return f'{name}({v})'
-    return name
+    if direction in ('above', 'below'):
+        op = '>' if direction == 'above' else '<'
+    else:
+        try:
+            op = '<' if float(v) < float(cutoff) else '≥'
+        except (TypeError, ValueError):
+            op = ' / 컷 '          # 숫자가 아니면 방향을 단정하지 않는다
+    return f'{name}({v}{op}{cutoff})'
 
 
 def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict | None = None,
@@ -2469,9 +2504,13 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
     p_list = is_status.get('pass') or []
     f_list = is_status.get('fail') or []
     e_list = is_status.get('error') or []
+    # WARNING = 비차단으로 강등된 항목(HT 분류를 얻은 알파의 표준 컷). 파서는 이 버킷을
+    # 채우는데 이 함수가 안 읽어서 **로그에서 통째로 사라져** 있었다 (2026-07-30 사장 지적).
+    # 차단은 아니지만 "이 값이 왜 PASS 로도 FAIL 로도 안 잡히나"의 답이 여기 있다.
+    w_list = is_status.get('warning') or []
     # PENDING(주로 'Self-correlation check pending')은 더 이상 표시/대기하지 않는다 —
     # self-correlation 은 Correlation 상자의 Maximum 으로 직접 읽어 별표 판정에 쓴다.
-    total = len(p_list) + len(f_list) + len(e_list)
+    total = len(p_list) + len(f_list) + len(e_list) + len(w_list)
     sub_st = (submit_status or '').strip()
 
     # 별표(저장, Non-RC) / 제출(RC) 상태 + self-correlation 값 표기.
@@ -2494,11 +2533,11 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
         #   '일시정지' 로 보였다 (2026-07-27 사장 지적).
         star_note = f'  ⏸ 제출 안 함 — {_skip_reason_ko(sub_st)}'
     elif sub_st.startswith('submit_http_'):
-        star_note = f'  ⚠ 제출 HTTP 오류 ({sub_st[len("submit_http_"):][:40]})'
+        star_note = f'  ⚠ 제출 HTTP 오류 ({_ellip(sub_st[len("submit_http_"):], 200)})'
     elif sub_st.startswith('submit_error'):
-        star_note = f'  ⚠ 제출 오류 ({sub_st.split(":", 1)[-1].strip()[:40]})'
+        star_note = f'  ⚠ 제출 오류 ({_ellip(sub_st.split(":", 1)[-1].strip(), 200)})'
     elif sub_st.startswith('rejected') or sub_st.startswith('fail:'):  # 구버전 제출 기록 호환
-        star_note = f'  📝 {sub_st.split(":", 1)[-1].strip()[:80]}'
+        star_note = f'  📝 {_ellip(sub_st.split(":", 1)[-1].strip(), 200)}'
 
     if total > 0:
         pass_str = ' '.join(_short_metric_label(e) for e in p_list) or '(없음)'
@@ -2507,12 +2546,17 @@ def _format_alpha_result(idx: int, status: str, metrics: dict, is_status: dict |
         head_status = 'PASS' if status == 'pass' else 'fail'
         check = ' ✓' if status == 'pass' else ''
         head = f'      #{idx} → {head_status} ({len(p_list)} PASS / {len(f_list)} FAIL'
+        if w_list:
+            head += f' / {len(w_list)} WARN'
         if e_list:
             head += f' / {len(e_list)} ERR'
         head += f'){check}'
         body = f'  ✓ {pass_str}  ✗ {fail_str}'
+        if w_list:
+            # ⚠ 마커는 ERR 과 공유한다(화면 색 규칙이 이걸 본다) — 뒤의 라벨로 구분한다.
+            body += '  ⚠ WARN: ' + ' '.join(_short_metric_label(e) for e in w_list)
         if err_str:
-            body += f'  ⚠ {err_str}'
+            body += f'  ⚠ ERR: {err_str}'
         body += star_note
         return head + body
 

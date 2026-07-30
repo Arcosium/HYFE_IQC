@@ -130,68 +130,61 @@
     .mcard-head .micro { margin-left: 2px; }
     .mcard-head .tools { margin-left: auto; }
 
-    /* ── 전략 리서치 ── 데스크톱 rs-* 패널의 모바일 압축판 ── */
+    /* 접기/펼치기 — 헤더 클릭 토글, 헤더만 남기고 나머지 숨김 */
+    .mcard.collapsible .mcard-head { cursor: pointer; user-select: none; -webkit-user-select: none; }
+    .mcard-head .rs-chev { color: var(--ink-faint); font-size: 11px; margin-left: 4px; transition: transform 0.18s ease; flex: none; }
+    .mcard-head .rs-chev.tools { margin-left: auto; }   /* 헤더에 다른 도구가 없으면 오른쪽 끝 */
+    .mcard.collapsed .rs-chev { transform: rotate(-90deg); }
+    .mcard.collapsed > :not(.mcard-head) { display: none; }
+
+    /* ── 탐색 조건 (전략 리서치는 2026-07-30 모바일에서 제거, 조건 걸기만 남김) ── */
     .rs-input-row { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
-    #rs-query {
+    .rs-input-row textarea {
       width: 100%; background: transparent; color: var(--ink);
       border: 0; border-bottom: 1px solid var(--ink-soft); border-radius: 0; padding: 10px 2px;
       font-size: 16px; font-family: var(--sans); resize: vertical; min-height: 46px;
     }
-    #rs-query:focus { outline: none; border-bottom-color: var(--red); box-shadow: 0 1px 0 0 var(--red); }
-    #btn-research {
+    .rs-input-row textarea:focus { outline: none; border-bottom-color: var(--red); box-shadow: 0 1px 0 0 var(--red); }
+    .rs-input-row button {
       align-self: flex-end; background: var(--ink); color: var(--paper); border: 1px solid var(--ink);
       border-radius: 0; padding: 10px 18px; min-height: 40px; font-size: 13px; font-weight: 700; font-family: var(--sans);
     }
-    #btn-research:disabled { opacity: 0.5; }
-    #rs-spec-counts { font-family: var(--mono); font-size: 9px; color: var(--ink-faint); letter-spacing: 0.06em; }
-    /* 접기/펼치기 — 헤더 클릭 토글, 헤더만 남기고 나머지 숨김 */
-    .mcard.collapsible .mcard-head { cursor: pointer; user-select: none; -webkit-user-select: none; }
-    .mcard-head .rs-chev { color: var(--ink-faint); font-size: 11px; margin-left: 4px; transition: transform 0.18s ease; flex: none; }
-    .mcard.collapsed .rs-chev { transform: rotate(-90deg); }
-    .mcard.collapsed > :not(.mcard-head) { display: none; }
-    .rs-empty { padding: 0 0 14px; color: var(--ink-faint); font-size: 11.5px; line-height: 1.55; }
-    .rs-steps { display: flex; gap: 10px; padding: 0 0 12px; flex-wrap: wrap; }
-    .rs-step {
-      font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
-      color: var(--ink-faint); border-bottom: 2px solid transparent; padding: 2px 0;
+    .rs-input-row button:disabled { opacity: 0.5; }
+
+    /* ── 표 (제출 내역 · 제출 대기) — 좁은 화면에서 가로 스크롤 ── */
+    /* 30건이 그대로 펼쳐지면 폰에서 페이지가 통째로 길어진다 — 표 안에서만 스크롤. */
+    .mtable-wrap {
+      overflow: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+      max-height: 320px; padding-bottom: 10px;
     }
-    .rs-step.active { color: var(--red); border-bottom-color: var(--red); animation: rspulse 1.1s ease-in-out infinite; }
-    .rs-step.done { color: var(--ok); }
-    @keyframes rspulse { 50% { opacity: 0.4; } }
-    .rs-body { padding: 0 0 14px; }
-    .rs-query { font-size: 12.5px; color: var(--ink-soft); font-style: italic; margin-bottom: 10px; line-height: 1.5; }
-    .rs-error { color: var(--red-deep); }
-    .rs-sources { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .rs-label { font-size: 10px; color: var(--ink-faint); font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
-    .rs-src {
-      font-size: 10.5px; color: var(--ink-soft); text-decoration: none; max-width: 100%;
-      border-bottom: 1px solid var(--hairline); padding: 2px 0;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    .mtable { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+    .mtable th {
+      font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--ink-faint); text-align: left;
+      padding: 5px 8px 5px 0; border-bottom: 1px solid var(--hairline); white-space: nowrap;
     }
-    .rs-hypo { border-top: 1px solid var(--hairline); padding-top: 12px; margin-top: 12px; }
-    .rs-hypo:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
-    .rs-hypo-head { font-family: var(--serif); font-size: 13.5px; font-weight: 600; line-height: 1.4; margin-bottom: 5px; }
-    .rs-cite { font-family: var(--mono); font-size: 9.5px; color: var(--ok); margin-left: 4px; white-space: nowrap; font-weight: 600; text-transform: uppercase; }
-    .rs-cite.rs-nocite { color: var(--gold); }
-    .rs-hypo-why { font-size: 11.5px; color: var(--ink-soft); line-height: 1.55; margin-bottom: 8px; }
-    .rs-spec {
-      border-left: 2px solid var(--hairline);
-      padding: 9px 0 9px 10px; margin-top: 8px;
+    .mtable td {
+      padding: 7px 8px 7px 0; border-bottom: 1px solid var(--hairline-soft);
+      vertical-align: top; line-height: 1.4;
     }
-    .rs-badge {
-      font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.05em; text-transform: uppercase;
-      padding: 2px 6px; border-radius: 0; float: right;
-      background: none; color: var(--ink-faint); border: 1px solid var(--hairline);
+    .mtable td.dim { color: var(--ink-faint); font-family: var(--mono); font-size: 10.5px; white-space: nowrap; }
+    .mtable td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; padding-right: 10px; }
+    .mtable td.wrap { word-break: break-all; }
+    .mtable td.ok { color: var(--ok); font-weight: 700; }
+
+    /* ── 차트 컨트롤 (데스크톱 seg-toggle 압축판) ── */
+    .chart-ctrl { display: flex; align-items: center; gap: 8px; padding: 0 0 4px; flex-wrap: wrap; }
+    .seg-toggle { display: inline-flex; border: 1px solid var(--hairline); }
+    .seg-toggle button {
+      font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; padding: 5px 9px;
+      background: none; border: 0; color: var(--ink-faint); min-height: 30px;
     }
-    .rs-badge.done { color: var(--ok); border-color: var(--ok); }
-    .rs-badge.pend { color: var(--gold); border-color: var(--gold); }
-    .rs-spec-why { font-size: 11.5px; color: var(--ink); line-height: 1.45; margin-bottom: 6px; padding-right: 52px; }
-    .rs-spec-code {
-      display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-soft);
-      background: var(--paper-dim); border: 1px solid var(--hairline); border-radius: 0; padding: 7px 8px;
-      overflow-x: auto; white-space: pre; margin-bottom: 6px;
+    .seg-toggle button.active { background: var(--ink); color: var(--paper); }
+    .chart-ctrl select {
+      font-family: var(--mono); font-size: 10.5px; color: var(--ink-soft);
+      background: var(--paper); border: 1px solid var(--hairline); border-radius: 0;
+      padding: 5px 6px; min-height: 30px; margin-left: auto;
     }
-    .rs-spec-knobs { font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); }
 
     /* ── WQB biometric(Persona) 배너 ── 유일한 채움면(콜아웃) — 남용 금지.
        이게 없어서 폰에서는 인증을 끝내도 세션을 저장할 방법이 없었다(사장 보고 2026-07-10). */
@@ -279,8 +272,14 @@
     .lg { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; }
     .lg .sw { width: 7px; height: 7px; border-radius: 0; }
     .lg .sw.rand { background: var(--o-rand); } .lg .sw.mut { background: var(--o-mut); }
-    .lg .sw.xo { background: var(--o-xo); }
-    .lg .sw.best { width: 13px; height: 0; border-top: 2px solid var(--red); border-radius: 0; }
+    .lg .sw.xo { background: var(--o-xo); } .lg .sw.etc { background: var(--o-etc); }
+    /* 계보 선은 뿌리마다 hue 가 다르다 — 범례는 대표 3색을 겹쳐 "여러 갈래"임을 보인다(데스크톱과 동일). */
+    .lg .sw.lineage {
+      background: transparent; width: 14px; height: 0;
+      border-top: 2px solid hsl(200 38% 42%);
+      box-shadow: 0 3px 0 -1px hsl(90 38% 42%), 0 -3px 0 -1px hsl(340 38% 42%);
+    }
+    .lg .sw.sub { background: transparent; border: 1.5px solid var(--ink); }
     .evo-tip {
       position: absolute; z-index: 5; pointer-events: none;
       max-width: 240px;
@@ -292,15 +291,6 @@
     .evo-tip .d { color: var(--ink-soft); }
     .evo-tip .g { margin-top: 5px; font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); word-break: break-all; border-top: 1px solid var(--hairline); padding-top: 4px; }
     .evo-empty { padding: 30px 14px; text-align: center; color: var(--ink-faint); font-size: 12px; }
-
-    /* ── GA 상태 칩 ── */
-    .ga-chips { display: flex; flex-wrap: wrap; gap: 14px; padding: 12px 0; }
-    .ga-chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-family: var(--mono); font-size: 11px;
-      color: var(--ink-soft);
-    }
-    .ga-chip b { color: var(--red); font-weight: 600; }
 
     /* ── 라이브 피드 ── */
     .feed {
@@ -361,7 +351,6 @@
 
     @media (prefers-reduced-motion: reduce) {
       .run-pill.is-running .dot { animation: none; }
-      .rs-step.active { animation: none; }
       * { transition: none !important; }
     }
   </style>
@@ -446,54 +435,9 @@
         </div>
       </div>
 
-      <!-- 진화 궤적 -->
-      <div class="mcard">
-        <div class="mcard-head">
-          <h3>진화 궤적</h3><span class="micro">Sharpe / Round</span>
-        </div>
-        <div class="chart-wrap" id="chart-wrap">
-          <svg id="evo-chart"></svg>
-          <svg id="evo-comp"></svg>
-          <div class="evo-tip" id="evo-tip"></div>
-          <div class="evo-empty" id="evo-empty" hidden>아직 시뮬 데이터가 없습니다.</div>
-        </div>
-        <div class="legend-row">
-          <span class="lg"><span class="sw rand"></span>탐색</span>
-          <span class="lg"><span class="sw mut"></span>변이</span>
-          <span class="lg"><span class="sw xo"></span>교차</span>
-          <span class="lg"><span class="sw best"></span>라운드 최고</span>
-        </div>
-      </div>
-
-      <!-- 전략 리서치 (선택) — 논문 수집 → 가설 → 타입드 유전체 후보. 헤더를 눌러 접기/펼치기 -->
-      <div class="mcard collapsible" id="rs-card">
-        <div class="mcard-head" id="rs-head" role="button" tabindex="0" aria-expanded="true">
-          <h3>전략 리서치</h3><span class="micro">Research</span>
-          <span class="tools" id="rs-spec-counts"></span>
-          <span class="rs-chev" aria-hidden="true">▾</span>
-        </div>
-        <div class="rs-input-row">
-          <textarea id="rs-query" rows="2"
-            placeholder="예: 저변동성 이상현상을 활용한 미국 주식 횡단면 알파"></textarea>
-          <button id="btn-research" type="button">리서치 시작</button>
-        </div>
-        <!-- 탐색 조건 — Power Pool 주간 테마처럼 기한이 있는 필터. 끄기가 걸기만큼 중요하다. -->
-        <div class="rs-input-row">
-          <textarea id="constraint-text" rows="2"
-            placeholder="탐색 조건 — 예: region=USA &amp; delay=1 &amp; universe=TOP1000 &amp; datasets not in ['pv1']"></textarea>
-          <button id="btn-constraint-save" type="button">적용</button>
-          <button id="btn-constraint-clear" type="button">해제</button>
-        </div>
-        <div class="micro" id="constraint-status" style="padding:0 2px 8px"></div>
-        <div class="rs-steps" id="rs-steps" hidden>
-          <span class="rs-step" data-step="gathering">근거수집</span>
-          <span class="rs-step" data-step="ideating">가설</span>
-          <span class="rs-step" data-step="concretizing">구체화</span>
-          <span class="rs-step" data-step="ready">완료</span>
-        </div>
-        <div class="rs-empty" id="rs-empty">요청을 입력하면 논문·자료를 모아 전략 후보를 만들고, 다음 라운드에 GA 초기 개체로 넣습니다. 비워두면 지금처럼 무작위 진화가 돕니다.</div>
-        <div class="rs-body" id="rs-body" hidden></div>
-      </div>
+      <!-- ── 2026-07-30 사장 지시 순서 — 라이브 피드 → 제출 내역 → 제출 대기 → 진화 궤적.
+           전략 리서치 카드는 모바일에서 제거(데스크톱 '전략 리서치' 탭에만 있음).
+           아래 셋은 기본 접힘 — 폰에선 피드가 먼저 보여야 한다. ── -->
 
       <!-- 라이브 피드 -->
       <div class="mcard">
@@ -505,6 +449,88 @@
         </div>
         <div id="feed" class="feed core-only"></div>
         <div id="feed-empty" class="recent-empty" hidden>로그가 아직 없습니다.</div>
+      </div>
+
+      <!-- 제출 내역 -->
+      <div class="mcard collapsible" data-fold-key="sh" data-fold-default="closed">
+        <div class="mcard-head" role="button" tabindex="0" aria-expanded="false">
+          <h3>제출 내역</h3><span class="micro">Submitted</span>
+          <span class="tools micro" id="sh-count"></span>
+          <span class="rs-chev" aria-hidden="true">▾</span>
+        </div>
+        <div class="mtable-wrap">
+          <table class="mtable" id="sh-table">
+            <thead><tr><th>시각</th><th>라운드</th><th>결과</th><th>사유</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="recent-empty" id="sh-empty">아직 제출에 성공한 알파가 없습니다.</div>
+      </div>
+
+      <!-- 제출 대기 — 읽기 전용(제출·삭제는 데스크톱에서) -->
+      <div class="mcard collapsible" data-fold-key="sq" data-fold-default="closed">
+        <div class="mcard-head" role="button" tabindex="0" aria-expanded="false">
+          <h3>제출 대기</h3><span class="micro">Queue</span>
+          <span class="tools micro" id="sq-count"></span>
+          <span class="rs-chev" aria-hidden="true">▾</span>
+        </div>
+        <div class="mtable-wrap">
+          <table class="mtable" id="sq-table">
+            <thead><tr><th>종류</th><th>알파</th><th>Sharpe</th><th>Turn</th><th>상태</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="recent-empty" id="sq-empty">대기 중인 항목이 없습니다.</div>
+      </div>
+
+      <!-- 진화 궤적 — 데스크톱과 동일(지표 토글·게이트선·계보선) -->
+      <div class="mcard collapsible" id="evo-card" data-fold-key="evo" data-fold-default="closed">
+        <div class="mcard-head" role="button" tabindex="0" aria-expanded="false">
+          <h3>진화 궤적</h3><span class="micro">Evolution Trace</span>
+          <span class="rs-chev tools" aria-hidden="true">▾</span>
+        </div>
+        <div class="chart-ctrl">
+          <div class="seg-toggle" id="evo-metric" role="radiogroup" aria-label="지표">
+            <button type="button" data-metric="sharpe" class="active">SHARPE</button>
+            <button type="button" data-metric="pass">PASS</button>
+          </div>
+          <select id="evo-range" aria-label="표시 범위">
+            <option value="200">최근 25 라운드</option>
+            <option value="400" selected>최근 50 라운드</option>
+            <option value="800">최근 100 라운드</option>
+          </select>
+        </div>
+        <div class="chart-wrap" id="chart-wrap">
+          <svg id="evo-chart"></svg>
+          <svg id="evo-comp"></svg>
+          <div class="evo-tip" id="evo-tip"></div>
+          <div class="evo-empty" id="evo-empty" hidden>아직 시뮬 데이터가 없습니다.</div>
+        </div>
+        <div class="legend-row">
+          <span class="lg"><span class="sw rand"></span>탐색 rand</span>
+          <span class="lg"><span class="sw mut"></span>변이 mut</span>
+          <span class="lg"><span class="sw xo"></span>교차 xo</span>
+          <span class="lg"><span class="sw etc"></span>개편 전</span>
+          <span class="lg"><span class="sw lineage"></span>계보</span>
+          <span class="lg"><span class="sw sub"></span>제출됨</span>
+        </div>
+        <div class="micro" style="padding:0 2px 12px">세대 구성 — 라운드별 탐색·변이·교차 비율</div>
+      </div>
+
+      <!-- 탐색 조건 — Power Pool 주간 테마처럼 기한이 있는 필터. 끄기가 걸기만큼 중요하다.
+           (리서치 카드가 사라져도 조건 걸기는 폰에서 계속 되어야 한다) -->
+      <div class="mcard collapsible" data-fold-key="cs" data-fold-default="closed">
+        <div class="mcard-head" role="button" tabindex="0" aria-expanded="false">
+          <h3>탐색 조건</h3><span class="micro">Constraint</span>
+          <span class="rs-chev tools" aria-hidden="true">▾</span>
+        </div>
+        <div class="rs-input-row">
+          <textarea id="constraint-text" rows="2"
+            placeholder="탐색 조건 — 예: region=USA &amp; delay=1 &amp; universe=TOP1000 &amp; datasets not in ['pv1']"></textarea>
+          <button id="btn-constraint-save" type="button">적용</button>
+          <button id="btn-constraint-clear" type="button">해제</button>
+        </div>
+        <div class="micro" id="constraint-status" style="padding:0 2px 12px"></div>
       </div>
 
       <!-- delay 는 '탐색 조건'(delay=0|1)이 정한다 — 별도 토글은 2026-07-22 제거 -->
@@ -687,8 +713,14 @@
       });
     }
 
-    // ── 진화 미니차트 ──
+    // ── 진화 궤적 — 데스크톱 app.js renderEvolution() 이식 (2026-07-30 사장 지시).
+    //    지표 토글(SHARPE/PASS) · 제출 게이트 기준선 · 계보(부모→자식) 선까지 동일하게 그린다.
     let _dots = [];
+    let _evoAlphas = [];
+    let _evoMetric = 'sharpe';
+    let _evoLimit = 400;
+    const GATE_SHARPE = 1.25, GATE_SHARPE_HI = 1.5;
+
     function parseOrigin(desc) {
       const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(desc || '');
       if (!m) return { op: 'etc', gen: 0 };
@@ -705,103 +737,164 @@
       return el;
     }
 
-    async function refreshEvo() {
-      const r = await api('/api/recent_alphas?limit=240');
-      if (!(r.ok && r.data && r.data.ok)) return;
-      const rows = (r.data.alphas || []).slice();
-      rows.reverse();
-      renderEvo(rows);
+    // 계보 — parent_alpha_id 체인의 뿌리마다 색이 다르다(골든앵글 hue). 데스크톱과 동일.
+    let _byId = new Map(), _rootCache = new Map();
+    function indexLineage(alphas) {
+      _byId = new Map(alphas.map((a) => [Number(a.id), a]));
+      _rootCache = new Map();
+    }
+    function rootOf(id) {
+      if (_rootCache.has(id)) return _rootCache.get(id);
+      let cur = id;
+      for (let hop = 0; hop < 500; hop++) {   // 순환 방어
+        const p = Number((_byId.get(cur) || {}).parent_alpha_id || 0);
+        if (!p || !_byId.has(p)) break;
+        cur = p;
+      }
+      _rootCache.set(id, cur);
+      return cur;
+    }
+    function lineageColor(root) {
+      return `hsl(${Math.round((root * 137.508) % 360)} 38% 42%)`;
     }
 
-    function renderEvo(alphas) {
+    function groupRounds(alphas) {
+      // round_id 로 묶는다 (focus sub-round 는 round_num 이 같아도 round_id 가 다름).
+      const map = new Map();
+      for (const a of alphas) {
+        const key = a.round_id != null ? String(a.round_id) : `${a.round_num}/${a.phase || 0}`;
+        if (!map.has(key)) map.set(key, { key, roundNum: Number(a.round_num || 0),
+                                          phase: Number(a.phase || 0), alphas: [] });
+        map.get(key).alphas.push(a);
+      }
+      const groups = [...map.values()].sort((x, y) => Number(x.key) - Number(y.key));
+      if (groups.length > 1) groups.shift();   // limit 절단으로 부분 fetch 된 최고(最古) 그룹 제거
+      for (const g of groups) {
+        g.label = g.phase > 0 ? `${g.roundNum}·f${g.phase}` : String(g.roundNum);
+        g.alphas.sort((x, y) => Number(x.idx || 0) - Number(y.idx || 0));
+      }
+      return groups;
+    }
+
+    async function refreshEvo() {
+      const r = await api('/api/recent_alphas?limit=' + _evoLimit);
+      if (!(r.ok && r.data && r.data.ok)) return;
+      const rows = (r.data.alphas || []).slice();
+      rows.reverse();                          // 서버는 id DESC — 시간순 ASC 로.
+      _evoAlphas = rows;
+      indexLineage(rows);
+      renderEvo();
+    }
+
+    function renderEvo() {
       const svg = $('#evo-chart');
       const comp = $('#evo-comp');
       const empty = $('#evo-empty');
+      if (!svg || !comp) return;
       svg.replaceChildren();
       comp.replaceChildren();
       _dots = [];
 
-      // round_id 그룹 (focus sub-round 는 round_id 가 다름).
-      const map = new Map();
-      let maxGen = 0;
-      for (const a of alphas) {
-        const key = a.round_id != null ? String(a.round_id) : `${a.round_num}/${a.phase || 0}`;
-        if (!map.has(key)) map.set(key, { key, roundNum: Number(a.round_num || 0), phase: Number(a.phase || 0), alphas: [] });
-        map.get(key).alphas.push(a);
-        const o = parseOrigin(a.desc);
-        const gen = Math.max(Number(a.generation || 0), o.gen);
-        if (gen > maxGen) maxGen = gen;
-      }
-      const groups = [...map.values()].sort((x, y) => Number(x.key) - Number(y.key));
-      if (groups.length > 1) groups.shift();   // limit 절단으로 부분 fetch 된 최고(最古) 그룹 제거
+      const groups = groupRounds(_evoAlphas);
       empty.hidden = groups.length > 0;
       if (!groups.length) return;
 
-      const W = svg.clientWidth || 340;
+      // 접혀 있으면 폭 0 — 그리지 않고 펼치는 순간 다시 그린다. 폭을 임의값으로 때우면
+      // viewBox 와 실제 픽셀이 어긋나 툴팁 히트테스트가 빗나간다.
+      const W = svg.clientWidth;
       const H = svg.clientHeight || 190;
+      if (!W) return;
       svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-      const mL = 34, mR = 8, mT = 10, mB = 16;
+      const mL = 34, mR = 10, mT = 10, mB = 16;
       const plotW = W - mL - mR, plotH = H - mT - mB;
       const n = groups.length;
       const bw = plotW / n;
 
-      let mn = 0, mx = 1;
-      for (const g of groups) for (const a of g.alphas) {
-        const v = sharpeOf(a);
-        if (v == null) continue;
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
+      // ── y 도메인 — 지표에 따라 (데스크톱과 동일 규칙) ──
+      const metric = _evoMetric;
+      const val = (a) => metric === 'sharpe' ? sharpeOf(a)
+                                             : (a.pass_count != null ? Number(a.pass_count) : null);
+      let lo, hi;
+      if (metric === 'sharpe') {
+        let mn = 0, mx = 1;
+        for (const g of groups) for (const a of g.alphas) {
+          const v = val(a);
+          if (v == null) continue;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        lo = Math.max(-4, Math.floor(mn * 2) / 2);
+        hi = Math.min(4, Math.ceil(mx * 2) / 2);
+        if (hi - lo < 1) hi = lo + 1;
+      } else {
+        lo = 0; hi = 7;
+        for (const g of groups) for (const a of g.alphas) {
+          const v = val(a);
+          if (v != null && v > hi) hi = v;
+        }
       }
-      const lo = Math.max(-4, Math.floor(mn * 2) / 2);
-      const hi = Math.min(4, Math.ceil(mx * 2) / 2);
       const y = (v) => mT + plotH - ((v - lo) / (hi - lo)) * plotH;
       const xOf = (gi) => mL + (gi + 0.5) * bw;
 
+      // ── 그리드 + y축 눈금 ──
       for (let t = 0; t <= 4; t++) {
         const v = lo + (hi - lo) * (t / 4);
-        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(v), y2: y(v), stroke: 'rgba(28,25,20,0.1)', 'stroke-width': 1 }));
-        const lbl = svgEl('text', { x: mL - 6, y: y(v) + 3, 'text-anchor': 'end', fill: '#6E675A', 'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
-        lbl.textContent = v.toFixed(1);
+        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(v), y2: y(v),
+                                        stroke: 'rgba(28,25,20,0.1)', 'stroke-width': 1 }));
+        const lbl = svgEl('text', { x: mL - 6, y: y(v) + 3, 'text-anchor': 'end', fill: '#6E675A',
+                                    'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
+        lbl.textContent = metric === 'sharpe' ? v.toFixed(1) : String(Math.round(v));
         svg.appendChild(lbl);
       }
-      if (lo < 0 && hi > 0) {
-        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(0), y2: y(0), stroke: 'rgba(28,25,20,0.3)', 'stroke-width': 1, 'stroke-dasharray': '3 4' }));
+      if (metric === 'sharpe' && lo < 0 && hi > 0) {
+        svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(0), y2: y(0),
+                                        stroke: 'rgba(28,25,20,0.3)', 'stroke-width': 1,
+                                        'stroke-dasharray': '3 4' }));
       }
+      // 제출 게이트 기준선 (1.25 gold / 1.5 ok) — "통과선에 얼마나 근접했나".
+      if (metric === 'sharpe') {
+        for (const [gv, col] of [[GATE_SHARPE, 'rgba(140,109,59,0.5)'],
+                                 [GATE_SHARPE_HI, 'rgba(63,107,69,0.5)']]) {
+          if (gv <= lo || gv >= hi) continue;
+          svg.appendChild(svgEl('line', { x1: mL, x2: W - mR, y1: y(gv), y2: y(gv),
+                                          stroke: col, 'stroke-width': 1, 'stroke-dasharray': '2 3' }));
+          const t = svgEl('text', { x: W - mR - 2, y: y(gv) - 3, 'text-anchor': 'end',
+                                    fill: col.replace(/,[^,]+\)$/, ',0.9)'), 'font-size': 8,
+                                    'font-family': 'IBM Plex Mono, monospace' });
+          t.textContent = gv.toFixed(2);
+          svg.appendChild(t);
+        }
+      }
+
+      // ── x축 라벨 ──
       const step = Math.max(1, Math.ceil(n / 6));
       for (let i = 0; i < n; i += step) {
         const g = groups[i];
         if (g.phase > 0) continue;
-        const lbl = svgEl('text', { x: xOf(i), y: H - 3, 'text-anchor': 'middle', fill: '#6E675A', 'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
+        const lbl = svgEl('text', { x: xOf(i), y: H - 3, 'text-anchor': 'middle', fill: '#6E675A',
+                                    'font-size': 9, 'font-family': 'IBM Plex Mono, monospace' });
         lbl.textContent = 'R' + g.roundNum;
         svg.appendChild(lbl);
       }
 
-      const bestPts = [];
-      groups.forEach((g, gi) => {
-        let best = null;
-        for (const a of g.alphas) {
-          const v = sharpeOf(a);
-          if (v == null) continue;
-          if (best == null || v > best) best = v;
-        }
-        if (best != null) bestPts.push([xOf(gi), y(Math.max(lo, Math.min(hi, best)))]);
-      });
-      if (bestPts.length > 1) {
-        const dPath = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('');
-        svg.appendChild(svgEl('path', { d: dPath, fill: 'none', stroke: '#A63A22', 'stroke-width': 2, 'stroke-linejoin': 'round', opacity: 0.9 }));
-      }
+      // ── 알파 산점 + 계보 선 (엣지가 점 아래 레이어) ──
+      const gEdges = svgEl('g', { 'stroke-linecap': 'round' });
+      const gDots = svgEl('g', {});
+      svg.appendChild(gEdges);
+      svg.appendChild(gDots);
 
+      const pos = new Map();
       groups.forEach((g, gi) => {
         const cnt = g.alphas.length;
         g.alphas.forEach((a, ai) => {
-          const v = sharpeOf(a);
+          const v = val(a);
           if (v == null) return;
           const o = parseOrigin(a.desc);
-          const jitter = cnt > 1 ? ((ai / (cnt - 1)) - 0.5) * Math.min(bw * 0.5, 14) : 0;
+          const jitter = cnt > 1 ? ((ai / (cnt - 1)) - 0.5) * Math.min(bw * 0.55, 14) : 0;
           const cx = xOf(gi) + jitter;
           const cy = y(Math.max(lo, Math.min(hi, v)));
           const submitted = !!a.submitted;
-          svg.appendChild(svgEl('circle', {
+          gDots.appendChild(svgEl('circle', {
             cx: cx.toFixed(1), cy: cy.toFixed(1),
             r: submitted ? 3.6 : 2.5,
             fill: ORIGIN_COLOR[o.op] || ORIGIN_COLOR.etc,
@@ -809,11 +902,21 @@
             stroke: submitted ? '#1C1914' : '#F5F1E8',
             'stroke-width': submitted ? 1.3 : 0.8,
           }));
-          _dots.push({ x: cx, y: cy, a, o, label: g.phase > 0 ? `${g.roundNum}·f${g.phase}` : String(g.roundNum) });
+          if (a.id != null) pos.set(Number(a.id), [cx, cy]);
+          _dots.push({ x: cx, y: cy, a, o, label: g.label });
         });
       });
+      // 부모→자식 엣지만 — 신규(rand·부모 화면 밖)는 선 없는 점 = 새 계보의 시작.
+      for (const d of _dots) {
+        const p = pos.get(Number(d.a.parent_alpha_id || 0));
+        if (!p) continue;
+        gEdges.appendChild(svgEl('line', {
+          x1: p[0].toFixed(1), y1: p[1].toFixed(1), x2: d.x.toFixed(1), y2: d.y.toFixed(1),
+          stroke: lineageColor(rootOf(Number(d.a.id))), 'stroke-width': 1.2, opacity: 0.6,
+        }));
+      }
 
-      // 구성 스트립
+      // ── 세대 구성 스트립 (스캐터와 x 정렬) ──
       const cW = comp.clientWidth || W;
       const cH = comp.clientHeight || 30;
       comp.setAttribute('viewBox', `0 0 ${cW} ${cH}`);
@@ -836,6 +939,28 @@
         }
       });
     }
+
+    // 지표 토글 · 표시 범위 — 데스크톱과 같은 컨트롤.
+    (function initEvoControls() {
+      const seg = $('#evo-metric');
+      if (seg) seg.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-metric]');
+        if (!btn) return;
+        _evoMetric = btn.dataset.metric;
+        seg.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b === btn));
+        renderEvo();
+      });
+      const range = $('#evo-range');
+      if (range) range.addEventListener('change', () => {
+        _evoLimit = Number(range.value) || 400;
+        refreshEvo();
+      });
+      let t = null;
+      window.addEventListener('resize', () => {
+        if (t) clearTimeout(t);
+        t = setTimeout(renderEvo, 200);
+      });
+    })();
 
     // 탭(터치) 툴팁 — 가장 가까운 점.
     (function initTip() {
@@ -879,99 +1004,60 @@
       wrap.addEventListener('click', onTap);
     })();
 
-    // ── 전략 리서치 — /api/research (논문 수집 → 가설 → 타입드 유전체 후보) ──
-    const RS_STEP_ORDER = ['gathering', 'ideating', 'concretizing', 'ready'];
-    let rsTimer = null;
+    // ── 제출 내역 · 제출 대기 (2026-07-30 — 모바일에서 전략 리서치 자리를 대신한다) ──
+    const _td = (txt, cls) => {
+      const c = document.createElement('td');
+      if (cls) c.className = cls;
+      c.textContent = txt == null ? '' : String(txt);
+      return c;
+    };
+    const _num = (v) => { const f = parseFloat(v); return Number.isFinite(f) ? f.toFixed(2) : '—'; };
 
-    function escapeHtml(s) {
-      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    function fillTable(id, rows, emptyId, countId, buildRow) {
+      const table = $(id);
+      if (!table) return;
+      const tbody = table.querySelector('tbody');
+      tbody.replaceChildren();
+      const empty = $(emptyId);
+      if (empty) empty.hidden = rows.length > 0;
+      table.hidden = !rows.length;
+      const cnt = $(countId);
+      if (cnt) cnt.textContent = rows.length ? String(rows.length) + '건' : '';
+      for (const r of rows) tbody.appendChild(buildRow(r));
     }
 
-    async function startResearch() {
-      const input = $('#rs-query');
-      const q = (input.value || '').trim();
-      if (!q) { input.focus(); return; }
-      const btn = $('#btn-research');
-      btn.disabled = true; btn.textContent = '시작 중…';
-      const r = await api('/api/research', { method: 'POST', body: { query: q } });
-      btn.disabled = false; btn.textContent = '리서치 시작';
-      if (!(r.ok && r.data && r.data.ok)) {
-        const reason = (r.data && (r.data.detail || r.data.error)) || '리서치 시작 실패';
-        const body = $('#rs-body');
-        $('#rs-empty').hidden = true;
-        body.hidden = false;
-        body.innerHTML = `<div class="rs-error">리서치 실패 — ${escapeHtml(reason)}</div>`;
-        return;
-      }
-      pollResearch();
-    }
-
-    // 상태를 한 번 읽어 렌더하고, 종료(ready/error/미실행) 여부를 반환한다.
-    async function refreshResearch() {
-      const r = await api('/api/research/status');
-      if (!(r.ok && r.data && r.data.ok)) return true;
-      renderResearch(r.data);
-      const st = r.data.run && r.data.run.status;
-      return !r.data.running && (!st || st === 'ready' || st === 'error');
-    }
-
-    // 진행 중이면 5초 폴링, 종료되면 자동 정지.
-    function pollResearch() {
-      if (rsTimer) { clearInterval(rsTimer); rsTimer = null; }
-      refreshResearch().then((terminal) => {
-        if (terminal) return;
-        rsTimer = setInterval(async () => {
-          if (await refreshResearch()) { clearInterval(rsTimer); rsTimer = null; }
-        }, 5000);
+    async function refreshSubmits() {
+      const r = await api('/api/m_submits?limit=30');
+      if (!(r.ok && r.data && r.data.ok)) return;
+      const rows = (r.data.attempts || []).filter((a) => a.submitted);
+      fillTable('#sh-table', rows, '#sh-empty', '#sh-count', (a) => {
+        const tr = document.createElement('tr');
+        const t = a.ts ? new Date(a.ts * 1000) : null;
+        tr.appendChild(_td(t ? `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}` : '—', 'dim'));
+        tr.appendChild(_td(`r${a.round_num}${a.idx ? '-#' + a.idx : ''}`, 'dim'));
+        tr.appendChild(_td(a.submitted ? '✅\u00a0제출' : '⛔\u00a0거절', a.submitted ? 'ok' : ''));
+        // 사유는 자르지 않는다 — 좁은 칸에서 접히더라도 조건이 사라지는 편이 나쁘다.
+        tr.appendChild(_td(String(a.submit_status || ''), 'dim wrap'));
+        return tr;
       });
     }
 
-    function renderResearch(d) {
-      const run = d.run;
-      const empty = $('#rs-empty'), steps = $('#rs-steps'), body = $('#rs-body');
-      const counts = d.specs || {};
-      const pend = counts.pending || 0, seeded = counts.seeded || 0;
-      $('#rs-spec-counts').textContent = (pend || seeded) ? `대기 ${pend} · 시뮬 ${seeded}` : '';
-      if (!run) { empty.hidden = false; steps.hidden = true; body.hidden = true; return; }
-      empty.hidden = true; steps.hidden = false; body.hidden = false;
-      const status = run.status || 'pending';
-      const doneIdx = RS_STEP_ORDER.indexOf(status);
-      steps.querySelectorAll('.rs-step').forEach((el) => {
-        const i = RS_STEP_ORDER.indexOf(el.dataset.step);
-        el.classList.toggle('active', i === doneIdx && status !== 'ready');
-        el.classList.toggle('done', status === 'ready' ? true : (i >= 0 && i < doneIdx));
+    const SQ_STATUS = { pending: '대기', submitting: '제출 중…', submitted: '✅ 제출됨',
+                        rejected: '거절됨' };
+
+    async function refreshQueue() {
+      const r = await api('/api/submit_queue');
+      if (!(r.ok && r.data && r.data.ok)) return;
+      fillTable('#sq-table', r.data.rows || [], '#sq-empty', '#sq-count', (row) => {
+        const tr = document.createElement('tr');
+        const m = row.metrics || {};
+        tr.appendChild(_td(row.kind === 'theme' ? '🎯 테마' : '📆 예산', 'dim'));
+        tr.appendChild(_td(row.wqb_alpha_id, 'dim'));
+        tr.appendChild(_td(_num(m.sharpe), 'num'));
+        tr.appendChild(_td(m.turnover != null ? (Number(m.turnover) * 100).toFixed(0) + '%' : '—', 'num'));
+        tr.appendChild(_td(SQ_STATUS[row.status] || row.status));
+        return tr;
       });
-      const parts = [];
-      parts.push(`<div class="rs-query">“${escapeHtml(run.query || '')}”` +
-        (status === 'error' ? ` <span class="rs-error">— 실패: ${escapeHtml(run.error || '')}</span>` : '') + `</div>`);
-      const srcs = run.sources || [];
-      if (srcs.length) {
-        const items = srcs.slice(0, 6).map((sx) =>
-          `<a class="rs-src" href="${escapeHtml(sx.url)}" target="_blank" rel="noopener">` +
-          `[${sx.n}] ${escapeHtml((sx.title || '').slice(0, 34))}</a>`).join('');
-        parts.push(`<div class="rs-sources"><span class="rs-label">근거 ${srcs.length}</span>${items}</div>`);
-      }
-      for (const h of (d.hypotheses || [])) {
-        const cite = (h.citations && h.citations.length)
-          ? `<span class="rs-cite">출처 ${h.citations.join(', ')}</span>`
-          : `<span class="rs-cite rs-nocite">근거 없음</span>`;
-        const specs = (h.specs || []).map((sp) => {
-          const g = sp.genome || {};
-          const badge = sp.status === 'seeded' ? '<span class="rs-badge done">시뮬됨</span>'
-            : sp.status === 'exhausted' ? '<span class="rs-badge">중복</span>'
-            : '<span class="rs-badge pend">대기</span>';
-          const knobs = [`delay ${sp.delay}`, `decay ${g.decay}`,
-            g.trade_when && g.trade_when !== 'OFF' ? `진입 ${g.trade_when}` : null,
-            g.winsor_std ? `winsor ${g.winsor_std}` : null, g.universe].filter(Boolean).join(' · ');
-          return `<div class="rs-spec">${badge}<div class="rs-spec-why">${escapeHtml(sp.why || '')}</div>` +
-            `<code class="rs-spec-code">${escapeHtml(sp.code || '')}</code>` +
-            `<div class="rs-spec-knobs">${escapeHtml(knobs)}</div></div>`;
-        }).join('');
-        parts.push(`<div class="rs-hypo"><div class="rs-hypo-head">${escapeHtml(h.title || '')} ${cite}</div>` +
-          `<div class="rs-hypo-why">${escapeHtml(h.rationale || '')}</div>${specs}</div>`);
-      }
-      body.innerHTML = parts.join('');
     }
 
     async function refresh() {
@@ -987,19 +1073,23 @@
       try { await refreshLogs(); } catch (_) {}
     }
 
+    function refreshLists() {
+      refreshSubmits().catch(() => {});
+      refreshQueue().catch(() => {});
+    }
+
     function startPolling() {
       stopPolling();
       refresh();
       refreshEvo();
+      refreshLists();
       pollTimer = setInterval(refresh, 5000);
-      evoTimer = setInterval(refreshEvo, 30000);
+      evoTimer = setInterval(() => { refreshEvo(); refreshLists(); }, 30000);
       try { initConstraint(); } catch (e) { console.error('initConstraint', e); }
-      try { pollResearch(); } catch (e) { console.error('pollResearch', e); }
     }
     function stopPolling() {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       if (evoTimer) { clearInterval(evoTimer); evoTimer = null; }
-      if (rsTimer) { clearInterval(rsTimer); rsTimer = null; }
     }
 
     // ── Delay 테스트 모드 ──
@@ -1060,24 +1150,37 @@
       show(false);
     });
 
-    $('#btn-research').addEventListener('click', startResearch);
-
     // 전략 리서치 카드 접기/펼치기 (localStorage 로 상태 유지)
-    (function initRsCollapse() {
-      const head = $('#rs-head'), card = $('#rs-card');
-      if (!head || !card) return;
-      const setCollapsed = (c) => {
-        card.classList.toggle('collapsed', c);
-        head.setAttribute('aria-expanded', String(!c));
-        try { localStorage.setItem('rs-collapsed', c ? '1' : '0'); } catch (e) {}
-      };
-      let start = false;
-      try { start = localStorage.getItem('rs-collapsed') === '1'; } catch (e) {}
-      setCollapsed(start);
-      const toggle = () => setCollapsed(!card.classList.contains('collapsed'));
-      head.addEventListener('click', toggle);
-      head.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    // 카드 접기/펼치기 — .mcard.collapsible[data-fold-key] 전부. 상태는 localStorage.
+    // data-fold-default="closed" 면 기본 접힘(2026-07-30: 피드 아래 카드 전부 접고 시작).
+    (function initCollapsibles() {
+      document.querySelectorAll('.mcard.collapsible[data-fold-key]').forEach((card) => {
+        const head = card.querySelector('.mcard-head');
+        if (!head) return;
+        const key = 'mfold-' + card.dataset.foldKey;
+        const setCollapsed = (c) => {
+          card.classList.toggle('collapsed', c);
+          head.setAttribute('aria-expanded', String(!c));
+          try { localStorage.setItem(key, c ? '1' : '0'); } catch (e) {}
+          // 접혀 있는 동안 그린 SVG 는 폭 0 — 펼치는 순간 다시 그린다.
+          if (!c && card.id === 'evo-card') { try { renderEvo(); } catch (e) {} }
+        };
+        let start = card.dataset.foldDefault === 'closed';
+        try {
+          const saved = localStorage.getItem(key);
+          if (saved === '1') start = true;
+          else if (saved === '0') start = false;
+        } catch (e) {}
+        setCollapsed(start);
+        const toggle = () => setCollapsed(!card.classList.contains('collapsed'));
+        head.addEventListener('click', (e) => {
+          if (e.target.closest('button, select, input, label, a, textarea')) return;
+          toggle();
+        });
+        head.addEventListener('keydown', (e) => {
+          if (e.target !== head) return;
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        });
       });
     })();
 

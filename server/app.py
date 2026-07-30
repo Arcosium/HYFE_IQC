@@ -907,6 +907,25 @@ def api_recent_alphas():
     return jsonify({'ok': True, 'alphas': _db.list_recent_alphas(uid, limit=limit)})
 
 
+@app.route('/api/alpha', methods=['GET'])
+def api_alpha():
+    """알파 1건 상세 — pk 또는 code 로. **본인 것만**.
+
+    리더보드는 /api/recent_alphas 에 실린 행을 그대로 쓰지만, 제출 내역·제출 대기는
+    그 목록(최근 N건) 밖의 알파를 가리킬 수 있어서 따로 조회한다.
+    """
+    uid, err = _require_user()
+    if err:
+        return err
+    pk = _int_arg('pk', 0)
+    a = _db.get_alpha_by_id(uid, pk) if pk > 0 else None
+    if a is None:
+        a = _db.get_alpha_by_code(uid, (request.args.get('code') or '').strip())
+    if a is None:
+        return jsonify({'ok': False, 'error': 'not_found'}), 404
+    return jsonify({'ok': True, 'alpha': a})
+
+
 @app.route('/api/errors', methods=['GET'])
 def api_errors():
     uid, err = _require_user()
@@ -1127,8 +1146,8 @@ def api_submit_queue_submit():
                 pass
             ok, st = client.submit_alpha(wid, deadline_s=600)
             _db.submit_queue_mark(qid, 'submitted' if ok else 'rejected', st[:200])
-            if alpha_pk:
-                _db.set_alpha_submit_result(int(alpha_pk), ok, st)
+            _db.set_alpha_submit_result(int(alpha_pk or 0), ok, st,
+                                        user_id=uid, code=code)
             _db.record_submit_attempt(uid, 0, 0, code or wid, ok, f'[manual-queue] {st}')
         except Exception as e:
             _db.submit_queue_mark(qid, 'pending', f'예외: {str(e)[:150]} — 재시도 가능')

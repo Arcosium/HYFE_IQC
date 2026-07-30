@@ -269,3 +269,72 @@ def test_rejected_alpha_gets_exactly_one_more_try(isolated_db, monkeypatch):
     st = {r['wqb_alpha_id']: r['status'] for r in db.submit_queue_list(uid, limit=20)}
     assert st.get('WEEKLY') == 'rejected', '두 번째 거절은 확정이어야 한다'
     assert tries.count('WEEKLY') == 2, f'재시도가 정확히 1회가 아니다: {tries}'
+
+
+# ── 큐 행은 code 를 실어야 한다 (2026-07-30 사장 지적) ───────────────────────
+
+def test_gate_queued_rows_carry_the_code(isolated_db, monkeypatch):
+    """게이트가 큐에 넣는 3경로(list·보류창·예산초과) 모두 code 를 실어야 한다.
+
+    UI '제출 대기' 행 클릭 → 알파 상세는 alpha_pk 아니면 code 로만 찾는다.
+    게이트 시점엔 alphas 행이 아직 없어 pk 가 없으므로, code 가 빠지면
+    그 행은 영영 클릭이 죽는다 (실측: q47~49 가 code='' 로 들어갔다).
+    """
+    import time as _t
+
+    from server import run_config, worker as w
+
+    uid = isolated_db
+    code = 'rank(-1 * ts_delta(close, 5))'
+
+    def gate(wid):
+        wk = w.Worker.__new__(w.Worker)
+        wk.user_id = uid
+        wk._corr_fs_hold = set()
+        return wk._submit_gate({'wqb_alpha_id': wid}, None, fail_items=[], code=code)
+
+    monkeypatch.setattr(run_config, 'get_submit_hold_until', lambda: 0.0)
+    monkeypatch.setattr(w, 'DAILY_SUBMIT_BUDGET', 4)
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: 0)
+
+    db.set_submit_mode(uid, 'list')
+    assert gate('QLIST')[1] == 'submit_mode=list→queued'
+    db.set_submit_mode(uid, 'auto')
+
+    monkeypatch.setattr(run_config, 'get_submit_hold_until', lambda: _t.time() + 3600)
+    assert gate('QHOLD')[1].startswith('submit_hold')
+    monkeypatch.setattr(run_config, 'get_submit_hold_until', lambda: 0.0)
+
+    monkeypatch.setattr(w.Worker, '_submitted_today', lambda self: 4)
+    assert gate('QBUDGET')[1].startswith('daily_budget')
+
+    got = {r['wqb_alpha_id']: r['code'] for r in db.submit_queue_list(uid, limit=20)}
+    assert set(got) == {'QLIST', 'QHOLD', 'QBUDGET'}, f'큐잉 자체가 안 됐다: {got}'
+    for wid, c in got.items():
+        assert c == code, f'{wid} 행에 code 가 안 실렸다: {c!r}'
+
+
+def test_queue_rejection_reason_lands_on_the_alpha(isolated_db):
+    """큐에서 거절되면 사유가 알파 행에 남아야 한다 — 상세의 '상태' 가 그걸 읽는다.
+
+    큐 행은 성공하면 삭제되고 pk 도 없을 수 있으니, code 로 알파를 찾아 기록한다.
+    pk 만 보던 동안 상세는 'submit_skipped:…→queued' 에 멈춰 있었다(2026-07-30).
+    """
+    uid = isolated_db
+    code = 'rank(ts_std_dev(returns, 20))'
+    rid = db.start_round(uid, 1)
+    db.insert_alpha(uid, rid, 1, {'code': code, 'idx': 1, 'metrics': {'sharpe': '1.2'}})
+    a = db.get_alpha_by_code(uid, code)
+    assert a and a['submit_status'] in (None, '', 'submit_skipped:'), a['submit_status']
+
+    reason = 'rejected:LOW_SHARPE(1.2 vs 1.58); LOW_FITNESS(0.28 vs 1.0) (http_403)'
+    db.set_alpha_submit_result(0, False, reason, user_id=uid, code=code)
+    assert db.get_alpha_by_code(uid, code)['submit_status'] == reason
+
+    # 남의 알파는 절대 건드리지 않는다
+    other = db.upsert_user('o@x.com', 'p', 'GEMINI_FAKE_KEY_FOR_TEST')
+    db.set_alpha_submit_result(0, False, 'rejected:HACK', user_id=other, code=code)
+    assert db.get_alpha_by_code(uid, code)['submit_status'] == reason
+    # pk·code 둘 다 없으면 조용히 아무것도 안 한다
+    db.set_alpha_submit_result(0, False, 'rejected:NOPE', user_id=uid, code='')
+    assert db.get_alpha_by_code(uid, code)['submit_status'] == reason

@@ -232,6 +232,11 @@ CHECK_METRIC_KEY = {
     'LOW_SHARPE': 'sharpe_check',
     'LOW_FITNESS': 'fitness_check',
     'LOW_2Y_SHARPE': 'sharpe_2y',
+    # 리전별 Sharpe — 라이브 FAIL 목록의 절반이 이것인데 지도에 없어서 값·컷이
+    # metrics 에 안 남았다. 알파 상세가 이름표만 띄우던 이유 (2026-07-30).
+    'LOW_GLB_AMER_SHARPE': 'glb_amer_sharpe',
+    'LOW_GLB_EMEA_SHARPE': 'glb_emea_sharpe',
+    'LOW_GLB_APAC_SHARPE': 'glb_apac_sharpe',
     'IS_LADDER_SHARPE': 'ladder_sharpe',
     'LOW_SUB_UNIVERSE_SHARPE': 'sub_universe_sharpe',
     'CONCENTRATED_WEIGHT': 'weight_concentration',
