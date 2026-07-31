@@ -118,9 +118,10 @@ def test_every_v2_combination_is_lint_clean_and_gate_safe():
             [{'idx': 1, 'code': code, 'settings': {}}], existing_codes=[])
         assert not dropped, (code, dropped)
         checked += 1
-    # 5 trade_when × 4 group_op × 5 group_by × 4 winsor × 4 weight × 7 combine
-    # (2026-07-23 'resid' 결합 추가로 9600 → 11200)
-    assert checked == 11200
+    # 5 trade_when × 4 group_op × 6 group_by × 4 winsor × 4 weight × 7 combine
+    # (2026-07-23 'resid' 결합 추가로 9600 → 11200,
+    #  2026-07-31 group_by 'country' 추가로 11200 → 13440)
+    assert checked == 13440
 
 
 def test_named_arg_keys_are_not_datafields():

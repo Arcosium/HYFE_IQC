@@ -919,6 +919,19 @@ class Worker(threading.Thread):
             except Exception as e:
                 self._log_quiet(0, f'⚠ 테마 동기화 실패(무시): {e}')
 
+        # 🤖 페이스메이커 (2026-07-31 사장 지시) — 목표 페이스(일 3·주 25) 미달을
+        # 스스로 감지해 개입한다: 탐색 강화(ε 하한) → 자동 다변화 시딩(아래
+        # pending_specs 조회 전에 넣어야 이번 라운드가 바로 소비한다) → 인증
+        # 사망은 사람 호출. 어떤 실패도 라운드를 막으면 안 된다.
+        _pace_boost = None
+        try:
+            from . import pace_keeper as _pace
+            _pk = _pace.maybe_intervene(self.user_id, account_type,
+                                        log_fn=lambda m: self._log(0, m))
+            _pace_boost = _pk.get('epsilon_boost')
+        except Exception as e:
+            self._log_quiet(0, f'⚠ 페이스메이커 실패(무시): {e}')
+
         u = _db.get_user(self.user_id)
 
         # ④ 상관벽 메모리 홀드셋은 '같은 라운드 안의 형제' 차단용이다. 라운드가 끝나면
@@ -1149,6 +1162,9 @@ class Worker(threading.Thread):
                 _epsilon = _retrospect.adaptive_epsilon(_trend)
             except Exception:
                 _epsilon = 0.2
+            # 페이스 미달이면 탐색 하한을 강제로 올린다 (착취 고착 방지).
+            if _pace_boost:
+                _epsilon = max(_epsilon, float(_pace_boost))
             # Yield Score 블렌딩 (v8) — 통과 없는 시뮬만 쌓는 arm 을 감점하고
             # 쿼터가 고수율 arm 으로 흐르게 한다. epsilon 탐색은 그대로 유지.
             # ⚠ 프라이어는 0.5 가 아니라 **전역 yield** 에 앵커링한다 — 라이브 실측

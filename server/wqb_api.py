@@ -48,6 +48,10 @@ _POLL_STALL_S = float(os.environ.get('IQC_SIM_POLL_STALL_S', '900'))
 # Retry-After 가 없을 때의 기본 간격. 있으면 그쪽이 이긴다(BRAIN API 문서의 계약).
 _POLL_INTERVAL_S = float(os.environ.get('IQC_SIM_POLL_INTERVAL_S', '5'))
 _POLL_RETRY_AFTER_MAX_S = 60.0
+# 꼬리 절단(abort_event)을 존중하기 전 최소 폴링 시간. 긴 슬롯 대기(수십 분) 끝에
+# 접수된 시뮬은 tail_event 가 이미 켜진 채 폴링을 시작한다 — 유예 없이는 progress 를
+# 한 번 읽어 보기도 전에 갓 접수된 시뮬을 즉시 버리게 된다(2026-07-31).
+_TAIL_MIN_POLL_S = float(os.environ.get('IQC_SIM_TAIL_MIN_POLL_S', '600'))
 
 
 def _clamp_retry_after(v: float, floor_s: float) -> float:
@@ -857,6 +861,18 @@ class WqbApiClient:
             LOG.warning('pending_persona read err: %s', e)
             return None
 
+    def _persona_finalized(self) -> bool:
+        """finalize 확정 후 공통 마무리 — 세션 저장·pending 정리·만료 갱신.
+        ⚠ 만료 갱신을 빼먹으면 .meta 가 옛 값에 얼어붙어 선제 갱신이 불가능해진다
+        (실측 2026-07-12)."""
+        self._save_session()
+        self._clear_pending()
+        self.persona_required = False
+        self._authed = True
+        self._ensure_expiry(force=True)
+        self._clear_refresh_attempt()
+        return True
+
     def complete_persona(self, inquiry=None) -> bool:
         try:
             # Always restore the cookies from the challenge-creating request.
@@ -874,30 +890,25 @@ class WqbApiClient:
                     inquiry = _extract_inquiry_from_url(pu) or None
             if not inquiry:
                 return False
-            r = self.session.post(f'{BASE}/authentication/persona', json={'inquiry': inquiry}, timeout=30)
+            try:
+                # ⚠ finalize 는 느릴 수 있다 — WQB 가 Persona inquiry 상태를 서버측에서
+                #   확인한다. 30초 타임아웃이 성공한 finalize 를 실패로 오판했었다
+                #   (2026-07-31 실측: read timeout 후 세션은 이미 인증돼 있었음).
+                r = self.session.post(f'{BASE}/authentication/persona',
+                                      json={'inquiry': inquiry}, timeout=90)
+            except (requests.Timeout, requests.ConnectionError) as e:
+                # finalize 가 서버측에 이미 착지했을 수 있다 — 세션 유효성으로 확정.
+                LOG.warning('complete_persona finalize 네트워크 오류(%s) — 세션 유효성으로 확정', e)
+                return self._persona_finalized() if self._session_valid() else False
             if r.status_code in (200, 201):
                 # finalize succeeded — session is now authenticated; persist its cookies
-                self._save_session()
-                self._clear_pending()
-                self.persona_required = False
-                self._authed = True
-                # ⚠ 여기서 만료를 갱신하지 않아 .meta 가 3일째 옛 값에 얼어붙어 있었다
-                #   (실측 2026-07-12). 만료를 모르면 선제 갱신 자체가 불가능하다.
-                self._ensure_expiry(force=True)
-                self._clear_refresh_attempt()
-                return True
+                return self._persona_finalized()
             if r.status_code == 410:
                 # WQB returns 410 Gone for finalized or expired inquiries. Success still
                 # requires the same session to pass GET /authentication.
                 LOG.info('complete_persona 410 Gone — verifying current WQB session')
                 if self._session_valid():
-                    self._save_session()
-                    self.persona_required = False
-                    self._clear_pending()
-                    self._authed = True
-                    self._ensure_expiry(force=True)
-                    self._clear_refresh_attempt()
-                    return True
+                    return self._persona_finalized()
                 LOG.warning('complete_persona 410 Gone but session verification failed; clearing stale pending persona')
                 self.persona_required = False
                 self._authed = False
@@ -1192,7 +1203,7 @@ class WqbApiClient:
             return False
 
     def submit_simulation(self, expr: str, settings: dict,
-                          _retry_auth: bool = False) -> str | None:
+                          _retry_auth: bool = False, _retry_net: bool = False) -> str | None:
         if not self._ensure_auth():
             return None
         body = {'type': 'REGULAR', 'settings': self._full_settings(settings), 'regular': expr}
@@ -1203,6 +1214,13 @@ class WqbApiClient:
                          'Access-Control-Request-Headers': 'Location',
                          'Accept': _API_ACCEPT})
         except Exception as e:
+            # 슬롯 대기(수 분~수십 분) 동안 논 keep-alive 를 서버가 끊으면 첫 POST 가
+            # RemoteDisconnected 로 죽는다 — 새 커넥션으로 1회만 재시도한다.
+            # (시뮬 접수라 만에 하나 중복 생성돼도 슬롯 1개 손해로 그친다.)
+            if not _retry_net:
+                LOG.warning('submit network err: %s — 1회 재시도', e)
+                return self.submit_simulation(expr, settings,
+                                              _retry_auth=_retry_auth, _retry_net=True)
             LOG.warning('submit network err: %s', e); return None
         self._capture_sim_quota(r)
         if r.status_code == 429:  # CONCURRENT_SIMULATION_LIMIT_EXCEEDED
@@ -1428,7 +1446,7 @@ class WqbApiClient:
         last_change = start
         prev_mark = None
         n_auth = 0              # 연속 401/403 횟수
-        saw_status = False      # 한 번이라도 status 를 받았는가(= 시뮬이 시작됐는가)
+        saw_status = False      # status 또는 progress>0 을 받았는가(= 시뮬이 시작됐는가)
         n_blind = 0             # status 를 못 읽은 턴 수 (대기열 + 429/5xx)
         while True:
             now = _time.monotonic()
@@ -1436,8 +1454,10 @@ class WqbApiClient:
                 reason = 'poll deadline'
                 break
             # 꼬리 절단 — 형제가 다 끝났는데 아직 시작조차 못 한 접수는 버린다.
-            # 이미 돌기 시작한(status 를 받은) 시뮬은 절대 건드리지 않는다.
-            if not saw_status and abort_event is not None and abort_event.is_set():
+            # 이미 돌기 시작한(status/progress 를 받은) 시뮬은 절대 건드리지 않고,
+            # 갓 접수돼 폴링 나이가 _TAIL_MIN_POLL_S 미만인 시뮬도 봐준다.
+            if (not saw_status and abort_event is not None and abort_event.is_set()
+                    and now - start >= _TAIL_MIN_POLL_S):
                 reason = 'tail cut (형제 완료 후에도 대기열에서 미시작)'
                 break
             if stop_event is not None and stop_event.is_set():
@@ -1500,6 +1520,15 @@ class WqbApiClient:
             #   (2026-07-21 실측: 최근 25건 중 4건이 전부 `status=None` 정체로 오판됐다.)
             if last['status'] is not None:
                 saw_status = True
+            # ⚠ WQB 는 **실행 중에도 status 없이 progress 만** 준다(status 는 완료 때만).
+            #   status 로만 '시작'을 판정하면 실행 중 시뮬이 전부 '대기열 미시작'으로
+            #   보인다 → 꼬리 절단이 돌던 시뮬만 죽였다(7/29~31 실측: tail cut 13건
+            #   전부 progress 0.1~0.35, 진짜 미시작을 자른 적은 0건).
+            try:
+                if float(last['progress'] or 0) > 0:
+                    saw_status = True
+            except (TypeError, ValueError):
+                pass
             if not readable or last['status'] is None:
                 n_blind += 1
                 # ⚠ status 가 아예 없는 200 응답은 **대기열**이다(정체가 아니다).

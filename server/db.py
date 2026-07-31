@@ -2792,6 +2792,42 @@ def insert_hypothesis(run_id: int, user_id: int, h: dict[str, Any]) -> int:
         return int(cur.lastrowid)
 
 
+# ── 페이스메이커 조회 (2026-07-31) ───────────────────────────────────────────
+@_with_conn
+def pass_count_since(conn, user_id: int, since_ts: float) -> int:
+    """since_ts 이후 전 체크 통과 알파 수 — 발굴 페이스 실측."""
+    row = conn.execute(
+        'SELECT COUNT(*) FROM alphas WHERE user_id=? AND ts>=? '
+        'AND pass_count>0 AND fail_count=0', (user_id, since_ts)).fetchone()
+    return int(row[0] or 0)
+
+
+@_with_conn
+def recent_alpha_material(conn, user_id: int, since_ts: float) -> list[tuple]:
+    """(genome_json, code) 목록 — 패밀리/필드 사용 빈도 집계용."""
+    return [(r[0] or '', r[1] or '') for r in conn.execute(
+        'SELECT genome, code FROM alphas WHERE user_id=? AND ts>=?',
+        (user_id, since_ts))]
+
+
+@_with_conn
+def error_count_like(conn, user_id: int, since_ts: float, pattern: str) -> int:
+    """since_ts 이후 error_text LIKE 패턴 건수 — 인증 사망 등 감지."""
+    row = conn.execute(
+        'SELECT COUNT(*) FROM alphas WHERE user_id=? AND ts>=? AND error_text LIKE ?',
+        (user_id, since_ts, pattern)).fetchone()
+    return int(row[0] or 0)
+
+
+@_with_conn
+def last_hypothesis_ts(conn, user_id: int, title_prefix: str) -> float | None:
+    """title 이 prefix 로 시작하는 최신 가설 시각 — 자동 시딩 쿨다운용."""
+    row = conn.execute(
+        'SELECT MAX(created_at) FROM hypotheses WHERE user_id=? AND title LIKE ?',
+        (user_id, title_prefix + '%')).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
 def list_hypotheses(run_id: int) -> list[dict[str, Any]]:
     init()
     with _DB_LOCK, _connect() as conn:

@@ -278,6 +278,31 @@ class Genome:
 # Genius 타이브레이커도 '알파당 distinct 연산자/필드 수가 적을수록 유리' 하다.
 CANONICAL_LOOKBACKS = (2, 3, 5, 10, 20, 60, 120, 252)
 
+# 강신호 골격 8종 (2026-07-31) — 무작위 슬롯의 절반에 입힌다. 균등 무작위
+# 변환×결합 조합은 대부분 잡음이라 신선 필드 프로브가 광맥을 못 뚫는다
+# (이번 주 news/analyst 프로브 ~300개 전멸). 같은 신선 필드에 이 골격을 입힌
+# 시드는 당일 전 체크 통과를 만들었다(리비전 모멘텀·잔차화·감성 델타 등
+# 부트캠프 강의의 검증된 시드 템플릿). 키는 Genome 유전자명과 일치해야 한다.
+STRONG_TEMPLATES = (
+    dict(transform_a="ts_zscore", transform_b="ts_zscore", combine="sum",
+         sign=1, lookback_a=60, lookback_b=60, decay=6),
+    dict(transform_a="rank", transform_b="rank", combine="spread",
+         sign=-1, lookback_a=20, lookback_b=20, decay=4),
+    dict(transform_a="ts_delta", transform_b="ts_mean", combine="sum",
+         sign=-1, lookback_a=3, lookback_b=10, decay=2),
+    dict(transform_a="ts_zscore", transform_b="ts_zscore", combine="resid",
+         sign=1, lookback_a=20, lookback_b=20, decay=4),
+    dict(transform_a="ts_delta", transform_b="ts_zscore", combine="product",
+         sign=-1, lookback_a=5, lookback_b=20, decay=4, hump=0.03),
+    dict(transform_a="ts_zscore", transform_b="ts_zscore", transform_c="ts_zscore",
+         combine="triple", sign=1, lookback_a=60, lookback_b=60, lookback_c=60,
+         decay=6),
+    dict(transform_a="ts_av_diff", transform_b="ts_mean", combine="ratio",
+         sign=1, lookback_a=60, lookback_b=120, decay=8),
+    dict(transform_a="ts_rank", transform_b="ts_zscore", combine="corr",
+         sign=-1, lookback_a=20, lookback_b=20, decay=2),
+)
+
 
 def _next_longer(v: int) -> int:
     """표준 창 중 v 보다 큰 첫 값 (없으면 252). smooth 축이 창을 늘릴 때 쓴다 —
@@ -322,7 +347,10 @@ _REGIME_CONDS = {
 # 6월 3.77 알파는 0.055, 3.43 알파는 0.03 을 썼다. 0 = off.
 HUMPS = (0.0, 0.01, 0.03, 0.055, 0.1)
 GROUP_OPS = ("neutralize", "rank", "zscore", "none")
-GROUP_BYS = ("auto", "sector", "industry", "subindustry", "market")
+# country (2026-07-31): GLB 리전에서 나라별 강건성을 올리는 그룹 축 — 부트캠프 3주차
+# 강의(GAC)의 "컨트리 기준 그룹 중립화가 리전 서브유니버스 통과에 유리" 반영.
+# 단일국 리전(USA)에선 퇴화(무해)라 팔레트에 그냥 둔다.
+GROUP_BYS = ("auto", "sector", "industry", "subindustry", "market", "country")
 WINSOR_STDS = (0, 3, 4, 5)
 # 2팩터 가중 — 'a:b' = 첫 팩터 a배, 둘째 팩터 b배. sum/spread 결합에서만 발현한다
 # (product/ratio/corr 은 스케일이 상쇄되거나 의미가 달라져 가중이 무의미).
@@ -1561,7 +1589,7 @@ class BaseGenomeModel:
     def _genome(self, slot: int, rng: random.Random) -> Genome:
         family = self.families[(slot - 1) % len(self.families)]
         fields = _pick_fields(rng, family, self.forbidden, self.forced_delay)
-        return Genome(
+        g = Genome(
             model=self.name,
             family=family,
             fields=fields,
@@ -1592,6 +1620,13 @@ class BaseGenomeModel:
             regime=(rng.choice(REGIME_KINDS[1:]) if rng.random() < 0.25 else "OFF"),
             hump=(rng.choice(HUMPS[1:]) if rng.random() < 0.25 else 0.0),
         )
+        # 무작위 슬롯의 절반은 검증된 강신호 골격을 입힌다 — 신선 필드(위의 순환
+        # 팔레트)는 유지하고 변환·결합·감쇠만 교체. 나머지 절반은 순수 무작위로
+        # 신조합 탐침을 유지한다. 골격은 라운드×슬롯으로 순환해 8종을 고루 쓴다.
+        if rng.random() < 0.5:
+            tpl = STRONG_TEMPLATES[(self.round_num + slot) % len(STRONG_TEMPLATES)]
+            g = Genome(**{**g.__dict__, **tpl})
+        return g
 
     def _desc(self, g: Genome, origin: str = "random") -> str:
         tag = {"mutate": "mut", "crossover": "xo", "random": "rand",
