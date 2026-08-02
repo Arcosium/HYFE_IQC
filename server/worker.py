@@ -932,6 +932,15 @@ class Worker(threading.Thread):
         except Exception as e:
             self._log_quiet(0, f'⚠ 페이스메이커 실패(무시): {e}')
 
+        # 🎯 자동 제출 푸시 (2026-08-02 사장 지시) — 오늘 제출이 목표 미달이면
+        # 검증 골격 × 신선 축 스펙을 스스로 장전한다. pending_specs 조회 전에
+        # 넣어야 이번 라운드가 바로 소비한다.
+        try:
+            from . import submit_push as _push
+            _push.maybe_seed(self.user_id, log_fn=lambda m: self._log(0, m))
+        except Exception as e:
+            self._log_quiet(0, f'⚠ 자동 제출 푸시 실패(무시): {e}')
+
         u = _db.get_user(self.user_id)
 
         # ④ 상관벽 메모리 홀드셋은 '같은 라운드 안의 형제' 차단용이다. 라운드가 끝나면

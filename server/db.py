@@ -1455,6 +1455,15 @@ def _hydrate_alpha_row(r) -> dict[str, Any] | None:
         return None
     if not isinstance(d['genome'], dict) or not d['genome']:
         return None
+    # 사다리 사망은 부모 자격이 없다 — IS_LADDER_SHARPE(최근 구간 수익 전무)는
+    # 변주로 안 고쳐진다(8/1 실측). 이 실격이 없으면 고샤프 ladder-dead 클러스터가
+    # sharpe 기반 selection_score 로 엘리트·명예의전당을 점령해 같은 가계 변주만
+    # 계속 나온다(8/2 오후 실측: 게이트 시도 106중 91이 ladder 실패, 제출 0).
+    # LOW_2Y_SHARPE 는 같은 검사의 단일데이터셋 이름(criteria.py: 다중=IS_LADDER,
+    # 단일=LOW_2Y)이라 함께 거른다 — 한쪽만 거르면 같은 가계가 이름만 바꿔 살아남는다.
+    _fi = str(d.get('fail_items') or '')
+    if 'LADDER' in _fi or 'LOW_2Y' in _fi:
+        return None
     # 유전체 JSON 이 lineage 의 권위. 컬럼은 폴백.
     d['genome'].setdefault('generation', int(d.get('generation') or 0))
     sh = d['metrics'].get('sharpe')
@@ -1474,7 +1483,7 @@ def _hydrate_alpha_row(r) -> dict[str, Any] | None:
 
 _SEED_COLS = ('id, code, code_hash, desc, pass_count, fail_count, error_count, '
               'metrics, round_num, idx, universe, neutralization, decay, truncation, '
-              'self_corr, generation, genome')
+              'self_corr, generation, genome, fail_items')
 
 
 def hall_of_fame_seeds(user_id: int, top_n: int = 2, *,
@@ -2816,6 +2825,30 @@ def error_count_like(conn, user_id: int, since_ts: float, pattern: str) -> int:
     row = conn.execute(
         'SELECT COUNT(*) FROM alphas WHERE user_id=? AND ts>=? AND error_text LIKE ?',
         (user_id, since_ts, pattern)).fetchone()
+    return int(row[0] or 0)
+
+
+@_with_conn
+def submitted_count_since(conn, user_id: int, since_ts: float) -> int:
+    """since_ts 이후 WQB 제출 성사 수 — 자동 제출 푸시 목표 실측."""
+    row = conn.execute(
+        'SELECT COUNT(*) FROM alphas WHERE user_id=? AND ts>=? AND submitted=1',
+        (user_id, since_ts)).fetchone()
+    return int(row[0] or 0)
+
+
+@_with_conn
+def code_sharpe_submitted_since(conn, user_id: int, since_ts: float) -> list[tuple]:
+    """(code, sharpe, submitted) 목록 — 축 소진/죽은 축 판정용."""
+    return [(r[0] or '', r[1], int(r[2] or 0)) for r in conn.execute(
+        'SELECT code, sharpe, submitted FROM alphas WHERE user_id=? AND ts>=?',
+        (user_id, since_ts))]
+
+
+@_with_conn
+def latest_run_id(conn, user_id: int) -> int:
+    row = conn.execute(
+        'SELECT MAX(run_id) FROM hypotheses WHERE user_id=?', (user_id,)).fetchone()
     return int(row[0] or 0)
 
 
