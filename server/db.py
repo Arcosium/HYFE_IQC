@@ -659,6 +659,21 @@ def record_submit_attempt(conn, user_id: int, round_num: int, idx: int, code: st
 REJECT_MEMORY_S = float(os.environ.get('IQC_REJECT_MEMORY_S', str(24 * 3600)))
 
 
+def code_submitted_before(user_id: int, code: str) -> bool:
+    """같은 식이 이미 제출 성공(OS)됐는가 — 동일 코드 재제출은 영구 무의미.
+
+    family_dup_today 벽 제거(2026-08-03) 후의 최소 가드: GA 후보 생성이 결정론이라
+    이미 OS 에 오른 이기는 식이 그대로 재생산·재시뮬되는데(8/3 새벽 5건 실측),
+    그걸 다시 내면 WQB 만 두드리는 무의미 왕복이다. 형제(다른 식)는 막지 않는다."""
+    if not code:
+        return False
+    init()
+    with _DB_LOCK, _connect() as conn:
+        return conn.execute(
+            'SELECT 1 FROM alphas WHERE user_id=? AND code=? AND submitted=1 LIMIT 1',
+            (user_id, code)).fetchone() is not None
+
+
 def code_rejected_before(user_id: int, code: str,
                          since_s: float | None = None) -> str | None:
     """같은 식이 **최근에** WQB 에 거절당했으면 그 사유. 없으면 None.
@@ -3163,8 +3178,8 @@ def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
     since = time.time() - float(since_s)
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
-            "SELECT genome, submit_status FROM alphas WHERE user_id=? AND ts>? "
-            "AND submit_status LIKE 'rejected:%' AND genome IS NOT NULL",
+            "SELECT genome, code, submit_status FROM alphas WHERE user_id=? AND ts>? "
+            "AND submit_status LIKE 'rejected:%'",
             (user_id, since),
         ).fetchall()
     needle = (reason_contains or '').upper()
@@ -3172,12 +3187,25 @@ def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
     for r in rows:
         if needle and needle not in str(r['submit_status'] or '').upper():
             continue
+        # 유전체 fields 와 코드 추출 두 표현을 **모두** 센다 — GA 유전체 상당수가
+        # fields 를 안 담아(2026-08-03 실측) 유전체만 보면 벽이 전면 무력화되고,
+        # 코드만 보면 유전체를 쓰는 게이트 측과 표현이 어긋나 매칭이 깨진다.
+        sets: set[frozenset] = set()
         try:
-            g = json.loads(r['genome'])
+            g = json.loads(r['genome'] or '{}')
             fs = frozenset(str(f) for f in (g.get('fields') or []) if f)
+            if fs:
+                sets.add(fs)
         except (TypeError, ValueError):
-            continue
-        if fs:
+            pass
+        try:
+            from . import alpha_ast as _ast
+            fs2 = frozenset(_ast.fields_used(str(r['code'] or '')))
+            if fs2:
+                sets.add(fs2)
+        except Exception:
+            pass
+        for fs in sets:
             cnt[fs] = cnt.get(fs, 0) + 1
     return [fs for fs, n in cnt.items() if n >= int(min_count)]
 

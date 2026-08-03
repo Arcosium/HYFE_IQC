@@ -145,18 +145,20 @@ def test_parse_json_object_with_preamble():
     assert committee._parse_json_object('json 아님') == {}
 
 
-def test_submit_gate_fieldset_cooldown(monkeypatch):
-    """같은 필드셋이 24h 내 3회+ 거절됐으면 제출 보류 — 2026-07-24 19연속 거절 회귀."""
+def test_submit_gate_no_fieldset_walls(monkeypatch):
+    """필드셋 벽(쿨다운·상관·테마)은 전부 제거됐다 — 2026-08-03 사장:
+    "제출은 일단 해본다". 거절은 쿼터 무소모고 필드셋 수준 예측은 오탐이
+    실재한다(S=1.79·체크 8/0 알파가 상관벽에 보류된 실측). 어떤 거절 이력의
+    필드셋이라도 제출 경로를 계속 타야 한다."""
     from server import worker, db as _db
     w = worker.Worker.__new__(worker.Worker)   # 스레드 시작 없이 게이트만
     w.user_id = 2
+    w._corr_fs_hold = {frozenset({'f1', 'f2', 'f3'})}
     cool = frozenset({'f1', 'f2', 'f3'})
-    monkeypatch.setattr(_db, 'rejected_fieldsets', lambda uid, **k: [cool])
     monkeypatch.setattr(_db, 'submitted_today', lambda uid: 0)
+    monkeypatch.setattr(_db, 'code_rejected_before', lambda uid, code, **k: None)
+    monkeypatch.setattr(_db, 'code_submitted_before', lambda uid, code: False)
+    monkeypatch.setattr(_db, 'rejected_fieldsets', lambda uid, **k: [cool])
     ok, reason = w._submit_gate({'sharpe': 2.0}, None, fail_items=[],
                                 genome={'fields': ['f2', 'f1', 'f3']})
-    assert not ok and reason == 'fieldset_cooldown(24h)'
-    # 다른 필드셋은 통과 경로로 계속 (예산/가치 게이트로 넘어간다)
-    ok2, reason2 = w._submit_gate({'sharpe': 2.0}, None, fail_items=[],
-                                  genome={'fields': ['x', 'y', 'z']})
-    assert reason2 != 'fieldset_cooldown(24h)'
+    assert 'cooldown' not in reason and 'wall' not in reason

@@ -565,6 +565,43 @@ def family_pools(per_family: int | None = None,
     return out
 
 
+def region_field_names(delay=None, region=None, universe=None,
+                       datasets=None) -> frozenset:
+    """조건에 **실존하는 전체** 필드명 — family_pools 와 달리 계열분류·계열당
+    상한·커버리지 컷을 적용하지 않는다. `_apply_constraint` 의 존재 검사 전용:
+    캡 걸린 풀로 존재를 검사하면 멀쩡한 필드가 '리전에 없음'으로 오판돼 몰래
+    치환된다 (2026-08-03 실측: 전략스펙 resvol→srisk, divyild→indmom 둔갑).
+    빈 frozenset = '이 조건 팔레트가 없다' (호출부는 검사 자체를 접어야 한다)."""
+    want_delay = None if delay is None else str(delay).strip()
+    want_region = None if region is None else str(region).strip().upper()
+    want_universe = None if universe is None else str(universe).strip().upper()
+    _ds = frozenset(str(d) for d in datasets) if datasets else None
+    try:
+        _mt = os.path.getmtime(_LIVE_CSV_PATH)
+    except OSError:
+        _mt = 0
+    _dskey = ('all' if _ds is None else f'{len(_ds)}:{hash(_ds) & 0xffffff:06x}')
+    key = f'names:{want_delay}:{want_region}:{want_universe}:{_mt:.0f}:{_dskey}'
+    with _POOL_LOCK:
+        if key in _POOL_CACHE:
+            return _POOL_CACHE[key]
+    rows = _all_rows()
+    if want_delay is not None:
+        rows = [r for r in rows if str(r.get('delay') or '').strip() == want_delay]
+    if want_region is not None:
+        rows = [r for r in rows
+                if str(r.get('region') or '').strip().upper() == want_region]
+    if want_universe is not None:
+        rows = [r for r in rows
+                if str(r.get('universe') or '').strip().upper() == want_universe]
+    if _ds is not None:
+        rows = [r for r in rows if str(r.get('category') or '').strip() in _ds]
+    names = frozenset((r.get('name') or '').strip() for r in rows) - {''}
+    with _POOL_LOCK:
+        _POOL_CACHE[key] = names
+    return names
+
+
 def vector_field_names() -> set[str]:
     """type 컬럼이 vector 인 필드명 집합 (lowercase). raw 로 쓰면 시뮬이 죽으므로
     genome_models 가 vec_avg() 로 감싸야 한다."""

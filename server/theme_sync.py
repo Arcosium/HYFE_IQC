@@ -191,7 +191,10 @@ def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
         return None
     theme = current_theme(text)
     if not theme:
-        LOG.warning('theme sync — 이번 주 테마를 문서에서 못 찾음')
+        # 문서 미갱신(월초 8월 표 미게시 등) — 6h TTL 을 다 기다리면 새 테마 적용이
+        # 반나절 늦는다. 45분 뒤 재확인하도록 마지막 체크 시각을 당겨 놓는다.
+        _last_check['ts'] = now - _TTL_S + 45 * 60
+        LOG.warning('theme sync — 이번 주 테마를 문서에서 못 찾음 (45분 뒤 재확인)')
         return None
     if _norm(theme) == cur:
         run_config.set_theme_last_applied(theme)   # 수동으로 같은 값 넣은 경우 귀속

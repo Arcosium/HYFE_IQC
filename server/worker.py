@@ -323,6 +323,12 @@ class Worker(threading.Thread):
             prior = None
         if prior:
             return False, f'already_rejected({prior[len("rejected:"):][:60]})'
+        # 동일 코드가 이미 OS 에 있으면 재제출 무의미 — 형제(다른 식)는 통과시킨다.
+        try:
+            if _db.code_submitted_before(self.user_id, str(code or '')):
+                return False, 'already_submitted'
+        except Exception:
+            pass
         # 📋 제출 모드 = 'list' — 자동 제출하지 않고 대기 목록에만 쌓는다(사용자 선택).
         #    차단 FAIL 검사 **뒤**에 둔다: WQB 가 어차피 거절할 알파로 목록을 채우면
         #    사람이 골라야 할 것이 묻힌다. kind='manual' 은 큐 드레인이 건드리지 않는다.
@@ -345,33 +351,11 @@ class Worker(threading.Thread):
         # 제출을 보류한다. 상관(PROD/PP)은 아이디어=필드 수준 속성이라 중립화·감쇠만
         # 바꾼 형제는 같은 벽에 부딪힌다(실측: 같은 mdl177 3종 변형 19연속 거절).
         # 시뮬·학습은 그대로 — **제출 API 만** 아낀다.
-        if genome:
-            try:
-                fs = frozenset(str(f) for f in (dict(genome).get('fields') or []) if f)
-                if fs and fs in set(_db.rejected_fieldsets(self.user_id)):
-                    return False, 'fieldset_cooldown(24h)'
-                # ④ 패밀리 상관벽 — 상관은 필드셋(아이디어) 수준 속성이라 대표 1회의
-                # CORRELATION 거절이면 같은 필드셋 형제 전원을 24h 보류한다(AAF 패밀리
-                # 트리의 '대표만 검사' 경제화). 탈상관 focus 자식은 필드를 바꾸므로
-                # 다른 필드셋 = 통과. 시뮬·학습은 그대로, **제출 API 만** 아낀다.
-                if fs and (fs in self._corr_fs_hold
-                           or fs in set(_db.rejected_fieldsets(
-                               self.user_id, min_count=1,
-                               reason_contains='CORRELATION'))):
-                    return False, 'family_corr_wall(24h)'
-                # PURE_POWER_POOL_THEME 도 필드셋 수준 속성이다 — 순수 PP 테마
-                # 데이터셋 조합은 품질과 무관하게 거절된다(2026-07-26 실측 3건).
-                # 같은 필드셋 형제의 제출 시도는 제출 락만 낭비하므로 24h 보류.
-                if fs and fs in set(_db.rejected_fieldsets(
-                        self.user_id, min_count=1,
-                        reason_contains='PURE_POWER_POOL')):
-                    return False, 'family_pure_theme_wall(24h)'
-                # ④ 일일 패밀리 dedup — 오늘 이미 같은 필드셋을 성공 제출했으면 예산
-                # 4칸을 형제가 잠식하지 않게 보류(내일 다시 가능).
-                if fs and fs in set(_db.submitted_fieldsets_today(self.user_id)):
-                    return False, 'family_dup_today'
-            except Exception as e:
-                LOG.warning('fieldset cooldown 조회 실패 (제출 계속): %s', e)
+        # 필드셋 벽(일반 쿨다운·상관벽·테마 순수성벽)은 2026-08-03 사장 지시로 전부
+        # 제거 — "제출은 일단 해본다". 거절은 쿼터를 안 쓰고, 필드셋 수준 예측은
+        # 오탐이 실재한다(그날 S=1.79·체크 8/0 알파가 상관벽에 보류된 실측).
+        # 동일 코드 가드(already_rejected/already_submitted)만 남긴다 — 같은 식은
+        # 같은 판정이라 재전송이 무의미한 유일한 경우다.
         # ⏳ 제출 보류창 (2026-07-27 사장 지시) — 테마 경계(KST 09:00)와 예산
         # 리셋(KST 13:00)이 다른 시계라, 그 사이에 새 테마 알파를 내면 **전날
         # 예산**을 쓴다. 예산이 열릴 때까지 큐에 재워 하루치를 온전히 쓴다.
@@ -2462,14 +2446,8 @@ def _skip_reason_ko(sub_st: str) -> str:
         return r[len('blocking_fail'):].strip('()')
     if r.startswith('already_rejected'):
         return f'같은 식이 이미 거절됨 — {r[len("already_rejected"):].strip("()")}'
-    if r.startswith('fieldset_cooldown'):
-        return '같은 필드 조합이 최근 반복 거절돼 24h 보류'
-    if r.startswith('family_corr_wall'):
-        return '같은 아이디어가 상관으로 거절된 적 있어 24h 보류'
-    if r.startswith('family_pure_theme_wall'):
-        return '같은 필드 조합이 테마 순수성으로 거절돼 24h 보류'
-    if r.startswith('family_dup_today'):
-        return '오늘 같은 필드 조합을 이미 제출 — 예산 아끼려 보류'
+    if r.startswith('already_submitted'):
+        return '같은 식이 이미 제출됨(OS) — 재제출 무의미'
     if r.startswith('below_value'):
         return f'품질 문턱 미달 {r[len("below_value"):].strip("()")}'
     return r        # 모르는 사유는 통째로 넘긴다 — 잘라내면 사유가 사유 아닌 게 된다

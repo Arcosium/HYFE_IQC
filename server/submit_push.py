@@ -24,7 +24,9 @@ from .pace_keeper import DAY_BOUNDARY_HOUR
 
 LOG = logging.getLogger('genomicwqb.submit_push')
 
-DAILY_SUBMIT_TARGET = int(os.environ.get('IQC_PUSH_DAILY_SUBMITS', '1'))
+# 목표 = 일일 쿼터 전부 (2026-08-03 사장: "최대한 많이 찾아서 전부 제출").
+# 예산 초과 시도는 게이트가 대기 큐로 돌리니 과장전 리스크는 없다.
+DAILY_SUBMIT_TARGET = int(os.environ.get('IQC_PUSH_DAILY_SUBMITS', '4'))
 # 집중 창 — 경계(13:00) 직전 3시간(=10:00부터) 동안만, 웨이브를 라운드마다 연사한다
 # (2026-08-02 사장: "기준 오전 10시로 해서 3시간동안 빡세게"). 쿨다운은 겹장전
 # 방지용 바닥값일 뿐, 실제 페이싱은 라운드 주기(15~25분)가 맡는다.
@@ -148,7 +150,8 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
     now = _time.time() if now is None else now
     if not _in_window(now):
         return 0
-    if _db.submitted_count_since(user_id, _day0(now)) >= DAILY_SUBMIT_TARGET:
+    done = _db.submitted_count_since(user_id, _day0(now))
+    if done >= DAILY_SUBMIT_TARGET:
         return 0
     if _db.pending_specs(user_id, limit=1):
         return 0                                  # 탄약 소화 중 — 겹장전 금지
@@ -206,6 +209,6 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
             n += 1
     if n and log_fn:
         axes = ', '.join(f.rsplit('_', 1)[-1] for f in cands[:AXES_PER_WAVE])
-        log_fn(f'🎯 자동 제출 푸시 — 오늘 제출 0/{DAILY_SUBMIT_TARGET}, '
+        log_fn(f'🎯 자동 제출 푸시 — 오늘 제출 {done}/{DAILY_SUBMIT_TARGET}, '
                f'신선 축 [{axes}] ±양부호 스펙 {n}개 장전')
     return n

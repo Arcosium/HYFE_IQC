@@ -719,6 +719,8 @@ _CONSTRAINT_BANNED_FIELDS: frozenset = frozenset()
 # 비면 '모름' — 강제하지 않는다(fail-open). GLB 첫 라운드 8/8 'unknown variable'
 # 전멸이 신설 이유: USA 큐레이션 필드는 타 리전에 존재하지 않는 게 많다.
 _REGION_DATASETS: dict = {}
+# 조건 리전에 실존하는 **전체** 필드 (캡 없는 존재 검사용 — _apply_constraint 참조).
+_REGION_FULL_FIELDS: frozenset | None = None
 
 
 _ACCOUNT_DATASETS = None      # 이 계정이 접근 가능한 dataset.id 집합. None = 제한 없음.
@@ -738,7 +740,8 @@ def set_account_datasets(ids) -> None:
 
 def set_constraint(spec) -> None:
     """탐색 조건을 건다. spec=None 이면 해제."""
-    global _ACTIVE_CONSTRAINT, _CONSTRAINT_BANNED_FIELDS, _REGION_DATASETS
+    global _ACTIVE_CONSTRAINT, _CONSTRAINT_BANNED_FIELDS, _REGION_DATASETS, \
+        _REGION_FULL_FIELDS
     if spec is not None and getattr(spec, 'is_empty', lambda: False)():
         spec = None
     _ACTIVE_CONSTRAINT = spec
@@ -755,6 +758,7 @@ def set_constraint(spec) -> None:
     #   (b) 계정 등급 제한 — 일반 계정은 접근 가능한 데이터셋이 훨씬 적다(USA 라도)
     _region = str(getattr(spec, 'region', '') or '').upper() if spec is not None else ''
     pools: dict = {}
+    full: frozenset | None = None
     if spec is not None and (_region not in ('', 'USA') or _ACCOUNT_DATASETS is not None):
         try:
             from . import datafield_palette as _dfp
@@ -764,9 +768,17 @@ def set_constraint(spec) -> None:
                 datasets=_ACCOUNT_DATASETS) or {}
             pools = {fam: tuple(names) for fam, names in pools.items()
                      if names and not all(_f in _CONSTRAINT_BANNED_FIELDS for _f in names)}
+            # 존재 검사는 캡 없는 전체 집합으로 — 풀(캡·계열분류·커버리지 컷)로
+            # 검사하면 실존 필드가 치환된다(2026-08-03 resvol→srisk 실측).
+            full = _dfp.region_field_names(
+                delay=(spec.delay if spec.delay is not None else 1),
+                region=(spec.region or 'USA'), universe=spec.universe,
+                datasets=_ACCOUNT_DATASETS) or None
         except Exception:
             pools = {}
+            full = None
     _REGION_DATASETS = pools
+    _REGION_FULL_FIELDS = (frozenset(full) - _CONSTRAINT_BANNED_FIELDS) if full else None
 
 
 def region_allowed_fields() -> frozenset | None:
@@ -950,9 +962,12 @@ def _apply_constraint(d: dict) -> None:
     # 지역 팔레트 강제 (2026-07-27) — 조건 리전에 실존하는 필드로 전면 교체.
     # USA 필드를 GLB 에 보내면 'unknown variable' 로 시뮬이 통째로 죽는다.
     allowed_region = region_allowed_fields()
+    # 존재 판정은 캡 없는 전체 집합 우선 — 풀 부분집합으로 판정하면 실존 필드가
+    # '리전에 없음' 오판으로 몰래 치환된다(2026-08-03 전략스펙 resvol→srisk 실측).
+    exists = _REGION_FULL_FIELDS if _REGION_FULL_FIELDS else allowed_region
     if allowed_region is not None:
         flds = list(d.get("fields") or ())
-        if not all(f in allowed_region for f in flds):
+        if not all(f in exists for f in flds):
             fam = str(d.get("family") or "pv")
             pool = list(_REGION_DATASETS.get(fam) or ())
             pool = [f for f in pool if not _field_is_banned(f)]
@@ -972,7 +987,7 @@ def _apply_constraint(d: dict) -> None:
                 base = hash(key) % len(pool)
                 out = []
                 for j, f in enumerate(flds):
-                    if f in allowed_region and f not in out:
+                    if f in exists and f not in out:
                         out.append(f)
                     else:
                         i = base + j

@@ -47,7 +47,7 @@ def test_outside_window_does_nothing(monkeypatch):
 
 
 def test_target_met_does_nothing(monkeypatch):
-    _wire(monkeypatch, submitted=1)
+    _wire(monkeypatch, submitted=sp.DAILY_SUBMIT_TARGET)
     assert sp.maybe_seed(2, now=IN_WINDOW) == 0
 
 

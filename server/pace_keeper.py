@@ -74,7 +74,9 @@ def maybe_intervene(user_id: int, account_type: str = 'research_consultant',
             log_fn(f'🤖 페이스 L{p["level"]} — 오늘 {p["today"]}/{DAILY_TARGET} · '
                    f'7일 {p["week"]}/{WEEKLY_TARGET} → 탐색 강화 ε≥{EPSILON_FLOOR}')
     dead = auth_dead_count(user_id)
-    if dead >= 5 and log_fn:
+    # 진행형일 때만 사람을 부른다 — 3h 트레일링 카운트만 보면 복구 후에도 최대
+    # 3시간 동안 배너가 남아 오탐이 된다(2026-08-03 실측: 07:45 복구 후 09:50 배너).
+    if dead >= 5 and auth_dead_count(user_id, window_s=20 * 60) >= 1 and log_fn:
         log_fn(f'🚨 최근 3시간 인증 사망 {dead}건이 페이스를 깎았습니다 — '
                f'대시보드에서 생체 인증이 필요합니다.')
     return out
