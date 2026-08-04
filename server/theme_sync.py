@@ -164,6 +164,69 @@ def fetch_article_text(username: str, password: str) -> str | None:
         return None
 
 
+_SCOPE_RE = re.compile(r'\b([A-Z]{3})/D(\d)\b')
+
+
+def observed_theme(user_id: int) -> tuple[str, str, str]:
+    """최근 알파의 WQB 체크에서 관측한 **활성 Power Pool 테마** → (이름, region, delay).
+
+    지원문서는 월초에 늦는다(2026-08-04 실측: 8월 표 미게시, 마지막 행이 7/27 주).
+    문서만 원천으로 두면 새 테마가 걸려도 못 알아채고 옛 조건으로 한 달을 간다.
+    알파마다 붙는 MATCHES_THEMES 수확이 두 번째 원천이다 — 이름에 스코프가 들어 있다
+    ('GLB/D1 Power Pool Aug`26').
+    """
+    try:
+        from . import theme_playbook
+        names = theme_playbook.active_themes(int(user_id or 0)).get('all') or []
+    except Exception as e:
+        LOG.warning('활성 테마 관측 실패: %s', e)
+        return '', '', ''
+    for nm in names:
+        if 'power pool' not in nm.lower():
+            continue
+        m = _SCOPE_RE.search(nm)
+        return nm, (m.group(1) if m else ''), (m.group(2) if m else '')
+    return '', '', ''
+
+
+def note_observed_theme(user_id: int, log_fn=None) -> str | None:
+    """활성 테마 이름이 바뀌었으면 기록하고 플레이북을 기동한다. 바뀐 이름을 반환.
+
+    문서 경로(maybe_sync)와 독립이다 — 문서가 늦어도 이쪽이 새 테마를 잡는다.
+    조건 텍스트는 건드리지 않는다. 스코프가 현재 조건과 어긋나면 **경고만** 남긴다.
+    ponytail: 스코프 자동 교정은 안 한다 — 리전이 바뀌면 유니버스도 같이 무효라
+    (TOPDIV3000 은 GLB 전용) 반쪽 교정이 시뮬을 전멸시킨다. 오탐 없는 자동 교정이
+    필요해지면 문서 파싱 결과와 대조해 전체 조건을 갈아끼우는 쪽으로 올린다.
+    """
+    from . import run_config
+    name, region, delay = observed_theme(user_id)
+    if not name or name == run_config.get_theme_active_name():
+        return None
+    run_config.set_theme_active_name(name)
+    LOG.info('활성 테마 실측 변경: %s', name)
+    if log_fn:
+        log_fn(f'🔔 활성 Power Pool 테마 = {name}')
+    spec = None
+    try:
+        spec = run_config.get_constraint()
+    except Exception:
+        pass
+    cur_r = str(getattr(spec, 'region', '') or '').upper()
+    cur_d = str(getattr(spec, 'delay', '') or '')
+    if region and cur_r and region != cur_r or delay and cur_d and delay != cur_d:
+        msg = (f'⚠ 탐색 조건({cur_r}/D{cur_d})이 활성 테마({region}/D{delay})와 다릅니다 '
+               f'— 이대로면 이번 테마엔 한 건도 못 넣습니다.')
+        LOG.warning(msg)
+        if log_fn:
+            log_fn(msg)
+    try:                                   # 새 테마 → 공략 방침 자동 수립
+        from . import theme_playbook
+        theme_playbook.start_background(int(user_id or 0))
+    except Exception as e:
+        LOG.warning('테마 플레이북 기동 실패(무시): %s', e)
+    return name
+
+
 def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
     """필요 시 테마를 확인·적용한다. 조건이 **바뀌었으면** 새 텍스트를 반환.
 

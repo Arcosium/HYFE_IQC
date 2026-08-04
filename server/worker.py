@@ -229,6 +229,8 @@ _MAX_CONSEC_FAILS = 5
 
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY: dict[int, 'Worker'] = {}
+# 프로세스 종료 중 — Worker.run 의 finally 가 running 플래그를 지우지 않게 한다.
+_SHUTTING_DOWN = False
 
 
 def get_or_create(user_id: int) -> 'Worker':
@@ -255,6 +257,8 @@ def cleanup_dead() -> None:
 
 def shutdown_all() -> int:
     """살아 있는 워커 전부에 종료 요청 + 진행 중 시뮬 취소. 취소한 시뮬 수 반환."""
+    global _SHUTTING_DOWN
+    _SHUTTING_DOWN = True
     with _REGISTRY_LOCK:
         workers = list(_REGISTRY.values())
     for w in workers:
@@ -311,18 +315,11 @@ class Worker(threading.Thread):
             # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
-        # 같은 식이 **최근** 거절당했으면 또 보내지 않는다. 후보 생성이 결정론이라
-        # 재시작·재방문 때 같은 식이 다시 만들어져, 이 검사가 없으면 계속 재제출한다
-        # (2026-07-28: 1YzG86aM 이 14분 간격으로 같은 FAIL 5개로 재거절).
-        # IS 판정엔 안 걸리고 제출 시점 판정에만 걸리는 알파라 위 blocking 검사로는 못 막는다.
-        # ⚠ 영구 차단이 아니다 — Power Pool·테마 조건이 바뀌면 통과할 수 있으므로
-        #   db.REJECT_MEMORY_S(기본 24h) 가 지나면 다시 시도한다(사장 지적).
-        try:
-            prior = _db.code_rejected_before(self.user_id, str(code or ''))
-        except Exception:
-            prior = None
-        if prior:
-            return False, f'already_rejected({prior[len("rejected:"):][:60]})'
+        # 같은 식 차단은 **여기서 하지 않는다** (2026-08-04 사장 지시 "제출은 일단 submit
+        # 떴으면 해보고"). 문 앞에서 막아 봐야 시뮬 슬롯은 이미 태운 뒤라 아끼는 게 없고,
+        # 거절은 쿼터를 안 쓴다. 중복은 **시뮬 전**(라운드 후보 단계)에서 거른다 —
+        # code_rejected_before 검사가 그리로 옮겨갔다. 주간 기준이 바뀌면 통과할 수도
+        # 있으니 문은 열어 둔다.
         # 동일 코드가 이미 OS 에 있으면 재제출 무의미 — 형제(다른 식)는 통과시킨다.
         try:
             if _db.code_submitted_before(self.user_id, str(code or '')):
@@ -354,8 +351,9 @@ class Worker(threading.Thread):
         # 필드셋 벽(일반 쿨다운·상관벽·테마 순수성벽)은 2026-08-03 사장 지시로 전부
         # 제거 — "제출은 일단 해본다". 거절은 쿼터를 안 쓰고, 필드셋 수준 예측은
         # 오탐이 실재한다(그날 S=1.79·체크 8/0 알파가 상관벽에 보류된 실측).
-        # 동일 코드 가드(already_rejected/already_submitted)만 남긴다 — 같은 식은
-        # 같은 판정이라 재전송이 무의미한 유일한 경우다.
+        # 남은 제출 가드는 already_submitted(=이미 OS) 하나뿐이다 — 2026-08-04 사장 지시로
+        # already_rejected 도 제거하고 **시뮬 전** 후보 단계로 옮겼다("같은 식이면 처음부터
+        # 하지 마라 / 제출은 일단 submit 떴으면 해보고").
         # ⏳ 제출 보류창 (2026-07-27 사장 지시) — 테마 경계(KST 09:00)와 예산
         # 리셋(KST 13:00)이 다른 시계라, 그 사이에 새 테마 알파를 내면 **전날
         # 예산**을 쓴다. 예산이 열릴 때까지 큐에 재워 하루치를 온전히 쓴다.
@@ -680,6 +678,11 @@ class Worker(threading.Thread):
             except Exception as e:
                 LOG.warning('큐 삭제 실패(상태만 갱신): %s', e)
                 _db.submit_queue_mark(row['id'], 'submitted', st[:200])
+        elif _criteria.queue_hopeless(st):
+            # 같은 알파를 그대로 다시 내도 안 바뀌는 사유(상관 소진·사다리) — 목록에서
+            # 내린다. 남겨 두면 사람이 골라야 할 것들이 그 사이에 묻힌다
+            # (2026-08-04 사장 지시 "어차피 제출 가능성 없는 애들은 배제").
+            _db.submit_queue_mark(row['id'], 'skipped', st[:200])
         elif ('재시도' not in (row.get('note') or '')
               and self._rejection_looks_spurious(client, wid)):
             # 지금 FAIL 이 0 인데 제출만 막혔다 → 주간 기준이 바뀌면 통과할 수 있다.
@@ -700,8 +703,11 @@ class Worker(threading.Thread):
                                       str(row.get('code') or wid), ok, f'[queue] {st}')
         except Exception:
             pass
+        _dead = _criteria.queue_hopeless(st)
         self._log(round_num,
                   (f'  🚀 대기 큐 제출 완료 — {wid} (목록에서 제거)' if ok
+                   else f'  🗑 대기 큐 손절 — {wid}: {_dead} — 같은 알파로는 통과 불가 '
+                        f'(목록에서 제외)' if _dead
                    else f'  ⛔ 대기 큐 제출 거절 — {wid}: {_ellip(st, 200)} (목록에 남김)'),
                   level=('pass' if ok else 'info'))
         # 거절은 예산을 쓰지 않는다 — 다음 대기 건을 이어서 시도한다.
@@ -778,7 +784,12 @@ class Worker(threading.Thread):
                              name=f'hyfe-drain-{self.user_id}').start()
             self._main_loop()
         finally:
-            _db.set_user_running(self.user_id, running=False, paused=False)
+            # ⚠ 2026-08-04 실측. 프로세스 종료(SIGTERM) 중이면 running 을 지우지 않는다 —
+            # request_shutdown 이 paused 를 안 남기는 이유(_auto_resume_workers 가 켜주도록)를
+            # 여기서 지우면 그대로 무효가 된다. 실제로 배포 재시작 후 워커가 안 켜졌다
+            # (list_running_user_ids 가 빈 목록 → auto-resume 침묵, 라운드 0건).
+            if not _SHUTTING_DOWN:
+                _db.set_user_running(self.user_id, running=False, paused=False)
             with _REGISTRY_LOCK:
                 if _REGISTRY.get(self.user_id) is self:
                     _REGISTRY.pop(self.user_id, None)
@@ -897,6 +908,12 @@ class Worker(threading.Thread):
         if account_type == 'research_consultant':
             try:
                 from . import theme_sync
+                # 문서보다 먼저 **API 실측** 테마를 본다 — 월초엔 지원문서가 늦어서
+                # (2026-08-04 실측: 8월 표 미게시) 문서만 믿으면 새 테마가 걸린 걸
+                # 못 알아채고 옛 조건으로 한 달을 간다. 이름이 바뀌면 여기서 잡아
+                # 로그를 남기고 공략 플레이북을 기동한다.
+                theme_sync.note_observed_theme(
+                    self.user_id, log_fn=lambda m: self._log(0, m))
                 _theme = theme_sync.maybe_sync(username, password, self.user_id)
                 if _theme:
                     self._log(0, f'📅 Power Pool 테마 자동 적용: {_theme[:110]}')
@@ -1528,6 +1545,7 @@ class Worker(threading.Thread):
             cached_results: list[dict] = []
             to_simulate: list[dict] = []
             _novelty_n = 0
+            _dup_swap = _dup_drop = 0
             seen: set[str] = set()
             # idx → 저장된 alphas.id. **시뮬이 끝나는 즉시** 채워진다.
             alpha_id_by_idx: dict[int, int] = {}
@@ -1597,6 +1615,27 @@ class Worker(threading.Thread):
                 if key in seen:
                     continue
                 seen.add(key)
+                # 🚫 최근 거절된 **같은 식 × 같은 설정**은 아예 시뮬하지 않는다
+                # (2026-08-04 사장 지시 "같은 식이면 처음부터 하지 마라"). 예전엔 제출 문
+                # 앞에서 걸렀는데 그때는 이미 시뮬 슬롯을 태운 뒤였다 — 실측 #11 이
+                # S=1.23·fit=0.62 로 통과하고도 직전 거절작과 같은 식이라 제출 불가였다.
+                # ⚠ 코드만 보면 안 된다 — 같은 식도 중립화가 다르면 S=2.91 vs 0.81 로
+                # 갈린다(2026-08-04 실측). 설정 지문까지 같을 때만 거른다.
+                # spec 은 'LLM 산출물 원본 측정'이 목적이라 예외.
+                if (s.get('origin') or '') != 'spec' and _db.code_settings_rejected_before(
+                        self.user_id, s['code'], fp):
+                    _nv = _novelty_rewrite(self.user_id, s['code'], fp, seen)
+                    if not _nv:
+                        _dup_drop += 1
+                        continue
+                    seen.add(f'{_db.code_hash(_nv)}:{fp}')
+                    s['code'] = _nv
+                    s['genome'] = None          # 코드만 바꾸면 genome↔code 대응이 깨진다
+                    genome_by_idx[int(s['idx'])] = {}
+                    s['desc'] = '♻ 거절작 회피: ' + (s.get('desc') or '')
+                    _dup_swap += 1
+                    to_simulate.append(s)
+                    continue
                 # ⚠ 예전엔 RC 계정만 캐시를 통째로 건너뛰었다(브라우저 시대의 잔재 —
                 #   스크레이핑 결과를 못 믿던 시절 규칙). 그 결과 2026-07-22 실측으로
                 #   **시뮬의 21~23% 가 같은 코드 재실행**이었다(한 코드가 최대 13회).
@@ -1633,6 +1672,10 @@ class Worker(threading.Thread):
                 self._log(round_num,
                           f'  ♻ 신규성 압력 — 기지(旣知) 조합 {_novelty_n}개를 '
                           f'근처 신규 변형으로 교체 (슬롯 낭비 방지)')
+            if _dup_swap or _dup_drop:
+                self._log(round_num,
+                          f'  🚫 최근 거절된 같은 식 {_dup_swap + _dup_drop}개 회피 '
+                          f'(변형 교체 {_dup_swap} · 드롭 {_dup_drop}) — 시뮬 전에 걸렀습니다')
 
             # 라운드의 시뮬 대상 알파를 WQB REST API 로 넘긴다 — ApiBackend 가 ThreadPool 로
             # 동시 실행하고(계정 tier 만큼), 결과를 idx 순서로 정렬해 돌려준다.

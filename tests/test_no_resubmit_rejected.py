@@ -1,8 +1,11 @@
 # tests/test_no_resubmit_rejected.py
 # 2026-07-28 실측 루프: 알파 1YzG86aM 이 16:06 과 16:20 에 **똑같은 FAIL 5개**로 두 번
-# 거절됐다. 후보 생성이 결정론이라 재시작하면 같은 식이 다시 만들어지고, 시뮬 결과는
-# 캐시에서 나오므로 같은 알파를 또 제출한다. IS 판정엔 안 걸리고 제출 시점 판정에만
-# 걸리는 알파라 blocking_fail 검사로는 못 막는다.
+# 거절됐다. 후보 생성이 결정론이라 재시작하면 같은 식이 다시 만들어진다.
+#
+# ⚠ 2026-08-04 사장 지시로 **막는 지점이 옮겨졌다** — "같은 식이면 처음부터 하지 마라 /
+# 제출은 일단 submit 떴으면 해보고". 중복 차단은 시뮬 전 후보 단계
+# (db.code_settings_rejected_before, 설정 지문까지 같을 때만)로 갔고, 제출 게이트는
+# 열려 있다. 문 앞에서 막아 봐야 시뮬 슬롯은 이미 태운 뒤라 아끼는 게 없다.
 import threading
 
 import pytest
@@ -34,11 +37,13 @@ def _reject(uid, code=CODE):
                              'rejected:LOW_SHARPE(1.0 vs 1.58); LOW_FITNESS(0.57 vs 1.0)')
 
 
-def test_same_expression_is_not_submitted_twice(wk):
+def test_same_expression_is_still_submitted(wk):
+    """거절 이력이 있어도 제출은 시도한다 (2026-08-04 사장 지시). 거절은 쿼터를 안 쓰고,
+    주간 기준(HT 완화컷·테마)이 바뀌면 같은 식도 통과한다. 중복은 시뮬 전에 거른다."""
     _reject(wk.user_id)
     ok, reason = wk._submit_gate({'sharpe': '1.0', 'wqb_alpha_id': 'A1'}, None,
                                  fail_items=[], code=CODE)
-    assert ok is False and reason.startswith('already_rejected'), reason
+    assert ok is True, reason
 
 
 def test_a_different_expression_is_unaffected(wk):

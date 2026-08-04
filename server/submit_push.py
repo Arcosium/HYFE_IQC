@@ -34,6 +34,13 @@ PUSH_WINDOW_S = float(os.environ.get('IQC_PUSH_WINDOW_S', str(3 * 3600)))
 COOLDOWN_S = float(os.environ.get('IQC_PUSH_COOLDOWN_S', '600'))
 DEAD_AXIS_SHARPE = 1.0        # 이 골격 시도의 최고 S 가 이 미만이면 죽은 축
 AXES_PER_WAVE = 4             # 축 4 × 부호 2 = 스펙 8 (라운드 limit)
+# 창 밖 상시 다변화 웨이브 (2026-08-04 사장 지시) — Power Pool 점수는 개수가 아니라
+# 풀에 더한 순증분이라, 같은 데이터셋(rsk70) 형제를 아무리 쌓아도 1개어치다. 창 밖에선
+# **카탈로그 발굴 축(=다른 데이터셋) 전용**으로 소형 웨이브만 돌린다. 크기가 작고
+# 쿨다운이 긴 이유는 스펙이 있는 라운드는 focus(연마)·밴딧·재조합이 전부 꺼지기 때문
+# (worker.is_spec_round). 45분 ≈ 라운드 2~3회에 1번만 양보한다.
+OFF_WINDOW_AXES = int(os.environ.get('IQC_PUSH_OFF_AXES', '1'))
+OFF_WINDOW_COOLDOWN_S = float(os.environ.get('IQC_PUSH_OFF_COOLDOWN_S', '2700'))
 TITLE = '자동 제출 푸시'
 
 NEUT_FIELD = 'rsk70_mfm2_gemtrd_indmom'
@@ -123,12 +130,15 @@ def _discover_axes(exclude: set, n: int) -> list[str]:
     return [name for _, __, name in cands[:n]]
 
 
-def _axis_stats(user_id: int) -> tuple[set, dict]:
-    """(소진 축, 축별 최고 S) — 최근 30일 코드 실측.
-    '시도'는 이 골격(indmom 대비 잔차)에서 신호 쪽에 쓰인 경우만 센다."""
-    burned, best = set(), {}
+def _axis_stats(user_id: int) -> tuple[set, dict, str]:
+    """(소진 축, 축별 최고 S, 최근 코드 전문) — 최근 30일 코드 실측.
+    '시도'는 이 골격(indmom 대비 잔차)에서 신호 쪽에 쓰인 경우만 센다.
+    세 번째 값은 발굴 축 중복 제거용 — 큐레이션 축과 달리 발굴 축은 소진/사망
+    테이블이 없어서, 이미 코드에 등장한 적 있으면 다시 쏘지 않는다."""
+    burned, best, seen = set(), {}, []
     for code, sharpe, submitted in _db.code_sharpe_submitted_since(
             user_id, _time.time() - 30 * 86400):
+        seen.append(code)
         ipos = code.find(NEUT_FIELD)
         for f in AXES:
             if f not in code:
@@ -140,7 +150,7 @@ def _axis_stats(user_id: int) -> tuple[set, dict]:
                     best[f] = max(best.get(f, -9.0), float(sharpe))
                 except (TypeError, ValueError):
                     pass
-    return burned, best
+    return burned, best, '\n'.join(seen)
 
 
 def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
@@ -148,30 +158,35 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
     신선 축 스펙을 라운드마다 장전한다. 큐레이션 축이 마르면 카탈로그에서 발굴.
     반환: 주입한 스펙 수. 어떤 실패도 라운드를 막으면 안 된다(호출측 try/except)."""
     now = _time.time() if now is None else now
-    if not _in_window(now):
-        return 0
+    focused = _in_window(now)
+    n_axes = AXES_PER_WAVE if focused else OFF_WINDOW_AXES
     done = _db.submitted_count_since(user_id, _day0(now))
     if done >= DAILY_SUBMIT_TARGET:
         return 0
     if _db.pending_specs(user_id, limit=1):
         return 0                                  # 탄약 소화 중 — 겹장전 금지
     last = _db.last_hypothesis_ts(user_id, TITLE)
-    if last and now - last < COOLDOWN_S:
+    if last and now - last < (COOLDOWN_S if focused else OFF_WINDOW_COOLDOWN_S):
         return 0
-    burned, best = _axis_stats(user_id)
-    cands = [f for f in AXES if f not in burned and best.get(f, 9.9) >= DEAD_AXIS_SHARPE]
-    if len(cands) < AXES_PER_WAVE:
+    burned, best, seen = _axis_stats(user_id)
+    # 창 안 = 검증된 큐레이션 축부터, 창 밖 = 다른 데이터셋 전용(발굴만).
+    cands = ([f for f in AXES if f not in burned and best.get(f, 9.9) >= DEAD_AXIS_SHARPE]
+             if focused else [])
+    if len(cands) < n_axes:
+        k = n_axes - len(cands)
         tried = burned | set(best) | set(AXES)
-        found = _discover_axes(tried, AXES_PER_WAVE - len(cands))
+        # 넉넉히 받아 '이미 써본 필드'를 걸러낸다.
+        # ponytail: 필드명 substring 검사 — 이름이 길어 충돌 없음, 틀리면 이름 집합 추출로.
+        found = [f for f in _discover_axes(tried, k * 4) if f not in seen][:k]
         if found and log_fn:
             log_fn(f'🔭 축 발굴 — 카탈로그에서 신규 {len(found)}개: '
                    + ', '.join(found))
         cands += found
     if not cands:
-        if log_fn:
+        if focused and log_fn:
             log_fn('🚨 자동 제출 푸시 — 큐레이션·카탈로그 모두 축이 고갈됐습니다 '
                    '(발굴 필터를 점검해 주세요).')
-        return 0
+        return 0                                  # 창 밖은 조용히 넘어간다
 
     from . import alpha_lint, genome_models
     try:
@@ -184,7 +199,7 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
 
     hid = None
     n = 0
-    for field in cands[:AXES_PER_WAVE]:
+    for field in cands[:n_axes]:
         for sign in (1, -1):
             g = dict(BASE_GENOME, universe=universe, sign=sign,
                      fields=[field, NEUT_FIELD, 'rsk70_mfm2_gemtrd_earnqlty'])
@@ -208,7 +223,7 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
                             delay=delay, why=f'{field.rsplit("_", 1)[-1]} 축 sign={sign:+d}')
             n += 1
     if n and log_fn:
-        axes = ', '.join(f.rsplit('_', 1)[-1] for f in cands[:AXES_PER_WAVE])
-        log_fn(f'🎯 자동 제출 푸시 — 오늘 제출 {done}/{DAILY_SUBMIT_TARGET}, '
-               f'신선 축 [{axes}] ±양부호 스펙 {n}개 장전')
+        axes = ', '.join(f.rsplit('_', 1)[-1] for f in cands[:n_axes])
+        log_fn(f'{"🎯 자동 제출 푸시" if focused else "🌱 상시 다변화"} — 오늘 제출 '
+               f'{done}/{DAILY_SUBMIT_TARGET}, 신선 축 [{axes}] ±양부호 스펙 {n}개 장전')
     return n

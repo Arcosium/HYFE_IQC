@@ -130,6 +130,18 @@ def set_theme_last_applied(text) -> str:
     return val
 
 
+def get_theme_active_name() -> str:
+    """마지막으로 관측한 **활성 Power Pool 테마 이름** (WQB API 실측).
+    지원문서가 늦어도 이 이름이 바뀌면 새 테마가 걸린 것이다."""
+    return str(_get('theme_active_name', '') or '').strip()
+
+
+def set_theme_active_name(text) -> str:
+    val = str(text or '').strip()
+    _set('theme_active_name', val)
+    return val
+
+
 def get_constraint():
     """현재 조건을 파싱한 ConstraintSpec. 조건이 없으면 None."""
     from . import constraint_spec

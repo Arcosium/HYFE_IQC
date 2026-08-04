@@ -674,6 +674,29 @@ def code_submitted_before(user_id: int, code: str) -> bool:
             (user_id, code)).fetchone() is not None
 
 
+def code_settings_rejected_before(user_id: int, code: str, settings_fp: str,
+                                  since_s: float | None = None) -> str | None:
+    """같은 식 **× 같은 설정**이 최근 거절당했으면 그 사유. 없으면 None.
+
+    ⚠ 코드만 보면 안 된다 — 중립화가 다르면 아예 다른 실험이다(2026-08-04 실측:
+    같은 식이 SLOW_AND_FAST 에서 S=2.91, CROWDING 에서 S=0.81). decay 는 거의
+    안 바뀌고(±0.05) truncation 은 그대로지만, 그 둘도 settings_fp 안에 있으므로
+    지문이 다르면 통과시킨다 — 재시뮬 몇 건이 죽은 실험 하나보다 싸다.
+    `alphas` 를 읽는다(submit_attempts 엔 설정 컬럼이 없다).
+    """
+    if not code or not settings_fp:
+        return None
+    init()
+    window = REJECT_MEMORY_S if since_s is None else float(since_s)
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT submit_status FROM alphas WHERE user_id=? AND code_hash=? "
+            "AND settings_fp=? AND submit_status LIKE 'rejected:%' AND ts>? "
+            'ORDER BY ts DESC LIMIT 1',
+            (user_id, code_hash(code), settings_fp, time.time() - window)).fetchone()
+    return str(row['submit_status']) if row else None
+
+
 def code_rejected_before(user_id: int, code: str,
                          since_s: float | None = None) -> str | None:
     """같은 식이 **최근에** WQB 에 거절당했으면 그 사유. 없으면 None.

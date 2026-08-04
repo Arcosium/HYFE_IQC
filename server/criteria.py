@@ -316,6 +316,29 @@ def is_blocking(name) -> bool:
     return True
 
 
+#: **같은 알파를 그대로 다시 내도** 결과가 안 바뀌는 거절 사유 — 제출 대기 큐에서 손절한다.
+#:   PROD/SELF_CORRELATION : 시간이 지나면 내려가는 게 아니라 **오르기만** 한다
+#:     (형제가 OS 에 오를수록 축이 소진된다, 2026-07-31 α#34879 실측).
+#:   IS_LADDER/LOW_2Y      : 과거 구간 성과라 코드가 같으면 값도 같다.
+#: 반대로 LOW_SHARPE·LOW_FITNESS 는 주간 기준(HT 완화컷 1.06)이 바뀌면 통과할 수 있고,
+#: PURE_POWER_POOL_THEME 은 테마가 주마다 돌므로 **큐에 남긴다** (전용 재시도 경로가 있다).
+QUEUE_HOPELESS_CHECKS = ('PROD_CORRELATION', 'SELF_CORRELATION',
+                         'IS_LADDER_SHARPE', 'LOW_2Y_SHARPE')
+
+
+def queue_hopeless(reason) -> str:
+    """거절 사유 문자열에 손절 대상 체크가 있으면 그 이름을, 없으면 ''.
+
+    'rejected:LOW_SHARPE(1.04 vs 1.58); PROD_CORRELATION(0.7189 vs 0.7) (http_403)'
+    같은 요약 문자열과 체크 이름 리스트를 둘 다 받는다.
+    """
+    if not isinstance(reason, str):
+        reason = ' '.join(str((r.get('name') if isinstance(r, dict) else r) or '')
+                          for r in (reason or []))
+    up = reason.upper()
+    return next((n for n in QUEUE_HOPELESS_CHECKS if n in up), '')
+
+
 def cutoffs(delay, region=None) -> dict:
     """delay(·region) 별 제출 컷.
 

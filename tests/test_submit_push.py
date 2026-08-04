@@ -41,8 +41,43 @@ def _wire(monkeypatch, *, submitted=0, pending=False, last_ts=None, rows=()):
     return inserted
 
 
-def test_outside_window_does_nothing(monkeypatch):
+def test_outside_window_seeds_small_wave_from_other_datasets(monkeypatch):
+    """창 밖 상시 다변화 — 카탈로그 발굴 축(=다른 데이터셋)만, 소형으로."""
+    inserted = _wire(monkeypatch)
+    monkeypatch.setattr(sp, '_discover_axes',
+                        lambda exclude, n: ['fnd6_newfieldx', 'mdl99_newfieldy'][:n])
+    monkeypatch.setattr('server.alpha_lint.validate_alpha', lambda code: [])
+    n = sp.maybe_seed(2, now=OUT_WINDOW)
+    assert n == len(inserted) == 2 * sp.OFF_WINDOW_AXES < 2 * sp.AXES_PER_WAVE
+    codes = ' '.join(s['code'] for s in inserted)
+    assert 'fnd6_newfieldx' in codes
+    assert not any(a in codes.replace(NEUT, '') for a in sp.AXES)  # rsk70 축 재탕 금지
+
+
+def test_outside_window_already_tried_field_not_refired(monkeypatch):
+    """발굴 축엔 소진/사망 테이블이 없다 — 최근 코드에 있으면 다시 쏘지 않는다."""
+    inserted = _wire(monkeypatch, rows=[(_skeleton_code('fnd6_newfieldx'), 0.3, 0)])
+    monkeypatch.setattr(sp, '_discover_axes',
+                        lambda exclude, n: ['fnd6_newfieldx', 'mdl99_newfieldy'][:n])
+    monkeypatch.setattr('server.alpha_lint.validate_alpha', lambda code: [])
+    sp.maybe_seed(2, now=OUT_WINDOW)
+    codes = ' '.join(s['code'] for s in inserted)
+    assert 'fnd6_newfieldx' not in codes and 'mdl99_newfieldy' in codes
+
+
+def test_outside_window_no_fresh_dataset_is_silent(monkeypatch):
+    """창 밖엔 사람을 부르지 않는다 — 45분마다 '고갈' 경보가 울리면 안 된다."""
     _wire(monkeypatch)
+    monkeypatch.setattr(sp, '_discover_axes', lambda exclude, n: [])
+    msgs = []
+    assert sp.maybe_seed(2, log_fn=msgs.append, now=OUT_WINDOW) == 0
+    assert not msgs
+
+
+def test_outside_window_cooldown_is_longer(monkeypatch):
+    """창 밖은 라운드 2~3회에 1번만 — 매 라운드 장전하면 focus(연마)가 굶는다."""
+    _wire(monkeypatch, last_ts=OUT_WINDOW - sp.COOLDOWN_S - 60)
+    monkeypatch.setattr(sp, '_discover_axes', lambda exclude, n: ['fnd6_newfieldx'][:n])
     assert sp.maybe_seed(2, now=OUT_WINDOW) == 0
 
 
