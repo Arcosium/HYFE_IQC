@@ -311,6 +311,15 @@ def is_blocking(name) -> bool:
     nm = str(name or '').strip().upper()
     if not nm:
         return False
+    # 실측이 하드코딩보다 권위 있다 — WQB 가 집행을 바꾸면 규칙도 따라가야 한다
+    # (2026-08-03 LOW_FITNESS 소프트→하드 전환을 이틀 늦게 알아챈 사고).
+    try:
+        from . import gate_watch
+        measured = gate_watch.is_blocking_measured(nm)
+        if measured is not None:
+            return measured
+    except Exception:       # 관측 실패가 게이트 판정을 죽이면 안 된다
+        pass
     if nm in CLASSIFICATION_CHECKS or nm.startswith('HT_') or nm.startswith('MATCHES_'):
         return False
     return True
@@ -650,13 +659,83 @@ def standard_progress(metrics, delay=None) -> float:
     return min(s, f)
 
 
-def submittability(metrics, delay=None, region=HT_REGION) -> float:
-    """제출 가능성 [0,1] — **두 경로 중 가까운 쪽**.
+#: 값이 **낮을수록** 좋은 체크. 나머지 하드 체크는 높을수록 좋다.
+LOWER_IS_BETTER = frozenset({
+    'PROD_CORRELATION', 'SELF_CORRELATION', 'HIGH_TURNOVER', 'CONCENTRATED_WEIGHT',
+    'HT_PNL_REALIZATION_HORIZON',
+})
 
-    HT 경로(회전율·지평)와 표준 경로(Sharpe·Fitness)는 서로 대체재다. HT 자격을 얻으면
-    표준 컷이 WARNING 으로 강등되므로, GA 는 둘 중 **싼 쪽**으로 밀면 된다.
+#: 진척도 계산에서 제외 — LOW_SHARPE 는 HT 완화 경로가 있어 submittability 가 따로 다룬다.
+_GATE_SKIP = frozenset({'LOW_SHARPE'})
+
+
+def gate_progress(metrics, delay=None) -> dict:
+    """하드 체크별 진척도 {체크이름: [0,1]} — **실측 컷** 기준. 미측정 체크는 빠진다.
+
+    2026-08-05 실측으로 필요해졌다. 그날 우리를 막은 건 fitness·사다리·서브유니버스
+    셋인데, 앞의 둘만 특수 처리돼 있었고 서브유니버스는 지도에 없었다. 게다가
+    `LOW_SUB_UNIVERSE_SHARPE` 의 컷은 **알파 자신의 샤프에 비례해 움직인다**
+    (S 3.09→컷 1.89 / S 3.38→2.07 / S 3.49→2.14). 고정 상수로는 못 따라가므로
+    metrics 에 승격된 `*_cutoff` 실측값만 쓴다.
     """
-    return max(ht_progress(metrics), standard_progress(metrics, delay))
+    m = metrics or {}
+    out = {}
+    for check, key in CHECK_METRIC_KEY.items():
+        if check in _GATE_SKIP or not is_blocking(check):
+            continue
+        v, c = _f(m.get(key)), _f(m.get(f'{key}_cutoff'))
+        if v is None or c is None or c == 0:
+            continue
+        out[check] = _clamp((c / v) if check in LOWER_IS_BETTER else (v / c))
+    return out
+
+
+def binding_gate(metrics, delay=None):
+    """가장 모자란 하드 체크 (이름, 진척도). 측정된 게 없으면 (None, None).
+    GA·로그가 '지금 무엇이 병목인가'를 한 줄로 말할 수 있게 한다."""
+    g = gate_progress(metrics, delay)
+    if not g:
+        return None, None
+    name = min(g, key=lambda k: g[k])
+    return name, g[name]
+
+
+def fitness_progress(metrics, delay=None):
+    """Fitness 컷까지의 진척도 [0,1]. **미측정이면 None** — 0 이 아니다.
+
+    ⚠ 미측정을 0 으로 돌리면 fitness 를 아직 모르는 알파의 route 가 통째로 0 이 되어
+    GA 가 회전율 기울기를 잃는다(테스트가 잡아냈다).
+    """
+    m = metrics or {}
+    v = _f(m.get('fitness'))
+    if v is None:
+        return None
+    d = delay if delay is not None else m.get('_delay')
+    c = _f(m.get('fitness_check_cutoff')) or cutoffs(d)['fitness']
+    return _clamp(v / c) if c > 0 else None
+
+
+def submittability(metrics, delay=None, region=HT_REGION) -> float:
+    """제출 가능성 [0,1].
+
+    Sharpe 는 두 경로(HT 완화컷 / 표준)의 **싼 쪽**을 탈 수 있지만, **Fitness 는 못 탄다**.
+    ⚠ 2026-08-05 실측으로 바로잡음. 예전엔 `max(ht, standard)` 였다 — HT 자격을 얻으면
+    표준 컷이 통째로 WARNING 으로 강등된다고 봤기 때문이다. 그날 실측이 반증했다:
+    `MATCHES_CLASSIFICATION=["High Turnover","Investable High Turnover"]` 를 받은 알파가
+    `LOW_FITNESS(0.65 vs 1.0)` 단독 사유로 403 을 맞았다(9q7E7J0r 외 8건).
+    공식 문서도 같은 말을 한다 — "Submission Criteria: Fitness >= 1".
+    이 가정 때문에 GA 가 fitness 0.3~0.8 대역을 '제출 가능'으로 보고 12일을 태웠다.
+    """
+    route = max(ht_progress(metrics), standard_progress(metrics, delay))
+    fit = fitness_progress(metrics, delay)
+    if fit is not None:
+        route = min(fit, route)
+    # 실측된 하드 체크는 전부 우회 불가 — 사다리·서브유니버스·리전샤프가 여기로 들어온다.
+    # 2026-08-05: 사다리를 12일간 손절 신호로만 쓰고 목표로 삼은 적이 없었다
+    # (GLB 생존율 1.4%, fitness>=1.0 알파 243건 전원 사다리 사망).
+    for p in gate_progress(metrics, delay).values():
+        route = min(route, p)
+    return route
 
 
 def combine_theme_multipliers(multipliers) -> float:

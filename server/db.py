@@ -674,6 +674,79 @@ def code_submitted_before(user_id: int, code: str) -> bool:
             (user_id, code)).fetchone() is not None
 
 
+def unsubmitted_check_candidates(user_id: int, limit: int = 12) -> list[tuple]:
+    """무료 체크로 오늘 판정을 받아볼 만한 미제출 알파 — (wqb_id, sharpe, fitness).
+
+    fitness 내림차순. 제출 관문에서 fitness 가 가장 자주 병목이라(2026-08-05) 그쪽부터 본다.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT metrics, sharpe, fitness FROM alphas WHERE user_id=? AND submitted=0 "
+            "AND TRIM(error_text)='' AND fitness IS NOT NULL AND sharpe IS NOT NULL "
+            "AND metrics LIKE '%wqb_alpha_id%' ORDER BY fitness DESC, sharpe DESC LIMIT ?",
+            (user_id, int(limit) * 3)).fetchall()
+    out, seen = [], set()
+    for r in rows:
+        try:
+            wid = str((json.loads(r['metrics'] or '{}')).get('wqb_alpha_id') or '')
+        except (TypeError, ValueError):
+            continue
+        if not wid or wid in seen:
+            continue
+        seen.add(wid)
+        out.append((wid, r['sharpe'], r['fitness']))
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def dataset_concentration(user_id: int, since_ts: float) -> list[tuple]:
+    """제출작의 데이터셋 집중도 — (데이터셋접두어, 건수) 내림차순.
+
+    Power Pool 점수는 개수가 아니라 풀에 더한 순증분이다. 2026-08-04 실측: 제출 21건 중
+    11건이 rsk70_mfm2_gemtrd 한 데이터셋이었다 — 11개를 내도 1개어치로 계산된다.
+    """
+    import re as _re
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT code FROM alphas WHERE user_id=? AND submitted=1 AND ts>?",
+            (user_id, float(since_ts))).fetchall()
+    tally: dict[str, int] = {}
+    for r in rows:
+        seen = set()
+        for f in _re.findall(r'\b([a-z][a-z0-9]{2,})_[a-z0-9_]{3,}', str(r['code'] or '')):
+            if f in ('winsorize', 'group', 'ts', 'vec'):
+                continue
+            seen.add(f)
+        for pre in seen:
+            tally[pre] = tally.get(pre, 0) + 1
+    return sorted(tally.items(), key=lambda kv: -kv[1])
+
+
+def rejection_and_success_checks(user_id: int, since_ts: float) -> list[tuple]:
+    """게이트 실측용 원자료 — (ts, submitted, submit_status, fail_items) 목록.
+
+    gate_watch 가 '무엇이 실제로 제출을 막는가'를 여기서 복원한다. 거절 사유에 이름이
+    나온 체크는 하드, 제출 성공작의 fail_items 에 있던 체크는 소프트다.
+    """
+    init()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT ts, submitted, submit_status, fail_items FROM alphas "
+            "WHERE user_id=? AND ts>? AND (submitted=1 OR submit_status LIKE 'rejected:%')",
+            (user_id, float(since_ts))).fetchall()
+    out = []
+    for r in rows:
+        try:
+            fi = json.loads(r['fail_items'] or '[]')
+        except (TypeError, ValueError):
+            fi = []
+        out.append((r['ts'], int(r['submitted'] or 0), r['submit_status'], fi))
+    return out
+
+
 def code_settings_rejected_before(user_id: int, code: str, settings_fp: str,
                                   since_s: float | None = None) -> str | None:
     """같은 식 **× 같은 설정**이 최근 거절당했으면 그 사유. 없으면 None.

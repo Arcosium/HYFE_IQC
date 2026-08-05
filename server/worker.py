@@ -136,6 +136,15 @@ def _round_label(round_num: int, parent_idx: int, phase: int) -> str:
 # Sharpe 1.7(gap≈0.15)+Fitness 1.1(gap≈0.15)→약 -0.30 (통과). -1e8 이하는 사실상 OFF.
 FOCUS_CLOSENESS_FLOOR = float(os.environ.get('HYFE_IQC_FOCUS_CLOSENESS_FLOOR', '-0.8'))
 
+# focus 진입 제출진척도 하한 — closeness 는 사유 문자열에서 gap 을 파싱하는 방식이라
+# 사다리·서브유니버스처럼 값/컷이 metrics 에만 있는 관문을 못 본다. submittability 는
+# 실측 컷 전부를 보므로 그 사각을 메운다 (2026-08-04 부모 #10 사건).
+FOCUS_SUBMITTABILITY_FLOOR = float(
+    os.environ.get('HYFE_IQC_FOCUS_SUBMIT_FLOOR', '0.55'))
+
+# 무료 체크 스윕 주기 — 제출 쿼터를 안 쓰므로 자주 해도 되지만, 폴링 비용이 있어 하루 1회.
+CHECK_SWEEP_EVERY_S = float(os.environ.get('HYFE_IQC_CHECK_SWEEP_S', str(24 * 3600)))
+
 # focus 라운드마다 부모의 '정확한 공식'을 (universe × neutralization) 그리드로 재시뮬하는
 # settings 스윕 개수. delay=0 은 필드가 PV 로 묶여 settings 가 사실상 유일한 추가 Sharpe
 # 레버라, LLM 추측 대신 결정적으로 훑는다(Gemini 호출 0, 기존 조합은 캐시히트=공짜).
@@ -775,8 +784,35 @@ class Worker(threading.Thread):
                     continue
                 u, p = creds[0], creds[1]
                 self._drain_submit_queue(0, u, p)
+                self._maybe_check_sweep(u, p)
             except Exception as e:
                 LOG.warning('드레인 티커 실패(무시): %s', e)
+
+    def _maybe_check_sweep(self, username: str, password: str) -> None:
+        """무료 체크로 오늘 기준 판정을 받아 온다 (하루 1회). 통과 가능하면 바로 낸다.
+
+        어제 미달이던 알파가 오늘 통과할 수 있다 — 기준이 바뀌거나(8/3 LOW_FITNESS),
+        형제가 OS 에 올라 PROD_CORRELATION 이 움직인다. 체크는 쿼터를 안 쓰므로 공짜다.
+        """
+        now = time.time()
+        if now - getattr(self, '_last_check_sweep', 0.0) < CHECK_SWEEP_EVERY_S:
+            return
+        self._last_check_sweep = now
+        try:
+            from . import check_sweep, wqb_api as _wapi
+            client = _wapi.WqbApiClient(username, password)
+            for rec in check_sweep.sweep(client, self.user_id,
+                                         log_fn=lambda m: self._log(0, m)):
+                if not rec.get('ready'):
+                    continue
+                ok, st = client.submit_alpha(rec['wid'])
+                self._log(0, (f'  🚀 무료체크 발 제출 성공 — {rec["wid"]}' if ok
+                              else f'  ⛔ {rec["wid"]}: {_ellip(st, 120)}'),
+                          level=('pass' if ok else 'info'))
+                if ok:
+                    break                       # 예산은 게이트가 따로 관리한다
+        except Exception as e:
+            self._log_quiet(0, f'⚠ 무료 체크 스윕 실패(무시): {e}')
 
     def run(self) -> None:
         try:
@@ -914,6 +950,24 @@ class Worker(threading.Thread):
                 # 로그를 남기고 공략 플레이북을 기동한다.
                 theme_sync.note_observed_theme(
                     self.user_id, log_fn=lambda m: self._log(0, m))
+                # ⚖ 제출 게이트 실측 — 하드코딩된 is_blocking 이 낡으면 여기서 잡는다.
+                # 2026-08-03 LOW_FITNESS 소프트→하드 전환을 이틀 늦게 알아챈 사고의 대응.
+                from . import gate_watch
+                gate_watch.sync(self.user_id, log_fn=lambda m: self._log(0, m))
+                # 📊 다변화 — PP 점수는 개수가 아니라 풀에 더한 순증분이다. 2026-08-04 실측:
+                # 제출 21건 중 11건이 rsk70 한 데이터셋이라 11개가 1개어치로 계산됐다.
+                try:
+                    _conc = _db.dataset_concentration(
+                        self.user_id, time.time() - 30 * 86400)
+                    if _conc and _conc[0][1] >= 3:
+                        _tot = sum(n for _, n in _conc)
+                        _top, _n = _conc[0]
+                        if _n / max(_tot, 1) >= 0.35:
+                            self._log(0, f'📊 제출 집중도 경고 — 최근 30일 제출작의 '
+                                         f'{_n}/{_tot} 이 {_top} 데이터셋입니다 '
+                                         f'(PP 점수는 순증분이라 형제는 1개어치)')
+                except Exception as e:
+                    self._log_quiet(0, f'⚠ 집중도 계산 실패(무시): {e}')
                 _theme = theme_sync.maybe_sync(username, password, self.user_id)
                 if _theme:
                     self._log(0, f'📅 Power Pool 테마 자동 적용: {_theme[:110]}')
@@ -2163,6 +2217,17 @@ class Worker(threading.Thread):
                     # NEUTRAL(파싱불가)은 자르지 않는다 — gap 을 측정조차 못한 후보를 조용히
                     # 드롭하면 안 되므로(no silent cap), 측정 가능한 far-miss 만 차단한다.
                     if _cs > _NEUTRAL_SCORE and _cs < FOCUS_CLOSENESS_FLOOR:
+                        _far_skipped += 1
+                        continue
+                    # 제출 진척도 하한 — closeness 는 '컷까지의 gap 합'이라 사다리처럼
+                    # 파싱 안 되는 관문을 못 본다. 2026-08-04 실측: 부모 #10
+                    # (S 1.11 vs 1.58 · fit 0.53 vs 1.0)이 ladder·PROD 실패가 없다는
+                    # 이유로 손절을 피해 몇 시간치 라운드를 먹었다.
+                    try:
+                        _sub = _criteria.submittability(r.get('metrics') or {})
+                    except Exception:
+                        _sub = 1.0
+                    if _sub < FOCUS_SUBMITTABILITY_FLOOR:
                         _far_skipped += 1
                         continue
                     focus_candidates.append(r)

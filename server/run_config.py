@@ -130,6 +130,18 @@ def set_theme_last_applied(text) -> str:
     return val
 
 
+def get_gate_profile() -> dict:
+    """실측 제출 게이트 프로파일 (gate_watch 가 갱신). 없으면 빈 dict."""
+    v = _get('gate_profile', {})
+    return v if isinstance(v, dict) else {}
+
+
+def set_gate_profile(prof) -> dict:
+    val = dict(prof or {})
+    _set('gate_profile', val)
+    return val
+
+
 def get_theme_active_name() -> str:
     """마지막으로 관측한 **활성 Power Pool 테마 이름** (WQB API 실측).
     지원문서가 늦어도 이 이름이 바뀌면 새 테마가 걸린 것이다."""
