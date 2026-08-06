@@ -28,11 +28,16 @@ def test_previously_rejected_code_is_still_submitted(gate):
     assert ok, why
 
 
-def test_already_submitted_guard_survives(gate, monkeypatch):
-    """이미 OS 에 오른 동일 코드는 여전히 막는다 — 재제출이 진짜 무의미한 유일한 경우."""
+def test_submit_gate_has_no_same_code_guard_at_all(gate, monkeypatch):
+    """이미 OS 에 오른 동일 코드조차 문 앞에서 막지 않는다 (2026-08-06 사장 재지시).
+
+    막아 봐야 시뮬은 이미 태운 뒤다 — 아끼는 게 없고 화면엔 "재제출 무의미"만 뜬다.
+    같은 식은 **시뮬 전**에 걸러야 하고, 그건 아래 라운드 후보 단계가 한다.
+    """
     monkeypatch.setattr(worker._db, 'code_submitted_before', lambda uid, code: True)
     ok, why = gate._submit_gate({'wqb_alpha_id': 'X1'}, fail_items=[], code=CODE)
-    assert not ok and 'already_submitted' in why
+    assert ok, why
+    assert 'already_' not in (why or '')
 
 
 def test_blocking_fail_still_blocks(gate):

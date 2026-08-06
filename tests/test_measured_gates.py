@@ -1,9 +1,12 @@
-# tests/test_fitness_is_hard_gate.py
-# 2026-08-05 실측: HT 분류를 받아도 fitness 미달이면 제출이 막힌다.
-#   9q7E7J0r — MATCHES_CLASSIFICATION=["High Turnover","Investable High Turnover"] PASS,
-#   LOW_SHARPE PASS(2.15 vs 1.58), 그런데 LOW_FITNESS(0.65 vs 1.0) 단독 사유로 403.
-# 예전 submittability 는 max(ht, standard) 라 이런 알파를 '제출 가능'(1.0)으로 봤고,
-# 그 착각 때문에 GA 가 fitness 0.3~0.8 대역을 12일간 파고들었다.
+# tests/test_measured_gates.py
+# 관문 판정은 **WQB 가 실제로 준 value/cutoff** 로만 한다. 우리 시뮬 수치를 컷과 비교해
+# 미리 판정하면 안 된다 — 2026-08-06 재검증에서 확정.
+#   · 제출 성공작 22건의 fitness 가 0.26~0.86 으로 전부 공식 컷 1.0 미만이다
+#   · 8/5 16:51 에 fitness 0.55 알파(qMNZpGdA)가 정상 제출됐다
+#   · LOW_FITNESS 단독 사유 403 은 전 기간 0건 — 늘 PROD/LADDER/GLB_* 와 동반한다
+# 8/5 에 이 파일은 정반대("fitness 는 우회 불가")를 주장했다. 그 전제로 submittability 에
+# 넣은 fitness 캡이 GA 를 고 fitness·사다리 사망 가계(inst18, S 3.0/fit 1.8/ladder 0.05)로
+# 몰았다. 되돌렸다.
 from server import criteria
 
 
@@ -15,20 +18,19 @@ def _m(**kw):
     return base
 
 
-def test_ht_classified_but_low_fitness_is_not_submittable():
-    """HT 관문을 다 통과해도 fitness 0.65 면 제출 불가로 봐야 한다."""
-    assert criteria.submittability(_m()) < 1.0
+def test_our_own_low_fitness_does_not_block():
+    """HT 경로가 열려 있으면 시뮬 fitness 0.65 만으로 제출 불가로 찍으면 안 된다.
+
+    실제로 그 대역(0.26~0.86)이 22건 통과했다. 8/5 판 코드는 여기서 0.65 를 반환했다.
+    """
+    assert criteria.submittability(_m(ht_after_cost_sharpe='1.2')) == 1.0
 
 
-def test_fitness_at_cutoff_unlocks():
-    """fitness 가 컷(1.0)에 닿으면 비로소 제출 가능."""
-    assert criteria.submittability(_m(fitness='1.0')) == 1.0
-
-
-def test_fitness_gate_applies_to_standard_path_too():
-    """HT 자격이 없어도 마찬가지 — fitness 는 공통 관문이다."""
-    m = _m(fitness='0.9', ht_turnover='0.01', ht_returns_ratio='0.1', ht_pnl_horizon='99')
+def test_measured_fitness_fail_does_block():
+    """WQB 가 직접 준 값이면 얘기가 다르다 — 실측 FAIL 은 관문이다."""
+    m = _m(fitness_check='0.65', fitness_check_cutoff='1.0')
     assert criteria.submittability(m) < 1.0
+    assert criteria.binding_gate(m)[0] == 'LOW_FITNESS'
 
 
 def test_measured_cutoff_from_check_wins():

@@ -718,18 +718,18 @@ def fitness_progress(metrics, delay=None):
 def submittability(metrics, delay=None, region=HT_REGION) -> float:
     """제출 가능성 [0,1].
 
-    Sharpe 는 두 경로(HT 완화컷 / 표준)의 **싼 쪽**을 탈 수 있지만, **Fitness 는 못 탄다**.
-    ⚠ 2026-08-05 실측으로 바로잡음. 예전엔 `max(ht, standard)` 였다 — HT 자격을 얻으면
-    표준 컷이 통째로 WARNING 으로 강등된다고 봤기 때문이다. 그날 실측이 반증했다:
-    `MATCHES_CLASSIFICATION=["High Turnover","Investable High Turnover"]` 를 받은 알파가
-    `LOW_FITNESS(0.65 vs 1.0)` 단독 사유로 403 을 맞았다(9q7E7J0r 외 8건).
-    공식 문서도 같은 말을 한다 — "Submission Criteria: Fitness >= 1".
-    이 가정 때문에 GA 가 fitness 0.3~0.8 대역을 '제출 가능'으로 보고 12일을 태웠다.
+    Sharpe·Fitness 는 두 경로(HT 완화컷 / 표준)의 **싼 쪽**을 탈 수 있다.
+
+    ⚠ 2026-08-05 에 여기에 `route = min(fitness_progress(...), route)` 를 넣어 fitness 를
+    우회 불가로 만들었다가 **8/6 에 되돌렸다.** 근거였던 "8/3 부터 LOW_FITNESS 가 하드로
+    바뀌었다"가 오진이었기 때문이다 — 제출 성공작 22건의 fitness 는 0.26~0.86 으로 전부
+    공식 컷 1.0 미만이고, 8/5 에도 fitness 0.55 알파(qMNZpGdA)가 정상 제출됐다.
+    `LOW_FITNESS` 단독 사유 403 은 전 기간 한 건도 없다(늘 PROD/LADDER/GLB_* 동반).
+    우리가 시뮬에서 잰 fitness 를 컷과 비교해 미리 판정하면 GA 가 고 fitness·사다리
+    사망 가계(inst18)로 쏠린다. 실측된 컷 판정은 아래 `gate_progress` 가 맡는다 —
+    그쪽은 WQB 가 실제로 준 value/cutoff 만 쓴다.
     """
     route = max(ht_progress(metrics), standard_progress(metrics, delay))
-    fit = fitness_progress(metrics, delay)
-    if fit is not None:
-        route = min(fit, route)
     # 실측된 하드 체크는 전부 우회 불가 — 사다리·서브유니버스·리전샤프가 여기로 들어온다.
     # 2026-08-05: 사다리를 12일간 손절 신호로만 쓰고 목표로 삼은 적이 없었다
     # (GLB 생존율 1.4%, fitness>=1.0 알파 243건 전원 사다리 사망).

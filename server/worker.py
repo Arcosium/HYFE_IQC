@@ -324,17 +324,14 @@ class Worker(threading.Thread):
             # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
-        # 같은 식 차단은 **여기서 하지 않는다** (2026-08-04 사장 지시 "제출은 일단 submit
-        # 떴으면 해보고"). 문 앞에서 막아 봐야 시뮬 슬롯은 이미 태운 뒤라 아끼는 게 없고,
-        # 거절은 쿼터를 안 쓴다. 중복은 **시뮬 전**(라운드 후보 단계)에서 거른다 —
-        # code_rejected_before 검사가 그리로 옮겨갔다. 주간 기준이 바뀌면 통과할 수도
-        # 있으니 문은 열어 둔다.
-        # 동일 코드가 이미 OS 에 있으면 재제출 무의미 — 형제(다른 식)는 통과시킨다.
-        try:
-            if _db.code_submitted_before(self.user_id, str(code or '')):
-                return False, 'already_submitted'
-        except Exception:
-            pass
+        # 같은 식 차단은 **여기서 하나도 하지 않는다** (2026-08-04 사장 지시 "제출은 일단
+        # submit 떴으면 해보고", 2026-08-06 재지시). 문 앞에서 막아 봐야 시뮬 슬롯은 이미
+        # 태운 뒤라 아끼는 게 없고, 거절은 쿼터를 안 쓴다. 중복은 전부 **시뮬 전**(라운드
+        # 후보 단계)에서 거른다 — 거절작(code_settings_rejected_before)과 제출작
+        # (code_submitted_before) 둘 다 그리로 옮겼다.
+        # ⚠ `already_rejected`·`already_submitted` 를 여기서 되살리지 말 것. 살리는 순간
+        #   "같은 식이 이미 …  — 재제출 무의미"가 화면에 다시 뜨고, 그건 이미 시뮬을
+        #   태운 뒤라 아무것도 아끼지 못한 채 제출 기회만 버리는 자리다.
         # 📋 제출 모드 = 'list' — 자동 제출하지 않고 대기 목록에만 쌓는다(사용자 선택).
         #    차단 FAIL 검사 **뒤**에 둔다: WQB 가 어차피 거절할 알파로 목록을 채우면
         #    사람이 골라야 할 것이 묻힌다. kind='manual' 은 큐 드레인이 건드리지 않는다.
@@ -1669,15 +1666,20 @@ class Worker(threading.Thread):
                 if key in seen:
                     continue
                 seen.add(key)
-                # 🚫 최근 거절된 **같은 식 × 같은 설정**은 아예 시뮬하지 않는다
+                # 🚫 이미 낸 식과 최근 거절된 식은 **아예 시뮬하지 않는다**
                 # (2026-08-04 사장 지시 "같은 식이면 처음부터 하지 마라"). 예전엔 제출 문
                 # 앞에서 걸렀는데 그때는 이미 시뮬 슬롯을 태운 뒤였다 — 실측 #11 이
                 # S=1.23·fit=0.62 로 통과하고도 직전 거절작과 같은 식이라 제출 불가였다.
-                # ⚠ 코드만 보면 안 된다 — 같은 식도 중립화가 다르면 S=2.91 vs 0.81 로
-                # 갈린다(2026-08-04 실측). 설정 지문까지 같을 때만 거른다.
+                # 거절작은 **코드 + 설정 지문**이 같을 때만 거른다 — 같은 식도 중립화가
+                # 다르면 S=2.91 vs 0.81 로 갈리므로 아예 다른 실험이다(2026-08-04 실측).
+                # 제출작(OS)은 **코드만** 본다 — 이미 이긴 식은 설정을 흔들어 봐야
+                # 재제출이 안 되고, GA 후보 생성이 결정론이라 그대로 재생산된다.
+                # 2026-08-06: 이 갈래가 빠져 있어서 이미 낸 식이 시뮬까지 다 돌고
+                # 제출 문에서 `already_submitted` 로 막히고 있었다(8/6 12:46 실측).
                 # spec 은 'LLM 산출물 원본 측정'이 목적이라 예외.
-                if (s.get('origin') or '') != 'spec' and _db.code_settings_rejected_before(
-                        self.user_id, s['code'], fp):
+                if (s.get('origin') or '') != 'spec' and (
+                        _db.code_settings_rejected_before(self.user_id, s['code'], fp)
+                        or _db.code_submitted_before(self.user_id, s['code'])):
                     _nv = _novelty_rewrite(self.user_id, s['code'], fp, seen)
                     if not _nv:
                         _dup_drop += 1
@@ -1728,7 +1730,7 @@ class Worker(threading.Thread):
                           f'근처 신규 변형으로 교체 (슬롯 낭비 방지)')
             if _dup_swap or _dup_drop:
                 self._log(round_num,
-                          f'  🚫 최근 거절된 같은 식 {_dup_swap + _dup_drop}개 회피 '
+                          f'  🚫 이미 냈거나 거절된 같은 식 {_dup_swap + _dup_drop}개 회피 '
                           f'(변형 교체 {_dup_swap} · 드롭 {_dup_drop}) — 시뮬 전에 걸렀습니다')
 
             # 라운드의 시뮬 대상 알파를 WQB REST API 로 넘긴다 — ApiBackend 가 ThreadPool 로

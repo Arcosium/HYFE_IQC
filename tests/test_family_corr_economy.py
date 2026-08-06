@@ -39,8 +39,12 @@ def test_corr_rejected_fieldsets_one_strike(isolated_db):
         1, 'rank(a2)', fields=['anl4_z'],
         submit_status='rejected:LOW_SHARPE (http_403)'))
     # 상관 사유만 + 1회로도 잡힌다 (패밀리 대표 1회 거절 = 형제 보류).
+    # 2026-08-03 부터 유전체 fields 와 코드 추출 **두 표현을 모두** 센다 — 유전체가
+    # fields 를 안 담는 알파가 많아 한쪽만 보면 벽이 무력화된다(db.rejected_fieldsets).
+    # 그래서 코드 `rank(a1)` 에서 뽑힌 {'a1'} 도 같이 나온다. 잡아야 할 쪽만 확인한다.
     walls = db.rejected_fieldsets(uid, min_count=1, reason_contains='CORRELATION')
-    assert walls == [frozenset({'mdl177_x', 'mdl177_y'})]
+    assert frozenset({'mdl177_x', 'mdl177_y'}) in walls
+    assert frozenset({'anl4_z'}) not in walls      # 상관 아닌 사유는 안 센다
     # 기존 호출(3회 문턱)은 그대로 빈 결과 — 하위호환.
     assert db.rejected_fieldsets(uid) == []
 
