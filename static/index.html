@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;900&family=Noto+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <!-- ⚠ Cloudflare 가 css/js 를 4시간 엣지캐시(max-age=14400 덮어씀) — 배포 시 반드시 ?v= 를 올릴 것 -->
-  <link rel="stylesheet" href="/style.css?v=38" />
+  <link rel="stylesheet" href="/style.css?v=39" />
 </head>
 <body>
   <header class="topbar">
@@ -264,7 +264,8 @@
             <span class="lg"><span class="sw rand"></span>탐색 rand</span>
             <span class="lg"><span class="sw mut"></span>변이 mut</span>
             <span class="lg"><span class="sw xo"></span>교차 xo</span>
-            <span class="lg"><span class="sw etc"></span>개편 전</span>
+            <span class="lg"><span class="sw fix"></span>개선 fix</span>
+            <span class="lg"><span class="sw etc"></span>기타</span>
             <span class="lg"><span class="sw lineage"></span>계보 부모→자식</span>
             <span class="lg"><span class="sw sub"></span>제출됨</span>
           </div>
@@ -285,7 +286,7 @@
         <div class="evo-tip" id="evo-tip"></div>
         <div class="evo-empty" id="evo-empty" hidden>아직 시뮬 데이터가 없습니다 — 진화를 실행하면 라운드별 궤적이 여기 그려집니다.</div>
       </div>
-      <div class="evo-comp-label micro">세대 구성 — 라운드별 탐색·변이·교차 비율</div>
+      <div class="evo-comp-label micro">세대 구성 — 라운드별 탐색·변이·교차·개선 비율</div>
     </section>
 
     <!-- 왼쪽 = GA 파이프라인 + Sharpe×Turnover, 오른쪽 = 정향변이 학습(두 줄에 걸침) -->
@@ -585,6 +586,6 @@
     </div>
   </main>
 
-  <script src="/app.js?v=38" defer></script>
+  <script src="/app.js?v=39" defer></script>
 </body>
 </html>

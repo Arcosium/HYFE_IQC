@@ -1,6 +1,9 @@
 # tests/test_gate_watch.py
-# 제출 게이트를 실측으로 배운다. 2026-08-03 에 LOW_FITNESS 가 소프트→하드로 바뀐 걸
-# 이틀 늦게 알아챈 사고의 대응 — 거절 응답에 답이 있었는데 읽지 않았다.
+# 제출 게이트를 실측으로 배운다. 핵심은 **증거의 비대칭**이다 — "FAIL 인데도 제출됐다"는
+# 증명이지만 "거절 사유에 이름이 있었다"는 증명이 아니다(WQB 는 403 본문에 FAIL 을 전부 싣는다).
+# 2026-08-07 정정: 원래는 최근 관측이 이기게 해뒀는데, 거절이 성공보다 5~20배 잦아서
+# soft 집합이 영구히 비고 LOW_FITNESS 가 하드로 굳었다. 그 알파들은 실제로는 22건 전원
+# 제출에 성공한 부류다(fitness 0.26~0.86).
 import time
 
 import pytest
@@ -32,7 +35,8 @@ def _submitted(ts, *names):
     return (ts, 1, 'submitted', [{'name': n} for n in names])
 
 
-def test_rejection_names_are_hard(wired):
+def test_rejection_names_are_hard_without_counter_evidence(wired):
+    """반증이 없으면 거절 사유는 하드로 본다 — 모르는 규칙은 막는 쪽이 안전하다."""
     wired['rows'] = [_rejected(NOW, 'LOW_FITNESS', 'IS_LADDER_SHARPE')]
     obs = gate_watch.observe(2)
     assert 'LOW_FITNESS' in obs['hard'] and 'IS_LADDER_SHARPE' in obs['hard']
@@ -44,12 +48,25 @@ def test_fail_on_a_submitted_alpha_is_soft(wired):
     assert gate_watch.observe(2)['soft'] == ['LOW_FITNESS']
 
 
-def test_recent_observation_wins(wired):
-    """소프트였다가 하드가 되는 게 집행 변경의 모습이다 — 최근 관측을 따른다."""
+def test_soft_proof_beats_rejection_co_occurrence(wired):
+    """더 최근 거절에 이름이 끼어 있어도, 그걸 달고 제출된 적이 있으면 소프트다.
+
+    403 본문은 그 알파의 FAIL 을 전부 싣는다 — 이름이 올랐다는 사실만으로는 원인이
+    아니다. 반면 "FAIL 인데도 OS 에 올랐다"는 안 막는다는 증명이다.
+    """
     wired['rows'] = [_submitted(NOW - 86400, 'LOW_FITNESS'),
-                     _rejected(NOW, 'LOW_FITNESS')]
+                     _rejected(NOW, 'LOW_FITNESS', 'IS_LADDER_SHARPE')]
     obs = gate_watch.observe(2)
-    assert obs['hard'] == ['LOW_FITNESS'] and obs['soft'] == []
+    assert obs['soft'] == ['LOW_FITNESS']
+    assert obs['hard'] == ['IS_LADDER_SHARPE']      # 반증 없는 쪽만 하드로 남는다
+
+
+def test_soft_set_survives_a_flood_of_rejections(wired):
+    """거절이 성공보다 훨씬 잦아도 소프트 집합이 비면 안 된다 (2026-08-07 회귀)."""
+    wired['rows'] = ([_submitted(NOW - 10 * 86400, 'LOW_FITNESS')]
+                     + [_rejected(NOW - i, 'LOW_FITNESS') for i in range(20)])
+    obs = gate_watch.observe(2)
+    assert obs['soft'] == ['LOW_FITNESS'] and obs['hard'] == []
 
 
 def test_sync_reports_the_change(wired):

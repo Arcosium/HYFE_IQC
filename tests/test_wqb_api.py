@@ -86,13 +86,31 @@ def test_harvest_alpha_ignores_auxiliary_checks():
     assert [x['name'] for x in h['is_status']['pass']] == ['LOW_SHARPE']
 
 
+#: 제출 전 '이미 OS 인가' 사전 확인(2026-08-07) 응답 — 아직 IS = 제출 안 된 알파.
+def _not_yet_submitted(alpha_id='A1'):
+    return {('GET', f'/alphas/{alpha_id}'): [FakeResp(200, {'stage': 'IS'})]}
+
+
 def test_submit_alpha_posts_alpha_submit_endpoint():
     sess = FakeSession()
+    sess.queue.update(_not_yet_submitted())
     sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(201, text='ok')]
     c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
     ok, status = c.submit_alpha('A1')
     assert ok is True and status == 'submitted'
-    assert sess.calls[0][0] == 'POST' and sess.calls[0][1].endswith('/alphas/A1/submit')
+    assert sess.calls[0][1].endswith('/alphas/A1')          # 사전 확인 GET
+    assert sess.calls[1][0] == 'POST' and sess.calls[1][1].endswith('/alphas/A1/submit')
+
+
+def test_submit_alpha_skips_post_when_already_os():
+    """이미 제출된 알파엔 POST 하지 않는다 — 재제출은 403 이 나오기까지 WQB 가 제출
+    체크 배터리를 통째로 다시 돌려 8분씩 걸린다(2026-08-07 #37460 실측)."""
+    sess = FakeSession()
+    sess.queue[('GET', '/alphas/A1')] = [FakeResp(200, {'stage': 'OS'})]
+    c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
+    ok, status = c.submit_alpha('A1')
+    assert ok is True and '이미 제출됨' in status
+    assert [call[0] for call in sess.calls] == ['GET']       # POST 는 없다
 
 
 def test_full_settings_accepts_snake_case_handling_keys():
@@ -108,6 +126,7 @@ def test_submit_alpha_polls_retry_after_until_final_json(monkeypatch):
     sleeps = []
     monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: sleeps.append(s))
     sess = FakeSession()
+    sess.queue.update(_not_yet_submitted())
     sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
     sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(200, {'is': {'checks': [
         {'name': 'LOW_SHARPE', 'result': 'PASS'},
@@ -116,12 +135,13 @@ def test_submit_alpha_polls_retry_after_until_final_json(monkeypatch):
     ok, status = c.submit_alpha('A1')
     assert ok is True and status == 'submitted'
     assert sleeps == [0.5]
-    assert [call[0] for call in sess.calls] == ['POST', 'GET']
+    assert [call[0] for call in sess.calls] == ['GET', 'POST', 'GET']
 
 
 def test_submit_alpha_final_failed_checks_are_rejected(monkeypatch):
     monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: None)
     sess = FakeSession()
+    sess.queue.update(_not_yet_submitted())
     sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(200, headers={'Retry-After': '0.5'})]
     sess.queue[('GET', '/alphas/A1/submit')] = [FakeResp(200, {'is': {'checks': [
         {'name': 'SELF_CORRELATION', 'result': 'FAIL'},
@@ -237,6 +257,7 @@ def test_submit_alpha_retries_429_with_retry_after_then_succeeds(monkeypatch):
     sleeps = []
     monkeypatch.setattr(wqb_api._time, 'sleep', lambda s: sleeps.append(s))
     sess = FakeSession()
+    sess.queue.update(_not_yet_submitted())
     sess.queue[('POST', '/alphas/A1/submit')] = [
         FakeResp(429, headers={'Retry-After': '2'}),
         FakeResp(201, text='ok'),
@@ -245,7 +266,8 @@ def test_submit_alpha_retries_429_with_retry_after_then_succeeds(monkeypatch):
     ok, status = c.submit_alpha('A1')
     assert ok is True and status == 'submitted'
     assert sleeps == [2.0]
-    assert [call[0] for call in sess.calls] == ['POST', 'POST']  # 재시도도 POST
+    # 맨 앞 GET 은 '이미 OS 인가' 사전 확인. 재시도는 그대로 POST.
+    assert [call[0] for call in sess.calls] == ['GET', 'POST', 'POST']
 
 
 def test_submit_alpha_429_gives_up_after_deadline(monkeypatch):
@@ -256,6 +278,7 @@ def test_submit_alpha_429_gives_up_after_deadline(monkeypatch):
         return clk['t']
     monkeypatch.setattr(wqb_api._time, 'monotonic', _mono)
     sess = FakeSession()
+    sess.queue.update(_not_yet_submitted())
     sess.queue[('POST', '/alphas/A1/submit')] = [FakeResp(429)] * 10
     c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False); c._authed = True
     ok, status = c.submit_alpha('A1', deadline_s=150)

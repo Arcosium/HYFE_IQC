@@ -224,6 +224,17 @@ CLASSIFICATION_CHECKS = frozenset({
     'OSMOSIS_ALLOCATION',
 })
 
+# ── Power Pool 완화컷은 우리 제출에 적용되지 않는다 (2026-08-07 실측) ──────────
+# 2026-08-03 부트캠프 자료엔 PP 알파가 PROD_CORRELATION·self-corr·Fitness·IS Ladder·
+# Sub-universe·Weight test 를 **요구하지 않는다**고 적혀 있다. 8/7 에 그 여섯을 면제하는
+# 게이트를 넣고 PP 요건(S≥1.0·필드≤3·연산자≤8)을 전부 만족하는 최상위 알파 4건을 쐈는데,
+# WQB 는 **바로 그 면제 대상 두 개로** 403 을 돌려줬다:
+#     LOW_SUB_UNIVERSE_SHARPE(1.0 vs 1.81); IS_LADDER_SHARPE(-0.22 vs 1.58)
+# 알파는 테마 규칙(GLB·D1·TOPDIV3000·SLOW_AND_FAST·금지 데이터셋 없음)을 완전히 지켰고
+# MATCHES_THEMES 에 PP 테마가 실려 있는데도 결과는 WARNING 이었다. 즉 문서의 완화컷은
+# 최소한 **제출 관문에서는** 우리에게 적용되지 않는다. 면제 코드는 되돌렸다.
+# ⚠ 부트캠프 문서만 보고 이걸 다시 시도하지 말 것 — 이미 실측으로 반증됐다.
+
 # IS check 이름 → metrics 키. harvest_alpha 가 이 표로 값/컷오프를 승격한다
 # (요약 `is` 블록엔 sharpe/fitness/returns/turnover/drawdown/margin 6개뿐이라,
 #  승격하지 않으면 보상·선택이 HT 지표를 영원히 못 본다).
@@ -311,8 +322,9 @@ def is_blocking(name) -> bool:
     nm = str(name or '').strip().upper()
     if not nm:
         return False
-    # 실측이 하드코딩보다 권위 있다 — WQB 가 집행을 바꾸면 규칙도 따라가야 한다
-    # (2026-08-03 LOW_FITNESS 소프트→하드 전환을 이틀 늦게 알아챈 사고).
+    # 실측이 하드코딩보다 권위 있다 — WQB 가 집행을 바꾸면 규칙도 따라가야 한다.
+    # (원래 근거였던 "8/3 LOW_FITNESS 소프트→하드 전환"은 8/6 에 오진으로 철회됐다.
+    #  gate_watch 는 그대로 쓰되, 소프트 증거가 하드 추정을 이긴다 — 2026-08-07.)
     try:
         from . import gate_watch
         measured = gate_watch.is_blocking_measured(nm)

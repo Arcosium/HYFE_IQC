@@ -1098,6 +1098,14 @@ class WqbApiClient:
             return False, 'submit_error:missing_alpha_id'
         if not self._ensure_auth():
             return False, 'submit_error:not_authenticated'
+        if stop_event is not None and stop_event.is_set():
+            return False, 'submit_skipped:paused'      # pause 는 네트워크보다 먼저다
+        # 이미 OS 면 POST 하지 않는다. 재제출은 403 을 받은 뒤에야 stage 를 재는데,
+        # 그 403 이 나오기까지 WQB 가 제출 체크 배터리를 통째로 다시 돌려 8분씩 걸린다
+        # (2026-08-07 실측: #37460 이 재시도마다 submit_pending_timeout 으로 되돌아왔다).
+        # GET 한 번이면 확정되고 쿼터도 안 쓴다 — 끊긴 제출 회수의 기본 경로다.
+        if self._verify_submitted(alpha_id):
+            return True, 'submitted (이미 제출됨 — stage=OS 확인)'
 
         deadline = _SUBMIT_ALPHA_DEADLINE_S if deadline_s is None else float(deadline_s)
         url = f'{BASE}/alphas/{alpha_id}/submit'

@@ -26,10 +26,11 @@
   --sans: 'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* 계보(origin) 3색 + 개편전 — 스펙 12번 "시리즈 색 순서"를 그대로 사용 */
+  /* 계보(origin) 4색 + 기타 — 스펙 12번 "시리즈 색 순서"를 그대로 사용 */
   --o-rand: var(--ink);
   --o-mut: var(--gold);
   --o-xo: var(--ok);
+  --o-fix: var(--red-deep);      /* 개선 — ht_rescue · improve · hunt */
   --o-etc: var(--ink-faint);
 }
 
@@ -357,6 +358,7 @@ html, body {
 .evo-legend .sw.rand { background: var(--o-rand); }
 .evo-legend .sw.mut  { background: var(--o-mut); }
 .evo-legend .sw.xo   { background: var(--o-xo); }
+.evo-legend .sw.fix  { background: var(--o-fix); }
 .evo-legend .sw.etc  { background: var(--o-etc); }
 /* 계보 선은 뿌리마다 hue 가 다르다 — 범례는 대표 3색을 겹쳐 "여러 갈래"임을 보인다. */
 .evo-legend .sw.lineage {

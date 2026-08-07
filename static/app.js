@@ -680,9 +680,22 @@
 
   // 종이/잉크 원장 테마 — 스펙 12번 차트 레시피 5색을 그대로 사용(순서·의미 고정).
   const ORIGIN_COLOR = {
-    rand: '#1C1914', mut: '#8C6D3B', xo: '#3F6B45', etc: '#6E675A',
+    rand: '#1C1914', mut: '#8C6D3B', xo: '#3F6B45', fix: '#8C2F1A', etc: '#6E675A',
   };
-  const ORIGIN_LABEL = { rand: '탐색', mut: '변이', xo: '교차', etc: '개편 전' };
+  const ORIGIN_LABEL = { rand: '탐색', mut: '변이', xo: '교차', fix: '개선', etc: '기타' };
+
+  // DB 의 alphas.origin → 차트 버킷. **origin 컬럼이 진실**이고, desc 의
+  // [rand|mut|xo] 태그는 그 컬럼이 없던 옛 행을 위한 폴백일 뿐이다.
+  // ⚠ 새 오퍼레이터를 만들면 여기에 등록해야 한다. 빠뜨리면 그 알파가 전부 한
+  //   덩어리로 뭉쳐 보인다 — 2026-08-07 실측: sweep·combine·ht_rescue·hunt·
+  //   improve·spec 여섯 종 143/400건(36%)이 desc 에 태그를 안 달아서 '개편 전'
+  //   이라는 엉뚱한 이름으로 묶여 있었다. 세대 번호도 태그에서 읽느라 전부 g0 이었다.
+  const ORIGIN_OP = {
+    random: 'rand', spec: 'rand',
+    mutate: 'mut', sweep: 'mut',
+    crossover: 'xo', combine: 'xo',
+    ht_rescue: 'fix', improve: 'fix', hunt: 'fix',
+  };
 
   let _evoAlphas = [];      // 최신 fetch 원본 (id ASC)
   let _evoMetric = 'sharpe';
@@ -705,10 +718,12 @@
   // Sharpe 품질 색상 계층 (ok ≥1.5 · gold ≥1.0 · red-deep else). 오리진 색과 구분되는 톤.
   function sharpeColor(s) { if (s == null) return '#6E675A'; if (s >= GATE_SHARPE_HI) return '#3F6B45'; if (s >= 1.0) return '#8C6D3B'; return '#8C2F1A'; }
 
-  function parseOrigin(desc) {
-    const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(desc || '');
-    if (!m) return { op: 'etc', gen: 0 };
-    return { op: m[1], gen: Number(m[2] || 0) };
+  function parseOrigin(a) {
+    const gen = Number(a.generation || 0);
+    const op = ORIGIN_OP[a.origin];
+    if (op) return { op, gen };
+    const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(a.desc || '');   // 옛 행 폴백
+    return m ? { op: m[1], gen: gen || Number(m[2] || 0) } : { op: 'etc', gen };
   }
 
   // ── 계보 ──────────────────────────────────────────────────────────────
@@ -913,7 +928,7 @@
       g.alphas.forEach((a, ai) => {
         const v = val(a);
         if (v == null) return;
-        const o = parseOrigin(a.desc);
+        const o = parseOrigin(a);
         const jitter = cnt > 1 ? ((ai / (cnt - 1)) - 0.5) * Math.min(bw * 0.55, 26) : 0;
         const cx = xOf(gi) + jitter;
         const cy = y(Math.max(lo, Math.min(hi, v)));
@@ -952,11 +967,16 @@
     const cbw = (cW - mL - mR) / n;
     const barW = Math.max(2, cbw - 2);
     groups.forEach((g, gi) => {
-      const counts = { rand: 0, mut: 0, xo: 0, etc: 0 };
-      for (const a of g.alphas) counts[parseOrigin(a.desc).op]++;
+      const counts = { rand: 0, mut: 0, xo: 0, fix: 0, etc: 0 };
+      // 통째로 죽은 라운드(세션 만료 등)는 구성 막대를 세우지 않는다 — 위 산점도는
+      // 비어 있는데 막대만 꽉 차면 '알파가 나왔다'고 거짓말을 한다(2026-08-07).
+      for (const a of g.alphas) {
+        if ((a.error_text || '').trim()) continue;
+        counts[parseOrigin(a).op]++;
+      }
       const total = g.alphas.length || 1;
       let yCursor = cH - 4;
-      for (const op of ['rand', 'mut', 'xo', 'etc']) {
+      for (const op of ['rand', 'mut', 'xo', 'fix', 'etc']) {
         if (!counts[op]) continue;
         const h = (counts[op] / total) * (cH - 8);
         yCursor -= h;
@@ -1037,10 +1057,10 @@
   function renderPipelineComposition(groups) {
     if (!groups.length) return;
     const g = groups[groups.length - 1];
-    const counts = { rand: 0, mut: 0, xo: 0, etc: 0 };
+    const counts = { rand: 0, mut: 0, xo: 0, fix: 0, etc: 0 };
     let gatePass = 0;
     for (const a of g.alphas) {
-      counts[parseOrigin(a.desc).op]++;
+      counts[parseOrigin(a).op]++;
       // 게이트 통과 = 전항목 PASS (fail 0 + pass 1개 이상).
       if (Number(a.pass_count || 0) > 0 && Number(a.fail_count || 0) === 0) gatePass++;
     }
@@ -1086,7 +1106,7 @@
     for (const a of alphas) {
       const yv = Y.get(a), xv = X.get(a);
       if (yv == null || xv == null) continue;
-      pts.push({ a, xv, yv, o: parseOrigin(a.desc), submitted: !!a.submitted });
+      pts.push({ a, xv, yv, o: parseOrigin(a), submitted: !!a.submitted });
     }
     if (empty) empty.hidden = pts.length > 0;
     if (!pts.length) { svg.removeAttribute('viewBox'); return; }
@@ -1627,7 +1647,7 @@
                 (p) => { _lbPage = p; renderLeaderboard(_evoAlphas, _lbSort); });
     const td = (cls, txt) => { const c = document.createElement('td'); if (cls) c.className = cls; if (txt != null) c.textContent = txt; return c; };
     top.forEach((a, i) => {
-      const o = parseOrigin(a.desc), genes = parseGenes(a.desc);
+      const o = parseOrigin(a), genes = parseGenes(a.desc);
       const tr = document.createElement('tr');
       tr.className = 'lb-row';
       tr.tabIndex = 0;
@@ -1700,7 +1720,7 @@
     const body = $('#ad-body');
     if (!dlg || !body) return;
     _adAlpha = a;
-    const o = parseOrigin(a.desc);
+    const o = parseOrigin(a);
     const wid = (a.metrics || {}).wqb_alpha_id || '';
     setText('#ad-title', `R${a.round_num || a.round || 0}${a.phase ? '·f' + a.phase : ''} #${a.idx || 0}`
                         + `  ·  ${ORIGIN_LABEL[o.op]}${o.gen ? ' g' + o.gen : ''}`);

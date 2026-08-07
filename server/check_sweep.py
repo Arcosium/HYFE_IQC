@@ -45,7 +45,7 @@ def _check_one(client, wid: str) -> dict | None:
 
 
 def sweep(client, user_id: int, *, top_n: int = TOP_N, log_fn=None) -> list[dict]:
-    """미제출 상위 알파의 오늘 판정을 받아 온다. → [{wid, fails, blocking, ready}]
+    """미제출 상위 알파의 오늘 판정을 받아 온다. → [{wid, alpha_pk, code, fails, blocking, ready}]
 
     반환의 ready=True 는 '지금 내면 통과할 가능성이 높다'는 뜻이다 — 호출자가 제출한다.
     """
@@ -55,7 +55,7 @@ def sweep(client, user_id: int, *, top_n: int = TOP_N, log_fn=None) -> list[dict
         LOG.warning('체크 후보 조회 실패: %s', e)
         return []
     out = []
-    for wid, sharpe, fitness in cands:
+    for wid, sharpe, fitness, pk, code in cands:
         body = _check_one(client, wid)
         if not body:
             continue
@@ -64,6 +64,7 @@ def sweep(client, user_id: int, *, top_n: int = TOP_N, log_fn=None) -> list[dict
         blocking = [str(c.get('name')) for c in fails
                     if _criteria.is_blocking(c.get('name'))]
         rec = {'wid': wid, 'sharpe': sharpe, 'fitness': fitness,
+               'alpha_pk': pk, 'code': code,
                'fails': [str(c.get('name')) for c in fails],
                'blocking': blocking, 'ready': not blocking}
         out.append(rec)

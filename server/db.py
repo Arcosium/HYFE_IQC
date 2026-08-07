@@ -675,14 +675,16 @@ def code_submitted_before(user_id: int, code: str) -> bool:
 
 
 def unsubmitted_check_candidates(user_id: int, limit: int = 12) -> list[tuple]:
-    """무료 체크로 오늘 판정을 받아볼 만한 미제출 알파 — (wqb_id, sharpe, fitness).
+    """무료 체크로 오늘 판정을 받아볼 만한 미제출 알파 — (wqb_id, sharpe, fitness, pk, code).
 
     fitness 내림차순. 제출 관문에서 fitness 가 가장 자주 병목이라(2026-08-05) 그쪽부터 본다.
+    pk·code 를 같이 주는 이유는 여기서 제출이 성사됐을 때 알파 행을 되짚어 기록하기
+    위해서다 — 없던 동안 무료체크 발 제출은 카운트에도 제출 내역에도 안 남았다(2026-08-07).
     """
     init()
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
-            "SELECT metrics, sharpe, fitness FROM alphas WHERE user_id=? AND submitted=0 "
+            "SELECT id, code, metrics, sharpe, fitness FROM alphas WHERE user_id=? AND submitted=0 "
             "AND TRIM(error_text)='' AND fitness IS NOT NULL AND sharpe IS NOT NULL "
             "AND metrics LIKE '%wqb_alpha_id%' ORDER BY fitness DESC, sharpe DESC LIMIT ?",
             (user_id, int(limit) * 3)).fetchall()
@@ -695,7 +697,7 @@ def unsubmitted_check_candidates(user_id: int, limit: int = 12) -> list[tuple]:
         if not wid or wid in seen:
             continue
         seen.add(wid)
-        out.append((wid, r['sharpe'], r['fitness']))
+        out.append((wid, r['sharpe'], r['fitness'], int(r['id']), r['code'] or ''))
         if len(out) >= int(limit):
             break
     return out

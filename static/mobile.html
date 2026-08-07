@@ -18,7 +18,8 @@
       --rule: rgba(28,25,20,0.8); --hairline: rgba(28,25,20,0.18); --hairline-soft: rgba(28,25,20,0.1);
       --red: #A63A22; --red-deep: #8C2F1A; --red-soft: #F0E2E0;
       --ok: #3F6B45; --gold: #8C6D3B;
-      --o-rand: var(--ink); --o-mut: var(--gold); --o-xo: var(--ok); --o-etc: var(--ink-faint);
+      --o-rand: var(--ink); --o-mut: var(--gold); --o-xo: var(--ok);
+      --o-fix: var(--red-deep); --o-etc: var(--ink-faint);
       --serif: 'Noto Serif KR', 'Apple SD Gothic Neo', serif;
       --sans: 'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif;
       --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -272,7 +273,8 @@
     .lg { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; }
     .lg .sw { width: 7px; height: 7px; border-radius: 0; }
     .lg .sw.rand { background: var(--o-rand); } .lg .sw.mut { background: var(--o-mut); }
-    .lg .sw.xo { background: var(--o-xo); } .lg .sw.etc { background: var(--o-etc); }
+    .lg .sw.xo { background: var(--o-xo); } .lg .sw.fix { background: var(--o-fix); }
+    .lg .sw.etc { background: var(--o-etc); }
     /* 계보 선은 뿌리마다 hue 가 다르다 — 범례는 대표 3색을 겹쳐 "여러 갈래"임을 보인다(데스크톱과 동일). */
     .lg .sw.lineage {
       background: transparent; width: 14px; height: 0;
@@ -510,11 +512,12 @@
           <span class="lg"><span class="sw rand"></span>탐색 rand</span>
           <span class="lg"><span class="sw mut"></span>변이 mut</span>
           <span class="lg"><span class="sw xo"></span>교차 xo</span>
-          <span class="lg"><span class="sw etc"></span>개편 전</span>
+          <span class="lg"><span class="sw fix"></span>개선 fix</span>
+          <span class="lg"><span class="sw etc"></span>기타</span>
           <span class="lg"><span class="sw lineage"></span>계보</span>
           <span class="lg"><span class="sw sub"></span>제출됨</span>
         </div>
-        <div class="micro" style="padding:0 2px 12px">세대 구성 — 라운드별 탐색·변이·교차 비율</div>
+        <div class="micro" style="padding:0 2px 12px">세대 구성 — 라운드별 탐색·변이·교차·개선 비율</div>
       </div>
 
       <!-- 탐색 조건 — Power Pool 주간 테마처럼 기한이 있는 필터. 끄기가 걸기만큼 중요하다.
@@ -555,8 +558,14 @@
     let pollTimer = null;
     let evoTimer = null;
 
-    const ORIGIN_COLOR = { rand: '#1C1914', mut: '#8C6D3B', xo: '#3F6B45', etc: '#6E675A' };
-    const ORIGIN_LABEL = { rand: '탐색', mut: '변이', xo: '교차', etc: '개편 전' };
+    const ORIGIN_COLOR = { rand: '#1C1914', mut: '#8C6D3B', xo: '#3F6B45', fix: '#8C2F1A', etc: '#6E675A' };
+    const ORIGIN_LABEL = { rand: '탐색', mut: '변이', xo: '교차', fix: '개선', etc: '기타' };
+    // alphas.origin → 버킷. desc 의 [rand|mut|xo] 태그는 옛 행 폴백이다.
+    // 새 오퍼레이터는 여기에 등록해야 한다 (app.js 의 ORIGIN_OP 와 같은 표).
+    const ORIGIN_OP = {
+      random: 'rand', spec: 'rand', mutate: 'mut', sweep: 'mut',
+      crossover: 'xo', combine: 'xo', ht_rescue: 'fix', improve: 'fix', hunt: 'fix',
+    };
 
     function show(loggedIn, who) {
       screenLogin.hidden = loggedIn;
@@ -721,10 +730,12 @@
     let _evoLimit = 400;
     const GATE_SHARPE = 1.25, GATE_SHARPE_HI = 1.5;
 
-    function parseOrigin(desc) {
-      const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(desc || '');
-      if (!m) return { op: 'etc', gen: 0 };
-      return { op: m[1], gen: Number(m[2] || 0) };
+    function parseOrigin(a) {
+      const gen = Number(a.generation || 0);
+      const op = ORIGIN_OP[a.origin];
+      if (op) return { op, gen };
+      const m = /\[(rand|mut|xo)(?:\s*g(\d+))?\]/.exec(a.desc || '');
+      return m ? { op: m[1], gen: gen || Number(m[2] || 0) } : { op: 'etc', gen };
     }
     function sharpeOf(a) {
       if (a.sharpe != null && isFinite(Number(a.sharpe))) return Number(a.sharpe);
@@ -889,7 +900,7 @@
         g.alphas.forEach((a, ai) => {
           const v = val(a);
           if (v == null) return;
-          const o = parseOrigin(a.desc);
+          const o = parseOrigin(a);
           const jitter = cnt > 1 ? ((ai / (cnt - 1)) - 0.5) * Math.min(bw * 0.55, 14) : 0;
           const cx = xOf(gi) + jitter;
           const cy = y(Math.max(lo, Math.min(hi, v)));
@@ -923,11 +934,16 @@
       const cbw = (cW - mL - mR) / n;
       const barW = Math.max(1.5, cbw - 1.5);
       groups.forEach((g, gi) => {
-        const counts = { rand: 0, mut: 0, xo: 0, etc: 0 };
-        for (const a of g.alphas) counts[parseOrigin(a.desc).op]++;
+        const counts = { rand: 0, mut: 0, xo: 0, fix: 0, etc: 0 };
+        // 통째로 죽은 라운드(세션 만료 등)는 구성 막대를 세우지 않는다 — 위 산점도는
+        // 비어 있는데 막대만 꽉 차면 '알파가 나왔다'고 거짓말을 한다(2026-08-07).
+        for (const a of g.alphas) {
+          if ((a.error_text || '').trim()) continue;
+          counts[parseOrigin(a).op]++;
+        }
         const total = g.alphas.length || 1;
         let yCursor = cH - 2;
-        for (const op of ['rand', 'mut', 'xo', 'etc']) {
+        for (const op of ['rand', 'mut', 'xo', 'fix', 'etc']) {
           if (!counts[op]) continue;
           const h = (counts[op] / total) * (cH - 4);
           yCursor -= h;

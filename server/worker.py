@@ -426,6 +426,32 @@ class Worker(threading.Thread):
         # 않고 사라지니, 아끼는 게 곧 버리는 것이었다. 한도를 채우면 위에서 대기 큐로 간다.
         return True, ''
 
+    def _record_submit(self, round_num: int, ok: bool, st: str, *,
+                       alpha_pk=None, code: str = '', wid: str = '',
+                       tag: str = '') -> None:
+        """제출 1건의 결과를 **두 곳 모두** 남긴다 — alphas 행 + submit_attempts.
+
+        submit_attempts 를 빠뜨리면 알파 상세엔 '제출됨' 이 뜨는데 제출 카운트도
+        '제출 내역' 목록도 그대로다. 둘 다 submit_attempts.submitted=1 만 세기
+        때문이다(submitted_today · submitted_count · list_submit_attempts).
+        2026-08-07 실측: 8/6 23:08 재시도로 성사된 vRNxL9Lz 가 그렇게 증발해,
+        BRAIN 에 직접 들어가 봐야 제출된 걸 알 수 있었다.
+
+        ponytail: 확정 시각을 '확인한 지금' 으로 적는다. 미 동부 자정을 넘겨
+        확정되면 그날 카운트가 1 더 잡힐 수 있는데, _submitted_today 가 WQB
+        실측과 max 를 취하므로 틀리는 방향이 '슬롯 하나를 아끼는' 쪽뿐이다.
+        """
+        try:
+            _db.set_alpha_submit_result(int(alpha_pk or 0), ok, st,
+                                        user_id=self.user_id, code=code)
+        except Exception as e:
+            LOG.warning('alphas 제출 결과 기록 실패: %s', e)
+        try:
+            _db.record_submit_attempt(self.user_id, round_num, 0,
+                                      code or wid, ok, f'{tag}{st}')
+        except Exception as e:
+            LOG.warning('submit_attempt 기록 실패: %s', e)
+
     def _retry_stuck_submits(self, round_num: int, username: str,
                              password: str) -> None:
         """일시 장애(pending_timeout/5xx/429)로 끊긴 '차단 FAIL 0' 제출을 재시도한다.
@@ -474,10 +500,9 @@ class Worker(threading.Thread):
             except Exception as e:
                 self._log_quiet(round_num, f'⚠ 제출 재시도 예외(무시): {e}')
                 return
-            try:
-                _db.set_alpha_submit_result(c['id'], ok, st)
-            except Exception:
-                pass
+            self._record_submit(round_num, ok, st, alpha_pk=c['id'],
+                                code=str(c.get('code') or ''), wid=wid,
+                                tag='[retry] ')
             self._log(round_num,
                       ('  🚀 재시도 제출 성공!' if ok
                        else f'  📝 재시도 결과: {_ellip(st, 200)}'),
@@ -698,17 +723,9 @@ class Worker(threading.Thread):
             self._log(round_num, f'  ↩ 대기 큐 — {wid} 는 한 번 더 내본다(주간 기준 변동 대비)')
         else:
             _db.submit_queue_mark(row['id'], 'rejected', st[:200])
-        try:
-            _db.set_alpha_submit_result(int(row.get('alpha_pk') or 0), ok, st,
-                                        user_id=self.user_id,
-                                        code=str(row.get('code') or ''))
-        except Exception:
-            pass
-        try:
-            _db.record_submit_attempt(self.user_id, round_num, 0,
-                                      str(row.get('code') or wid), ok, f'[queue] {st}')
-        except Exception:
-            pass
+        self._record_submit(round_num, ok, st, alpha_pk=row.get('alpha_pk'),
+                            code=str(row.get('code') or ''), wid=wid,
+                            tag='[queue] ')
         _dead = _criteria.queue_hopeless(st)
         self._log(round_num,
                   (f'  🚀 대기 큐 제출 완료 — {wid} (목록에서 제거)' if ok
@@ -803,6 +820,9 @@ class Worker(threading.Thread):
                 if not rec.get('ready'):
                     continue
                 ok, st = client.submit_alpha(rec['wid'])
+                self._record_submit(0, ok, st, alpha_pk=rec.get('alpha_pk'),
+                                    code=rec.get('code') or '', wid=rec['wid'],
+                                    tag='[check] ')
                 self._log(0, (f'  🚀 무료체크 발 제출 성공 — {rec["wid"]}' if ok
                               else f'  ⛔ {rec["wid"]}: {_ellip(st, 120)}'),
                           level=('pass' if ok else 'info'))
@@ -1600,6 +1620,20 @@ class Worker(threading.Thread):
             seen: set[str] = set()
             # idx → 저장된 alphas.id. **시뮬이 끝나는 즉시** 채워진다.
             alpha_id_by_idx: dict[int, int] = {}
+            _parent_gen_cache: dict[int, int] = {}
+
+            def _generation_of(i: int) -> int:
+                """후보 하나의 세대 — 부모 조회는 레이어당 몇 건뿐이라 라운드 안에서 캐시."""
+                pk = int((meta_by_idx.get(i) or {}).get('parent_alpha_id') or 0)
+                if pk > 0 and pk not in _parent_gen_cache:
+                    try:
+                        _p = _db.get_alpha_by_id(self.user_id, pk) or {}
+                    except Exception:
+                        _p = {}
+                    _parent_gen_cache[pk] = int(_p.get('generation') or 0)
+                return _child_generation(genome_by_idx.get(i),
+                                         _parent_gen_cache.get(pk))
+
             def _alpha_entry(r: dict) -> dict:
                 """시뮬 결과 1건 → alphas 행. 즉시 저장과 라운드 끝 저장이 **같은
                 한 곳**을 쓴다 — 두 벌로 두면 반드시 어긋난다."""
@@ -1629,8 +1663,8 @@ class Worker(threading.Thread):
                     'settings': settings_by_idx.get(i, {}),
                     'delay': forced_delay,
                     'self_corr': r.get('self_corr'),
-                    # 세대(lineage)는 시뮬 결과가 아니라 생성 시 유전체가 안다.
-                    'generation': int((genome_by_idx.get(i) or {}).get('generation') or 0),
+                    # 세대(lineage)는 시뮬 결과가 아니라 생성 시 유전체·부모가 안다.
+                    'generation': _generation_of(i),
                     # 귀속(v6) — 부모 알파 id·변이 축·바뀐 유전자.
                     'parent_alpha_id': _meta.get('parent_alpha_id'),
                     'origin': _meta.get('origin'),
@@ -2561,6 +2595,20 @@ def _skip_reason_ko(sub_st: str) -> str:
     if r.startswith('below_value'):
         return f'품질 문턱 미달 {r[len("below_value"):].strip("()")}'
     return r        # 모르는 사유는 통째로 넘긴다 — 잘라내면 사유가 사유 아닌 게 된다
+
+
+def _child_generation(genome: dict | None, parent_gen: int | None) -> int:
+    """후보의 세대 — 유전체가 알면 그 값, 모르면 부모 세대 +1, 둘 다 없으면 0.
+
+    combine·ht_rescue·hunt·improve 는 유전체 없이 **코드만** 만드는 레이어라
+    genome_by_idx 에 안 잡힌다. 유전체만 보면 g11 부모의 자식이 g0 으로 찍혀
+    진화 궤적의 계보가 매 라운드 리셋된 것처럼 보인다 — 2026-08-07 실측: 최근
+    400건 중 89건이 부모가 있는데도 세대 0 이었다(combine·ht_rescue·hunt·improve 전부).
+    """
+    g = int((genome or {}).get('generation') or 0)
+    if g:
+        return g
+    return int(parent_gen) + 1 if parent_gen is not None else 0
 
 
 def _ellip(s, n: int) -> str:
