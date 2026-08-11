@@ -962,10 +962,16 @@ class WqbApiClient:
         checks = isf.get('checks') or []
         out = {'pass': [], 'fail': [], 'error': [], 'pending': [], 'warning': []}
         check_metrics: dict[str, str] = {}
+        all_check_results: dict[str, str] = {}
         for ch in checks:
             res = str(ch.get('result') or '').upper()
             nm = ch.get('name')
             nm_u = str(nm or '').strip().upper()
+            if nm_u and res:
+                # 분류 체크는 pass/fail 개수에서 제외하더라도 결과 자체는 버리지 않는다.
+                # 다음 주 Power Pool 문서가 어떤 체크를 필수로 올릴지 미리 알 수 없으므로
+                # 원문 이름과 결과를 일반 맵으로 영속화한다.
+                all_check_results[nm_u] = res
             # ⚠ 승격은 **분류 체크에도** 해야 한다. HT_*/CLUSTER_TEST 는 차단하지 않지만
             #   그 값이야말로 2026-07 개편 이후 제출 가능성의 1차 결정 변수다.
             #   (구 코드는 core 가 아니면 `continue` 로 통째로 버려서 HT 지표가 영영
@@ -1025,6 +1031,9 @@ class WqbApiClient:
         # 체크 유래 지표는 요약 지표를 덮어쓰지 않는다(요약이 권위).
         for k, v in check_metrics.items():
             metrics.setdefault(k, v)
+        if all_check_results:
+            from . import constraint_spec as _constraint_spec
+            metrics[_constraint_spec.CHECK_RESULTS_METRIC] = all_check_results
         return {'metrics': metrics, 'is_status': out}
 
     def set_alpha_description(self, alpha_id: str, description: str) -> bool:

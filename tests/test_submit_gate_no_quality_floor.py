@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from server import db
+from server import constraint_spec, db
 from server import worker as w
 
 
@@ -62,3 +62,25 @@ def test_budget_exhausted_without_alpha_id_does_not_claim_it_queued(wk):
     ok, reason = wk._submit_gate({'sharpe': '1.2'}, None, fail_items=[])
     assert ok is False and reason.endswith('→미보관'), reason
     assert db.submit_queue_list(wk.user_id) == []
+
+
+def test_active_weekly_required_check_is_a_dynamic_submit_gate(wk):
+    wk._active_constraint = constraint_spec.parse(
+        'region=GLB & delay=1 & universe=TOPDIV3000 & Theme Alpha test PASS')
+    base = dict(_WEAK, region='GLB', _delay='1', universe='TOPDIV3000')
+
+    failed = dict(base, _check_results={'THEME_ALPHA': 'WARNING'})
+    ok, reason = wk._submit_gate(failed, None, fail_items=[], code='rank(opt6_vimtaxp)')
+    assert ok is False and 'THEME_ALPHA=WARNING' in reason
+
+    passed = dict(base, _check_results={'THEME_ALPHA': 'PASS'})
+    ok, reason = wk._submit_gate(passed, None, fail_items=[], code='rank(opt6_vimtaxp)')
+    assert ok is True, reason
+
+
+def test_active_scope_mismatch_is_blocked_before_submit(wk):
+    wk._active_constraint = constraint_spec.parse(
+        'region=EUR & delay=0 & universe=TOP2500')
+    metrics = dict(_WEAK, region='USA', _delay='1', universe='TOP3000')
+    ok, reason = wk._submit_gate(metrics, None, fail_items=[], code='rank(opt6_vimtaxp)')
+    assert ok is False and 'region=USA' in reason and 'delay=1' in reason

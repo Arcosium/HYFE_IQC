@@ -122,6 +122,111 @@ YIELD_WEIGHT = float(os.environ.get('IQC_YIELD_WEIGHT', '0.15'))
 FOCUS_OVERLAP_DROP = int(os.environ.get('HYFE_IQC_FOCUS_OVERLAP_DROP', '0'))
 
 
+def _datasets_used_by_code(code: str) -> set[str]:
+    """로컬 필드 카탈로그로 확인 가능한 dataset.id 집합.
+
+    모르는 필드를 안전하다고 단정하지는 않지만, 여기서는 금지 데이터셋의 확정 사용만
+    사전 차단한다. 필드 카탈로그가 갱신되면 같은 로직의 판별 범위도 자동으로 넓어진다.
+    """
+    try:
+        from . import datafield_palette as _palette
+        mapping = _palette.field_dataset_map()
+        datasets = {str(mapping[f]).strip().lower()
+                    for f in _alpha_ast.fields_used(str(code or ''))
+                    if f in mapping and str(mapping[f]).strip()}
+        # WQB 문서상 inst_pnl 은 입력 필드와 별개로 pv1 사용으로 계산된다.
+        if 'inst_pnl' in {str(name or '').lower()
+                          for name in _alpha_ast.operators_used(str(code or ''))}:
+            datasets.add('pv1')
+        return datasets
+    except Exception:
+        return set()
+
+
+def _constraint_result_state(result: dict, constraint) -> str:
+    """시뮬 결과의 현재 주간 필수 체크 상태. 조건이 없으면 pass."""
+    if constraint is None:
+        return 'pass'
+    try:
+        return constraint.required_check_state(metrics=(result or {}).get('metrics') or {})
+    except Exception:
+        return 'unknown'
+
+
+def _constraint_gate_reasons(constraint, metrics: dict, code: str = '') -> list[str]:
+    """활성 조건 하나로 제출 직전 scope/dataset/check를 함께 검증한다."""
+    if constraint is None:
+        return []
+    m = dict(metrics or {})
+    settings = {
+        'region': m.get('region'),
+        'delay': m.get('_delay', m.get('delay')),
+        'universe': m.get('universe'),
+        'neutralization': m.get('neutralization'),
+    }
+    try:
+        # compliant 의 체크 검증과 같은 원자료를 넘긴다. code 가 없는 레거시 재시도는
+        # 데이터셋을 빈 집합으로 두고, 확인 가능한 scope/check만 보수적으로 판정한다.
+        from . import constraint_spec as _constraint_spec
+        normalized = _constraint_spec.check_results(metrics=m)
+        ok, reasons = constraint.compliant(
+            settings=settings,
+            datasets=_datasets_used_by_code(code),
+            checks=normalized,
+        )
+        return [] if ok else reasons
+    except Exception as exc:
+        return [f'활성 조건 평가 오류: {exc}']
+
+
+def _apply_constraint_to_strategies(strategies: list[dict], constraint,
+                                    forced_delay) -> tuple[list[dict], list[tuple[int, list[str]]]]:
+    """모든 생성 경로에 활성 scope를 주입하고 확정 위반 후보를 제거한다.
+
+    GA뿐 아니라 전략스펙·재조합·구제 레이어도 이 한 관문을 지난다. 필수 IS 체크는
+    시뮬 전에는 알 수 없으므로 여기서는 PASS로 가정하고, 실제 결과를 제출/선택에서
+    다시 평가한다.
+    """
+    if constraint is None:
+        return list(strategies or []), []
+    kept: list[dict] = []
+    dropped: list[tuple[int, list[str]]] = []
+    assumed_checks = {name: 'PASS' for name in constraint.required_checks}
+    allowed_neuts = tuple(constraint.neutralizations or ())
+    for strategy in strategies or []:
+        st = dict(strategy.get('settings') or {})
+        if constraint.region:
+            st['region'] = constraint.region
+        if constraint.delay is not None:
+            st['delay'] = str(constraint.delay)
+        elif forced_delay is not None:
+            st['delay'] = str(forced_delay)
+        if constraint.universe:
+            st['universe'] = constraint.universe
+        if allowed_neuts and not constraint.allows_neutralization(st.get('neutralization')):
+            idx = max(0, int(strategy.get('idx') or 1) - 1)
+            st['neutralization'] = allowed_neuts[idx % len(allowed_neuts)]
+        strategy['settings'] = st
+
+        genome = strategy.get('genome')
+        if isinstance(genome, dict):
+            if constraint.universe:
+                genome['universe'] = constraint.universe
+            if st.get('neutralization'):
+                genome['neutralization'] = st['neutralization']
+
+        ok, reasons = constraint.compliant(
+            settings=st,
+            datasets=_datasets_used_by_code(strategy.get('code') or ''),
+            checks=assumed_checks,
+        )
+        if ok:
+            kept.append(strategy)
+        else:
+            dropped.append((int(strategy.get('idx') or 0), reasons))
+    return kept, dropped
+
+
 def _round_label(round_num: int, parent_idx: int, phase: int) -> str:
     """계층 라운드 라벨 = {base}-{부모알파}-{개선깊이}.
     탐색(base, phase 0) 은 정수 그대로('3'), focus 는 '2-2-3' (round 2 의 알파 #2 를 깊이 3 개선)."""
@@ -287,6 +392,9 @@ class Worker(threading.Thread):
         self._stop_event = threading.Event()         # pause/stop 신호
         self._batch_proc_holder: dict[str, Any] = {} # 현재 배치 subprocess 보관
         self._lock = threading.Lock()
+        # 라운드가 읽은 활성 조건의 스냅샷. 생성·선택·제출이 같은 주간 테마를 보며,
+        # 다음 라운드에서 문서가 바뀌면 새 객체로 원자적으로 교체된다.
+        self._active_constraint = None
         # ④ 패밀리 상관벽 (2026-07-26, AAF 패밀리 트리 이식) — 이번 세션에서
         # CORRELATION 거절을 맞은 필드셋. DB 는 라운드 끝에야 기록되므로, 같은
         # 라운드 안의 형제가 곧바로 같은 벽에 돌진하는 것은 이 메모리 셋이 막는다.
@@ -324,6 +432,11 @@ class Worker(threading.Thread):
             # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
+        active_constraint = getattr(self, '_active_constraint', None)
+        constraint_reasons = _constraint_gate_reasons(
+            active_constraint, metrics or {}, str(code or ''))
+        if constraint_reasons:
+            return False, 'active_constraint(' + '; '.join(constraint_reasons) + ')'
         # 같은 식 차단은 **여기서 하나도 하지 않는다** (2026-08-04 사장 지시 "제출은 일단
         # submit 떴으면 해보고", 2026-08-06 재지시). 문 앞에서 막아 봐야 시뮬 슬롯은 이미
         # 태운 뒤라 아끼는 게 없고, 거절은 쿼터를 안 쓴다. 중복은 전부 **시뮬 전**(라운드
@@ -472,7 +585,8 @@ class Worker(threading.Thread):
                 continue
             ok_gate, reason = self._submit_gate(c.get('metrics') or {}, None,
                                                 fail_items=[],
-                                                genome=c.get('genome'))
+                                                genome=c.get('genome'),
+                                                code=str(c.get('code') or ''))
             if not ok_gate:
                 self._log_quiet(round_num, f"⏭ 제출 재시도 보류 (#{c['id']}): {reason}")
                 return
@@ -665,7 +779,8 @@ class Worker(threading.Thread):
             return None
         wid = str(row.get('wqb_alpha_id') or '')
         ok_gate, reason = self._submit_gate(row.get('metrics') or {}, None,
-                                            fail_items=[], genome=None)
+                                            fail_items=[], genome=None,
+                                            code=str(row.get('code') or ''))
         if not ok_gate:
             if not reason.startswith('daily_budget'):
                 _db.submit_queue_mark(row['id'], 'pending', f'게이트 보류: {reason}')
@@ -965,7 +1080,7 @@ class Worker(threading.Thread):
                 # (2026-08-04 실측: 8월 표 미게시) 문서만 믿으면 새 테마가 걸린 걸
                 # 못 알아채고 옛 조건으로 한 달을 간다. 이름이 바뀌면 여기서 잡아
                 # 로그를 남기고 공략 플레이북을 기동한다.
-                theme_sync.note_observed_theme(
+                _observed_theme = theme_sync.note_observed_theme(
                     self.user_id, log_fn=lambda m: self._log(0, m))
                 # ⚖ 제출 게이트 실측 — 하드코딩된 is_blocking 이 낡으면 여기서 잡는다.
                 # 2026-08-03 LOW_FITNESS 소프트→하드 전환을 이틀 늦게 알아챈 사고의 대응.
@@ -985,7 +1100,12 @@ class Worker(threading.Thread):
                                          f'(PP 점수는 순증분이라 형제는 1개어치)')
                 except Exception as e:
                     self._log_quiet(0, f'⚠ 집중도 계산 실패(무시): {e}')
-                _theme = theme_sync.maybe_sync(username, password, self.user_id)
+                # API 응답에서 새 테마 이름을 먼저 봤다면 6시간 TTL 안이어도 지원
+                # 문서를 즉시 다시 읽는다. 이름만 바꾸고 실제 constraint 는 옛 주에
+                # 남는 틈이 생기면 PURE_POWER_POOL_THEME 거절을 반복한다.
+                _theme = theme_sync.maybe_sync(
+                    username, password, self.user_id,
+                    force=bool(_observed_theme))
                 if _theme:
                     self._log(0, f'📅 Power Pool 테마 자동 적용: {_theme[:110]}')
             except Exception as e:
@@ -1128,12 +1248,14 @@ class Worker(threading.Thread):
             _constraint = (_constraint or _cspec.ConstraintSpec()).for_account(account_type)
             if _constraint.is_empty():
                 _constraint = None
+            self._active_constraint = _constraint
             # 계정 등급이 허용하는 데이터셋으로 팔레트를 좁힌다 — set_constraint 가
             # 이 값을 읽어 풀을 만드므로 **먼저** 걸어야 한다.
             genome_models.set_account_datasets(
                 self._account_datasets(account_type, _constraint, username, password))
             genome_models.set_constraint(_constraint)
         except Exception as e:
+            self._active_constraint = None
             genome_models.set_constraint(None)
             self._log(round_num, f'  ⚠ 탐색 조건 적용 실패(무제약으로 진행): {e}')
         if _constraint is not None:
@@ -1156,7 +1278,7 @@ class Worker(threading.Thread):
         # ⚠ 코드에서 유전체를 역추출하지 않는다. 그건 손실 압축이라 자식이 부모를 복제조차
         #    못 해 구조적으로 부모보다 나쁜 자식만 나온다(2026-07-11 진단).
         try:
-            seeds = _db.elite_seeds(self.user_id, top_n=5)
+            seeds = _db.elite_seeds(self.user_id, top_n=5, constraint=_constraint)
         except Exception as e:
             self._log_quiet(round_num, f'⚠ seeds 조회 실패: {e}')
             seeds = []
@@ -1167,7 +1289,8 @@ class Worker(threading.Thread):
             from . import committee as _committee
             _cpolicy = _committee.active_policy(self.user_id, round_num)
             if _cpolicy and _cpolicy.get('seed_pairs'):
-                _pool = _db.elite_seeds(self.user_id, top_n=12)
+                _pool = _db.elite_seeds(self.user_id, top_n=12,
+                                         constraint=_constraint)
                 _reordered = _committee.order_seeds_with_pairs(
                     _pool, _cpolicy, fallback=seeds)
                 if _reordered is not seeds and len(_reordered) >= 2:
@@ -1467,6 +1590,18 @@ class Worker(threading.Thread):
                                   f' 그리드 변형 {len(_ivars)}개 추가')
             except Exception as _e:
                 self._log_quiet(round_num, f'⚠ 결정론 레이어 실패(무시): {_e}')
+
+            # 생성기가 여러 갈래여도 마지막에는 같은 활성 조건을 통과시킨다. 이 단계는
+            # scope를 강제하고 금지 데이터셋의 확정 사용을 시뮬 전에 제거한다. IS 체크는
+            # 아래 실제 WQB 결과에서 판단한다.
+            strategies, _constraint_dropped = _apply_constraint_to_strategies(
+                strategies, _constraint, forced_delay)
+            for _idx, _reasons in _constraint_dropped:
+                self._log(round_num,
+                          f'  ⊘ #{_idx} 활성 조건 위반으로 사전 제외: '
+                          f'{"; ".join(_reasons)[:180]}')
+            if not strategies:
+                raise RuntimeError('생성 후보가 모두 활성 탐색 조건을 위반함')
 
             if is_focus:
                 _dcomp: dict[str, int] = {}
@@ -2008,7 +2143,8 @@ class Worker(threading.Thread):
                 if not aborted:
                     # 라운드 시뮬 결과 — 한 줄 요약. 알파별 줄은 partial_fn 스트림이 이미 송출함.
                     # partial 미수신된 알파 (예: subprocess KILL) 만 여기서 보충.
-                    r_pass = sum(1 for r in results if _is_best_alpha(r))
+                    r_pass = sum(1 for r in results
+                                 if _is_best_alpha(r, _constraint))
                     r_err = sum(1 for r in results if r.get('error_text'))
                     self._log(round_num,
                               f'  ── 시뮬 결과 — '
@@ -2076,7 +2212,10 @@ class Worker(threading.Thread):
                             'family': _gn.get('family'),
                             'combine': _gn.get('combine'),
                         }
-                        _passed = _is_best_alpha(r)   # yield 분자 — 게이트 통과 여부
+                        _passed = _is_best_alpha(
+                            r, _constraint)   # yield 분자 — 현재 테마 게이트 통과 여부
+                        if _constraint is not None and _constraint.required_checks:
+                            _rwd *= _constraint.selection_multiplier(metrics=_m)
                         for _ak in _bandit.arm_keys_for_assignment(_assign):
                             _dim = _ak.split(':', 1)[0]
                             _db.bandit_update(self.user_id, _ak, _rwd, round_num,
@@ -2112,21 +2251,11 @@ class Worker(threading.Thread):
                 # Submit 시점 self-correlation 거절 → 8개 IS 테스트 중 7개(실질 테스트) 전부
                 # 통과한 케이스. is_status 에 self-corr FAIL 1개가 들어가 있어도 "PASS≥7 best"
                 # 로 계속 인정 (제출만 못 했을 뿐).
-                is_best = _is_best_alpha(r)   # 단일 진실: 위 _is_best_alpha 헬퍼
+                is_best = _is_best_alpha(
+                    r, _constraint)   # 단일 진실: 기본 게이트 + 현재 테마
                 if is_best:
                     pass_total += 1
-                    if r.get('submitted'):
-                        submit_tag = ' · 🚀 알파 제출 완료'
-                    elif sub_status.startswith('rejected:'):
-                        submit_tag = f' · ⛔ 제출 거절 ({sub_status[len("rejected:"):][:48]})'
-                    elif sub_status == 'disabled':
-                        submit_tag = ' · ⛔ Submit 버튼 비활성 (제출 조건 미충족)'
-                    elif sub_status == 'not_found':
-                        submit_tag = ' · ⚠ Submit 버튼 못 찾음'
-                    elif sub_status.startswith('fail:'):
-                        submit_tag = f' · ⚠ 제출 실패 ({sub_status[5:][:30]})'
-                    else:
-                        submit_tag = ''
+                    submit_tag = _submit_result_tag(bool(r.get('submitted')), sub_status)
                     _denom = (p_n + f_n) if (p_n + f_n) else (total or '?')
                     self._log(round_num,
                               f'    #{r["idx"]} 🏆 PASS {p_n or pc}/{_denom} — best 발견!{submit_tag}',
@@ -2231,16 +2360,20 @@ class Worker(threading.Thread):
                 # 위 elif 분기가 먼저 잡으므로 큐가 무한히 자라지 않는다.)
                 def _fail_descs_of(r: dict) -> list[str]:
                     ist = r.get('is_status') or {}
-                    return [
+                    descs = [
                         str(it.get('desc') or it.get('name') or '')
                         for it in (list(ist.get('fail') or [])
                                    + list(ist.get('error') or []))
                     ]
+                    if _constraint is not None:
+                        descs.extend(_constraint.required_check_reasons(
+                            metrics=r.get('metrics') or {}))
+                    return descs
 
                 focus_candidates: list[dict] = []
                 _far_skipped = 0
                 for r in all_results:
-                    _kind, _ = _classify_focus(r)
+                    _kind, _ = _classify_focus(r, _constraint)
                     if not _kind:
                         continue
                     # 절대 closeness 하한선 — 통과까지 너무 먼(예: Sharpe 0.07) 부모는
@@ -2278,7 +2411,8 @@ class Worker(threading.Thread):
                 if len(focus_candidates) > FOCUS_MAX_PER_ROUND:
                     _dropped = len(focus_candidates) - FOCUS_MAX_PER_ROUND
                     try:
-                        focus_candidates.sort(key=focus_score, reverse=True)
+                        focus_candidates.sort(
+                            key=lambda item: focus_score(item, _constraint), reverse=True)
                     except Exception:
                         pass
                     focus_candidates = focus_candidates[:FOCUS_MAX_PER_ROUND]
@@ -2322,6 +2456,9 @@ class Worker(threading.Thread):
                             str(it.get('desc') or it.get('name') or '').strip()
                             for it in f_list
                         ]
+                        if _constraint is not None:
+                            fail_descs.extend(_constraint.required_check_reasons(
+                                metrics=a.get('metrics') or {}))
                         pass_descs = [
                             str(it.get('desc') or it.get('name') or '').strip()
                             for it in p_list
@@ -2367,7 +2504,8 @@ class Worker(threading.Thread):
                                     int(a.get('idx') or 0)),
                             })
                     _db.set_focus_queue(self.user_id, new_q)
-                    _best = max((focus_score(a) for a in focus_candidates), default=0.0)
+                    _best = max((focus_score(a, _constraint)
+                                 for a in focus_candidates), default=0.0)
                     self._log(round_num,
                               f'  🎯 focus 후보 {len(focus_candidates)}개 '
                               f'(적합도≥{FOCUS_MIN_SCORE}, 최고 {_best:.3f}) — '
@@ -2484,10 +2622,12 @@ def _is_counts(r: dict) -> tuple[int, int, int, int]:
             len(ist.get('error', []) or []), len(ist.get('pending', []) or []))
 
 
-def _is_best_alpha(r: dict) -> bool:
+def _is_best_alpha(r: dict, constraint=None) -> bool:
     """라운드 요약의 'best' 판정 (인라인 로직과 동일):
     IS 권위 있으면 PASS>=T AND (FAIL=0&ERR=0 또는 self-corr 거절뿐),
-    IS 없으면 pass_count>=T."""
+    IS 없으면 pass_count>=T. 활성 테마 필수 체크도 모두 PASS 여야 한다."""
+    if _constraint_result_state(r, constraint) != 'pass':
+        return False
     p_n, f_n, e_n, _ = _is_counts(r)
     sub_status = (r.get('submit_status') or '').strip()
     ist_r = r.get('is_status') or {}
@@ -2510,7 +2650,7 @@ def _check_counts(r: dict) -> tuple[int, int, int]:
             int(r.get('error_count') or 0))
 
 
-def focus_score(r: dict) -> float:
+def focus_score(r: dict, constraint=None) -> float:
     """알파 한 개의 연속 적합도 — focus 후보 선정·정렬의 단일 기준. 절대 예외를 던지지 않는다."""
     pc, fc, ec = _check_counts(r)
     try:
@@ -2522,7 +2662,7 @@ def focus_score(r: dict) -> float:
         return 0.0
 
 
-def _classify_focus(r: dict) -> tuple[str | None, str]:
+def _classify_focus(r: dict, constraint=None) -> tuple[str | None, str]:
     """focus 큐 후보 분류 → (kind|None, self_corr_value).
 
     아직 통과 못한 항목(FAIL/ERROR)이 남아 있고, 연마할 가치가 있을 만큼
@@ -2532,15 +2672,33 @@ def _classify_focus(r: dict) -> tuple[str | None, str]:
     if r.get('cached'):
         return (None, '')
     _pc, fc, ec = _check_counts(r)
-    if (fc + ec) < 1:
+    theme_state = _constraint_result_state(r, constraint)
+    if (fc + ec) < 1 and theme_state != 'fail':
         return (None, '')          # 이미 전부 통과 — 연마할 항목이 없다
-    if focus_score(r) < FOCUS_MIN_SCORE:
+    if focus_score(r, constraint) < FOCUS_MIN_SCORE:
         return (None, '')
     # Sharpe 절대 하한 — 신호가 없는 부모는 연마해도 오버피팅만 나온다 (강의의 시드 원칙).
     _sh = _criteria._f((r.get('metrics') or {}).get('sharpe'))
     if _sh is None or abs(_sh) < FOCUS_MIN_SHARPE:
         return (None, '')
     return ('fail', '')
+
+
+def _submit_result_tag(submitted: bool, submit_status: str) -> str:
+    """라이브 피드용 제출 결과. 거절 사유는 화면에서 온전히 확인할 수 있게 보존한다."""
+    status = (submit_status or '').strip()
+    if submitted:
+        return ' · 🚀 알파 제출 완료'
+    if status.startswith('rejected:'):
+        reason = status[len('rejected:'):]
+        return f' · ⛔ 제출 거절 ({reason})'
+    if status == 'disabled':
+        return ' · ⛔ Submit 버튼 비활성 (제출 조건 미충족)'
+    if status == 'not_found':
+        return ' · ⚠ Submit 버튼 못 찾음'
+    if status.startswith('fail:'):
+        return f' · ⚠ 제출 실패 ({status[5:][:30]})'
+    return ''
 
 
 def _round_headline(results) -> str:

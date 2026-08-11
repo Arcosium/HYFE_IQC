@@ -32,6 +32,20 @@ LOG = logging.getLogger('genomicwqb.theme_playbook')
 _LOOKBACK = 400
 
 
+def primary_theme(themes: dict, spec=None) -> str:
+    """현재 공략해야 할 Power Pool 테마 이름을 일반 배수 테마보다 우선한다."""
+    names = list((themes or {}).get('all') or [])
+    pp = [name for name in names if 'power pool' in name.lower()]
+    if not pp:
+        return ''
+    region = str(getattr(spec, 'region', '') or '').upper()
+    delay = str(getattr(spec, 'delay', '') or '')
+    scoped = [name for name in pp
+              if (not region or f'{region}/' in name.upper())
+              and (not delay or f'/D{delay}' in name.upper())]
+    return (scoped or pp)[0]
+
+
 def active_themes(user_id: int) -> dict:
     """최근 알파의 MATCHES_THEMES 수확에서 '지금 활성인 테마' 를 복원한다.
 
@@ -113,6 +127,9 @@ def brief(user_id: int) -> str:
     lines = ['[현재 Power Pool 테마 / 탐색 조건]']
     lines.append(f'- 조건: {spec.describe() if spec else "(무제약)"}')
     th = active_themes(user_id)
+    primary = primary_theme(th, spec)
+    if primary:
+        lines.append(f'- **현재 공략 대상 Power Pool 테마: {primary}**')
     if th['all']:
         lines.append(f'- 관측된 활성 테마: {", ".join(th["all"])}')
     if th['matched']:
@@ -183,7 +200,8 @@ def seed_specs(user_id: int, *, k: int = 8, account_type: str = 'research_consul
             ev = f'{ev}\n\n[이번 테마 공략 방침 — 리서치 리드가 정함]\n{plan}'
         region = (getattr(spec, 'region', '') or 'USA')
         th = active_themes(user_id)
-        headline = (', '.join(th['matched']) or ', '.join(th['all'])
+        headline = (primary_theme(th, spec)
+                    or ', '.join(th['matched']) or ', '.join(th['all'])
                     or (spec.describe() if spec else 'no-theme'))
         hypo = {
             'title': f'{region} 테마 공략: {headline}'[:80],

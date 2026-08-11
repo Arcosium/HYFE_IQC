@@ -1599,8 +1599,25 @@ _SEED_COLS = ('id, code, code_hash, desc, pass_count, fail_count, error_count, '
               'self_corr, generation, genome, fail_items')
 
 
+def _theme_order(records: list[dict[str, Any]], constraint) -> list[dict[str, Any]]:
+    """현재 required_checks 기준 안정 정렬. DB 행은 건드리지 않아 다음 주 재사용 가능."""
+    if constraint is None or not getattr(constraint, 'required_checks', ()):
+        return records
+    rank = {'pass': 2, 'unknown': 1, 'fail': 0}
+    try:
+        return sorted(
+            records,
+            key=lambda d: rank[constraint.required_check_state(
+                metrics=d.get('metrics') or {})],
+            reverse=True,
+        )
+    except Exception:
+        return records
+
+
 def hall_of_fame_seeds(user_id: int, top_n: int = 2, *,
-                       pool: int | None = None) -> list[dict[str, Any]]:
+                       pool: int | None = None,
+                       constraint=None) -> list[dict[str, Any]]:
     """역대(윈도우 무관) 최고 유전체 top_n 개. 유전체가 없는 행은 애초에 후보가 아니다.
 
     sharpe 상위 `pool` 행을 먼저 뽑고(인덱스 친화적), 그 안에서 selection_score 로 재정렬한다.
@@ -1629,13 +1646,15 @@ def hall_of_fame_seeds(user_id: int, top_n: int = 2, *,
             best_by_code[key] = d
     out = sorted(best_by_code.values(),
                  key=lambda d: (d['_score'], d['id']), reverse=True)
+    out = _theme_order(out, constraint)
     return out[:top_n]
 
 
 def elite_seeds(user_id: int, top_n: int = 5, *,
                 window: int | None = None,
                 min_score: float | None = None,
-                hall_of_fame: int | None = None) -> list[dict[str, Any]]:
+                hall_of_fame: int | None = None,
+                constraint=None) -> list[dict[str, Any]]:
     """다음 라운드의 교차/변이 재료가 될 엘리트 유전체 top_n 개.
 
     구(舊) `best_alphas_for_seeding` 을 대체한다. 그 함수는 세 가지가 동시에 틀렸다
@@ -1708,6 +1727,11 @@ def elite_seeds(user_id: int, top_n: int = 5, *,
             logging.getLogger('genomicwqb.db').warning(
                 'selection mode=%s 실패, score 폴백: %s', _mode, e)
 
+    # 어떤 체크가 필수인지는 현재 spec 이 정한다. PASS→미측정→실패 순으로만 묶고,
+    # 각 묶음 안의 기존 NSGA/적합도 순서는 보존한다. 테마가 바뀌면 같은 DB 풀을 새
+    # spec 으로 즉시 다시 정렬하므로 과거 부모를 삭제하거나 영구 감점하지 않는다.
+    out = _theme_order(out, constraint)
+
     # ── 명예의 전당 슬롯 ────────────────────────────────────────────────────────
     # 최근성 윈도우 **밖**으로 밀려난 역대 최고 유전체를 소수 슬롯만큼 되돌린다.
     # 없으면 6월의 Sharpe 3.77 같은 유전자가 풀에서 영구 소멸한다(HALL_OF_FAME_N 참조).
@@ -1720,14 +1744,15 @@ def elite_seeds(user_id: int, top_n: int = 5, *,
         try:
             seen_codes = {d.get('code_hash') or d.get('code') or ''
                           for d in out[:top_n]}
-            hof = [d for d in hall_of_fame_seeds(user_id, top_n=hof_slots + 3)
+            hof = [d for d in hall_of_fame_seeds(
+                       user_id, top_n=hof_slots + 3, constraint=constraint)
                    if (d.get('code_hash') or d.get('code') or '') not in seen_codes]
             if hof:
                 keep = out[:max(0, top_n - hof_slots)]
                 out = keep + hof[:hof_slots]
         except Exception as e:
             logging.getLogger('genomicwqb.db').warning('hall-of-fame 시드 실패(무시): %s', e)
-    return out[:top_n]
+    return _theme_order(out, constraint)[:top_n]
 
 
 def recent_metrics(user_id: int, *, limit: int = 400,

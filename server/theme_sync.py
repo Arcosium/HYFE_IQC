@@ -167,6 +167,14 @@ def fetch_article_text(username: str, password: str) -> str | None:
 _SCOPE_RE = re.compile(r'\b([A-Z]{3})/D(\d)\b')
 
 
+def _observed_theme_identity(name: str) -> str:
+    """WQB 가 같은 PP 테마에 붙이는 표시용 숫자 접미사를 변경 감지에서 제외한다."""
+    text = ' '.join(str(name or '').strip().split())
+    if 'power pool' in text.lower():
+        text = re.sub(r'\s+\d+$', '', text)
+    return text.casefold()
+
+
 def observed_theme(user_id: int) -> tuple[str, str, str]:
     """최근 알파의 WQB 체크에서 관측한 **활성 Power Pool 테마** → (이름, region, delay).
 
@@ -200,7 +208,9 @@ def note_observed_theme(user_id: int, log_fn=None) -> str | None:
     """
     from . import run_config
     name, region, delay = observed_theme(user_id)
-    if not name or name == run_config.get_theme_active_name():
+    previous = run_config.get_theme_active_name()
+    if (not name
+            or _observed_theme_identity(name) == _observed_theme_identity(previous)):
         return None
     run_config.set_theme_active_name(name)
     LOG.info('활성 테마 실측 변경: %s', name)
@@ -227,7 +237,47 @@ def note_observed_theme(user_id: int, log_fn=None) -> str | None:
     return name
 
 
-def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
+def _merge_manual_overlay(current: str, last_applied: str,
+                          new_theme: str) -> str | None:
+    """이전 자동 테마 위에 얹은 수동 제한을 새 테마에도 보존한다.
+
+    ``constraint`` 와 ``theme_last_applied`` 가 다르다고 무조건 자동 갱신을 멈추면,
+    금지 데이터셋 몇 개를 더한 순간부터 주간 테마가 영구 고정된다. 반대로 사용자가
+    리전·딜레이·유니버스나 중립화를 직접 바꾼 경우에는 자동으로 되돌리면 안 된다.
+
+    따라서 이전 자동 테마와 구조가 같고 데이터셋/필수 체크만 더 엄격해진 경우만
+    안전한 오버레이로 인정한다. 반환값 None 은 실제 수동 조건이라 덮어쓰면 안 된다는
+    뜻이다.
+    """
+    from . import constraint_spec
+
+    cur = constraint_spec.parse(current)
+    old = constraint_spec.parse(last_applied)
+
+    scope = ('region', 'delay', 'universe', 'neutralizations')
+    if any(getattr(cur, key) != getattr(old, key) for key in scope):
+        return None
+    if cur.unparsed != old.unparsed:
+        return None
+
+    cur_ds, old_ds = set(cur.excluded_datasets), set(old.excluded_datasets)
+    cur_checks, old_checks = set(cur.required_checks), set(old.required_checks)
+    # 이전 자동 제한을 풀어 쓴 조건은 단순 오버레이가 아니다.
+    if not old_ds.issubset(cur_ds) or not old_checks.issubset(cur_checks):
+        return None
+
+    extra_ds = sorted(cur_ds - old_ds)
+    extra_checks = sorted(cur_checks - old_checks)
+    clauses = [str(new_theme or '').strip()]
+    if extra_ds:
+        quoted = ', '.join(repr(x) for x in extra_ds)
+        clauses.append(f'datasets not in [{quoted}]')
+    clauses.extend(f'{name} test PASS' for name in extra_checks)
+    return ' & '.join(c for c in clauses if c)
+
+
+def maybe_sync(username: str, password: str, user_id: int = 0,
+               *, force: bool = False) -> str | None:
     """필요 시 테마를 확인·적용한다. 조건이 **바뀌었으면** 새 텍스트를 반환.
 
     호출 비용 게이트: 주간 경계(월요일 00:00 UTC)를 넘겼으면 즉시, 아니면 TTL(6h).
@@ -238,16 +288,14 @@ def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
     _playbook_uid = int(user_id or 0)
     now = time.time()
     week_key = monday_of(_dt.datetime.now(_dt.timezone.utc).date()).isoformat()
-    if _last_check['week'] == week_key and now - _last_check['ts'] < _TTL_S:
+    if (not force and _last_check['week'] == week_key
+            and now - _last_check['ts'] < _TTL_S):
         return None
     _last_check.update(ts=now, week=week_key)
 
     from . import run_config
     cur = _norm(run_config.get_constraint_text())
     last_applied = _norm(run_config.get_theme_last_applied())
-    if cur and last_applied and cur != last_applied:
-        LOG.info('theme sync 보류 — 수동 조건 활성 중 (자동 덮어쓰기 금지)')
-        return None
 
     text = fetch_article_text(username, password)
     if not text:
@@ -259,13 +307,20 @@ def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
         _last_check['ts'] = now - _TTL_S + 45 * 60
         LOG.warning('theme sync — 이번 주 테마를 문서에서 못 찾음 (45분 뒤 재확인)')
         return None
-    if _norm(theme) == cur:
+    target = theme
+    if cur and last_applied and cur != last_applied:
+        target = _merge_manual_overlay(cur, last_applied, theme)
+        if target is None:
+            LOG.info('theme sync 보류 — 수동 조건 활성 중 (자동 덮어쓰기 금지)')
+            return None
+        LOG.info('theme sync — 수동 추가 제한을 보존해 새 테마에 병합')
+    if _norm(target) == cur:
         run_config.set_theme_last_applied(theme)   # 수동으로 같은 값 넣은 경우 귀속
         return None
-    run_config.set_constraint_text(theme)
+    run_config.set_constraint_text(target)
     run_config.set_theme_last_applied(theme)
-    LOG.info('theme sync 적용: %s', theme[:120])
-    _kick_palette_refresh_if_needed(theme)
+    LOG.info('theme sync 적용: %s', target[:120])
+    _kick_palette_refresh_if_needed(target)
     # 새 테마 → 로컬 LLM 이 스스로 전략을 세워 첫 큐(strategy_specs)에 넣는다
     # (2026-07-27 사장 지시 — Claude 없이도 같은 판단이 돌게).
     try:
@@ -273,7 +328,7 @@ def maybe_sync(username: str, password: str, user_id: int = 0) -> str | None:
         theme_playbook.start_background(_playbook_uid or 0)
     except Exception as e:
         LOG.warning('테마 플레이북 기동 실패(무시): %s', e)
-    return theme
+    return target
 
 
 def _kick_palette_refresh_if_needed(theme_text: str) -> None:

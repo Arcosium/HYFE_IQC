@@ -64,6 +64,22 @@ CHECK_ALIAS = {
     'cluster': 'CLUSTER_TEST',
 }
 
+# WQB 의 모든 IS 체크 결과를 metrics 에 보존하는 공통 키. pass/fail 카운트에는
+# 분류용 체크를 섞지 않되, 주간 테마가 그 분류 체크를 필수 조건으로 지정하면 탐색·선택·
+# 제출이 같은 원자료를 보게 한다.
+CHECK_RESULTS_METRIC = '_check_results'
+
+# CHECK_RESULTS_METRIC 도입 전 저장된 알파를 현재 테마의 부모 후보로 재평가하기 위한
+# 호환표다. 새 결과는 WQB 가 준 PASS/WARNING/FAIL 문자열을 그대로 쓰므로 이 표에
+# 의존하지 않는다. 방향은 WQB 체크의 limit 의미다.
+_LEGACY_CHECK_METRICS = {
+    'HT_HIGH_TURNOVER_RETURNS_RATIO': ('ht_returns_ratio', 'ge'),
+    'HT_PNL_REALIZATION_HORIZON': ('ht_pnl_horizon', 'le'),
+    'HT_AFTER_COST_SHARPE': ('ht_after_cost_sharpe', 'ge'),
+    'CLUSTER_TEST': ('cluster_sharpe', 'ge'),
+    'LOW_SUB_UNIVERSE_SHARPE': ('sub_universe_sharpe', 'ge'),
+}
+
 KNOWN_REGIONS = ('USA', 'GLB', 'CHN', 'EUR', 'ASI', 'JPN', 'KOR', 'TWN',
                  'HKG', 'AMR', 'IND', 'MEA')
 # 비-컨설턴트가 뛰는 판(IQC)은 USA 고정이다. delay 는 0/1 중 선택 가능하고,
@@ -155,6 +171,40 @@ class ConstraintSpec:
             bits.append('요구 ' + ','.join(self.required_checks))
         return ' · '.join(bits) if bits else '(제약 없음)'
 
+    def required_check_state(self, *, checks=None, metrics=None) -> str:
+        """현재 필수 체크 묶음의 상태: ``pass`` | ``fail`` | ``unknown``.
+
+        조건이 바뀌면 저장된 알파를 수정하지 않고 이 메서드에 새 spec 만 넘겨 다시
+        순위를 매긴다. 그래서 특정 주간 체크를 코드에 박아 두지 않는다.
+        """
+        if not self.required_checks:
+            return 'pass'
+        got = check_results(checks=checks, metrics=metrics)
+        missing = False
+        for need in self.required_checks:
+            result = got.get(str(need).upper())
+            if result is None:
+                missing = True
+            elif result != 'PASS':
+                return 'fail'
+        return 'unknown' if missing else 'pass'
+
+    def required_check_reasons(self, *, checks=None, metrics=None) -> list[str]:
+        got = check_results(checks=checks, metrics=metrics)
+        return [f"{need}={got.get(str(need).upper()) or '미측정'} (요구 PASS)"
+                for need in self.required_checks
+                if got.get(str(need).upper()) != 'PASS']
+
+    def selection_multiplier(self, *, checks=None, metrics=None) -> float:
+        """현재 테마 부모 선택용 동적 가중치.
+
+        실패 부모도 0으로 지우지 않는다. 다음 주 조건에서 다시 쓸 수 있고, 현재 체크를
+        개선하는 focus 재료로도 가치가 있기 때문이다. 다만 PASS 부모가 있으면 그쪽이
+        먼저 번식하도록 충분히 큰 순위 차이를 둔다.
+        """
+        return {'pass': 1.20, 'unknown': 0.55, 'fail': 0.25}[
+            self.required_check_state(checks=checks, metrics=metrics)]
+
     def compliant(self, *, settings=None, datasets=None, checks=None) -> tuple:
         """이 알파가 조건을 통과하는가 → (ok, 사유목록).
 
@@ -184,12 +234,52 @@ class ConstraintSpec:
                 bad = sorted({str(d).strip().lower() for d in datasets} & self.excluded_datasets)
                 if bad:
                     reasons.append(f"금지 데이터셋 사용: {', '.join(bad)}")
-        ck = {str(k).upper(): str(v).upper() for k, v in (checks or {}).items()}
-        for need in self.required_checks:
-            got = ck.get(need)
-            if got != 'PASS':
-                reasons.append(f"{need}={got or '미측정'} (요구 PASS)")
+        reasons.extend(self.required_check_reasons(checks=checks))
+        if self.unparsed:
+            reasons.extend(f'해석 못 한 조건: {clause}' for clause in self.unparsed)
         return (not reasons), reasons
+
+
+def _number(value):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def check_results(*, checks=None, metrics=None) -> dict[str, str]:
+    """여러 저장 형식의 체크 결과를 ``{NAME: RESULT}`` 로 정규화한다.
+
+    새 WQB 수확 결과는 ``metrics['_check_results']`` 가 권위다. ``checks`` 는 테스트와
+    직접 호출용 오버레이이며, 과거 행은 제한된 수치/컷오프 쌍으로만 보완한다.
+    """
+    out: dict[str, str] = {}
+    raw = (metrics or {}).get(CHECK_RESULTS_METRIC)
+    if isinstance(raw, dict):
+        out.update({str(k).strip().upper(): str(v).strip().upper()
+                    for k, v in raw.items() if str(k).strip()})
+    if isinstance(checks, dict):
+        out.update({str(k).strip().upper(): str(v).strip().upper()
+                    for k, v in checks.items() if str(k).strip()})
+    elif isinstance(checks, (list, tuple)):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip().upper()
+            if name:
+                out[name] = str(item.get('result') or '').strip().upper()
+
+    m = metrics or {}
+    for name, (key, direction) in _LEGACY_CHECK_METRICS.items():
+        if name in out:
+            continue
+        value = _number(m.get(key))
+        limit = _number(m.get(f'{key}_cutoff'))
+        if value is None or limit is None:
+            continue
+        passed = value >= limit if direction == 'ge' else value <= limit
+        out[name] = 'PASS' if passed else 'WARNING'
+    return out
 
 
 def _parse_list(blob: str) -> list:

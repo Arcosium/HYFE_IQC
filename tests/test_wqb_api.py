@@ -84,6 +84,13 @@ def test_harvest_alpha_ignores_auxiliary_checks():
     c = wqb_api.WqbApiClient('e', 'p', session=sess, session_file=False)
     h = c.harvest_alpha('AB1')
     assert [x['name'] for x in h['is_status']['pass']] == ['LOW_SHARPE']
+    # pass 카운트에서는 빼도 결과 원문은 보존한다. 다음 주 테마가 어느 보조 체크를
+    # 요구하든 이 맵으로 제출·선택 게이트를 동적으로 구성한다.
+    assert h['metrics']['_check_results'] == {
+        'LOW_SHARPE': 'PASS',
+        'HT_TURNOVER': 'PASS',
+        'MATCHES_PYRAMID': 'PASS',
+    }
 
 
 #: 제출 전 '이미 OS 인가' 사전 확인(2026-08-07) 응답 — 아직 IS = 제출 안 된 알파.

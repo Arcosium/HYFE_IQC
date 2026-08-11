@@ -54,3 +54,14 @@ def test_seed_specs_is_fail_open(monkeypatch):
     import server.strategy_spec as ss
     monkeypatch.setattr(ss, 'concretize', lambda *a, **k: [])   # LLM 실패 상황
     assert theme_playbook.seed_specs(2) == 0                    # 예외 없이 0
+
+
+def test_primary_theme_prefers_current_power_pool_over_general_matches():
+    spec = constraint_spec.parse('region=GLB & delay=1 & universe=TOPDIV3000')
+    themes = {
+        'matched': {'GLB High Turnover Theme': None,
+                    'GLB/D1/PV Pyramid Theme': None},
+        'all': ['GLB High Turnover Theme', 'GLB/D1/PV Pyramid Theme',
+                "GLB/D1 Power Pool Aug'26 2"],
+    }
+    assert theme_playbook.primary_theme(themes, spec) == "GLB/D1 Power Pool Aug'26 2"

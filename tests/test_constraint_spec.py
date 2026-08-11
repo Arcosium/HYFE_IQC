@@ -95,6 +95,35 @@ def test_모르는_정보는_불충족으로_본다():
     assert any('미측정' in r for r in why)
 
 
+def test_필수체크_상태는_활성_spec으로_동적_평가한다():
+    a = cs.parse('Theme Alpha test PASS')
+    b = cs.parse('Theme Beta test PASS')
+    metrics = {cs.CHECK_RESULTS_METRIC: {
+        'THEME_ALPHA': 'PASS',
+        'THEME_BETA': 'WARNING',
+    }}
+    assert a.required_check_state(metrics=metrics) == 'pass'
+    assert b.required_check_state(metrics=metrics) == 'fail'
+    assert cs.parse('Theme Gamma test PASS').required_check_state(
+        metrics=metrics) == 'unknown'
+
+
+def test_과거_수치형_결과도_현재_필수체크로_재평가한다():
+    spec = cs.parse('High Turnover returns ratio test PASS')
+    assert spec.required_check_state(metrics={
+        'ht_returns_ratio': '0.81', 'ht_returns_ratio_cutoff': '0.75'}) == 'pass'
+    assert spec.required_check_state(metrics={
+        'ht_returns_ratio': '0.41', 'ht_returns_ratio_cutoff': '0.75'}) == 'fail'
+
+
+def test_해석못한_조건은_제출준수로_오인하지_않는다():
+    spec = cs.parse('region=USA & future magic condition')
+    ok, reasons = spec.compliant(
+        settings={'region': 'USA'}, datasets=[], checks={})
+    assert not ok
+    assert any('해석 못 한 조건' in reason for reason in reasons)
+
+
 # ── GA 주입 ─────────────────────────────────────────────────────────────────
 
 def _violations(pop, banned):
@@ -175,3 +204,40 @@ def test_결정론_같은_유전체는_같은_중립화():
         gm._apply_constraint(dd)
         outs.append(dd['neutralization'])
     assert len(set(outs)) == 1
+
+
+def test_모든_생성경로에_같은_활성_scope와_dataset_조건을_적용한다():
+    from server import worker
+
+    spec = cs.parse(
+        "region=EUR & delay=0 & universe=TOP2500 & "
+        "neutralization in (market, sector) & datasets not in ['pv1']")
+    strategies = [
+        {'idx': 1, 'code': 'rank(close)',
+         'settings': {'region': 'USA', 'delay': '1', 'universe': 'TOP3000',
+                      'neutralization': 'INDUSTRY'}},
+        {'idx': 2, 'code': 'rank(opt6_vimtaxp)',
+         'settings': {'region': 'USA', 'delay': '1', 'universe': 'TOP3000',
+                      'neutralization': 'INDUSTRY'},
+         'genome': {'universe': 'TOP3000', 'neutralization': 'INDUSTRY'}},
+    ]
+    kept, dropped = worker._apply_constraint_to_strategies(strategies, spec, '1')
+    assert [idx for idx, _ in dropped] == [1]
+    assert len(kept) == 1
+    st = kept[0]['settings']
+    assert (st['region'], st['delay'], st['universe']) == ('EUR', '0', 'TOP2500')
+    assert st['neutralization'] in {'MARKET', 'SECTOR'}
+    assert kept[0]['genome']['universe'] == 'TOP2500'
+
+
+def test_best와_yield도_현재_필수체크를_공유한다():
+    from server import worker
+
+    spec = cs.parse('Theme Alpha test PASS')
+    result = {
+        'metrics': {cs.CHECK_RESULTS_METRIC: {'THEME_ALPHA': 'WARNING'}},
+        'is_status': {'pass': [{'name': 'LOW_SHARPE'}], 'fail': [], 'error': []},
+    }
+    assert worker._is_best_alpha(result, spec) is False
+    result['metrics'][cs.CHECK_RESULTS_METRIC]['THEME_ALPHA'] = 'PASS'
+    assert worker._is_best_alpha(result, spec) is True

@@ -42,6 +42,13 @@ def test_new_theme_logs_and_kicks_playbook(wired):
     assert wired['playbook'] == 1
 
 
+def test_display_suffix_oscillation_is_not_a_new_theme(wired):
+    wired['name'] = "GLB/D1 Power Pool Aug'26"
+    wired['themes'] = ["GLB/D1 Power Pool Aug'26 2"]
+    assert theme_sync.note_observed_theme(2) is None
+    assert wired['playbook'] == 0
+
+
 def test_scope_mismatch_warns(wired):
     """리전이 어긋나면 이번 테마엔 한 건도 못 넣는다 — 조용히 넘어가면 안 된다."""
     wired['themes'] = ['USA/D1 Power Pool Sep`26']
@@ -53,3 +60,33 @@ def test_scope_mismatch_warns(wired):
 def test_no_observation_is_noop(wired):
     assert theme_sync.note_observed_theme(2) is None
     assert wired['playbook'] == 0
+
+
+def test_force_sync_bypasses_ttl_after_observed_name_change(monkeypatch):
+    """새 이름을 봤으면 같은 6시간 창 안에서도 문서를 다시 읽어야 한다."""
+    state = {'constraint': 'old', 'last': 'old'}
+    monkeypatch.setattr(theme_sync, 'ENABLED', True)
+    monkeypatch.setattr(theme_sync, '_last_check',
+                        {'ts': theme_sync.time.time(),
+                         'week': theme_sync.monday_of(
+                             theme_sync._dt.datetime.now(
+                                 theme_sync._dt.timezone.utc).date()).isoformat()})
+    monkeypatch.setattr(theme_sync, 'fetch_article_text',
+                        lambda username, password: ARTICLE_NOW)
+    monkeypatch.setattr(theme_sync, 'current_theme',
+                        lambda text: 'region=USA & delay=1 & universe=TOP1000')
+    monkeypatch.setattr(theme_sync, '_kick_palette_refresh_if_needed', lambda text: None)
+    monkeypatch.setattr(run_config, 'get_constraint_text', lambda: state['constraint'])
+    monkeypatch.setattr(run_config, 'get_theme_last_applied', lambda: state['last'])
+    monkeypatch.setattr(run_config, 'set_constraint_text',
+                        lambda v: state.update(constraint=v) or v)
+    monkeypatch.setattr(run_config, 'set_theme_last_applied',
+                        lambda v: state.update(last=v) or v)
+    monkeypatch.setattr('server.theme_playbook.start_background', lambda uid: None)
+
+    assert theme_sync.maybe_sync('u', 'p', 2) is None
+    assert theme_sync.maybe_sync('u', 'p', 2, force=True)
+    assert state['constraint'].startswith('region=USA')
+
+
+ARTICLE_NOW = 'unused: current_theme is stubbed'

@@ -33,6 +33,13 @@ def test_unknown_reason_is_passed_through_not_swallowed():
     assert 'something_new' in w._skip_reason_ko('submit_skipped:something_new(1)')
 
 
+def test_submit_rejection_reason_is_not_truncated():
+    reason = 'PURE_POWER_POOL_THEME_' + 'VERY_LONG_DETAIL_' * 8
+    out = w._submit_result_tag(False, 'rejected:' + reason)
+    assert reason in out
+    assert out.endswith(reason + ')')
+
+
 # ── 라운드 한 줄 요약 ───────────────────────────────────────────────────────
 
 def _r(idx, sharpe=None, submit_status=''):

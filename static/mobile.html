@@ -138,20 +138,6 @@
     .mcard.collapsed .rs-chev { transform: rotate(-90deg); }
     .mcard.collapsed > :not(.mcard-head) { display: none; }
 
-    /* ── 탐색 조건 (전략 리서치는 2026-07-30 모바일에서 제거, 조건 걸기만 남김) ── */
-    .rs-input-row { display: flex; flex-direction: column; gap: 8px; padding: 0 0 12px; }
-    .rs-input-row textarea {
-      width: 100%; background: transparent; color: var(--ink);
-      border: 0; border-bottom: 1px solid var(--ink-soft); border-radius: 0; padding: 10px 2px;
-      font-size: 16px; font-family: var(--sans); resize: vertical; min-height: 46px;
-    }
-    .rs-input-row textarea:focus { outline: none; border-bottom-color: var(--red); box-shadow: 0 1px 0 0 var(--red); }
-    .rs-input-row button {
-      align-self: flex-end; background: var(--ink); color: var(--paper); border: 1px solid var(--ink);
-      border-radius: 0; padding: 10px 18px; min-height: 40px; font-size: 13px; font-weight: 700; font-family: var(--sans);
-    }
-    .rs-input-row button:disabled { opacity: 0.5; }
-
     /* ── 표 (제출 내역 · 제출 대기) — 좁은 화면에서 가로 스크롤 ── */
     /* 30건이 그대로 펼쳐지면 폰에서 페이지가 통째로 길어진다 — 표 안에서만 스크롤. */
     .mtable-wrap {
@@ -172,6 +158,13 @@
     .mtable td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; padding-right: 10px; }
     .mtable td.wrap { word-break: break-all; }
     .mtable td.ok { color: var(--ok); font-weight: 700; }
+    .mtable tr.alpha-row { cursor: pointer; }
+    .mtable tr.alpha-row:active { background: var(--paper-dim); }
+    .mtable tr.alpha-row:focus-visible { outline: 2px solid var(--red); outline-offset: -2px; }
+    .mtable td.alpha-expr {
+      width: 100%; font-family: var(--mono); font-size: 10.5px; color: var(--ink);
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    }
 
     /* ── 차트 컨트롤 (데스크톱 seg-toggle 압축판) ── */
     .chart-ctrl { display: flex; align-items: center; gap: 8px; padding: 0 0 4px; flex-wrap: wrap; }
@@ -351,6 +344,49 @@
     .desktop-btn-row a:active { border-color: var(--red); color: var(--red); }
     .desktop-hint { display: block; margin-top: 8px; color: var(--ink-faint); font-size: 10.5px; }
 
+    /* ── 제출 알파 상세 ── */
+    .alpha-dlg {
+      width: min(720px, calc(100vw - 24px)); max-height: 90vh; padding: 0;
+      background: var(--paper); color: var(--ink); border: 1px solid var(--rule);
+      box-shadow: 0 18px 48px rgba(28, 25, 20, 0.24);
+    }
+    .alpha-dlg::backdrop { background: rgba(28, 25, 20, 0.42); }
+    .ad-head {
+      display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+      border-bottom: 1px solid var(--rule); position: sticky; top: 0;
+      background: var(--paper); z-index: 1;
+    }
+    .ad-head h3 { margin: 0; font-family: var(--serif); font-size: 15px; }
+    .ad-close {
+      margin-left: auto; min-height: 36px; padding: 7px 12px; background: transparent;
+      color: var(--ink); border: 1px solid var(--ink-soft); font-family: var(--mono);
+    }
+    .ad-body { padding: 14px; overflow: auto; max-height: calc(90vh - 62px); }
+    .ad-body h4 {
+      margin: 17px 0 7px; font-family: var(--mono); font-size: 10px;
+      letter-spacing: 0.14em; color: var(--ink-faint);
+    }
+    .ad-meta { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; font-size: 11px; }
+    .ad-meta dt { font-family: var(--mono); color: var(--ink-faint); }
+    .ad-meta dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+    .ad-stats {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 14px;
+      margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hairline-soft);
+    }
+    .ad-stats span { display: flex; flex-direction: column; gap: 2px; }
+    .ad-stats em { font-style: normal; font-family: var(--mono); font-size: 9px; color: var(--ink-faint); }
+    .ad-stats b { font-family: var(--serif); font-size: 18px; }
+    .ad-code {
+      margin: 0; padding: 10px; background: var(--paper-dim); border: 1px solid var(--hairline-soft);
+      font-family: var(--mono); font-size: 11px; line-height: 1.55;
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    }
+    .ad-code.err { color: var(--red-deep); }
+    .ad-checks { display: flex; gap: 6px; flex-wrap: wrap; }
+    .ad-chip { font-family: var(--mono); font-size: 10px; padding: 3px 6px; border: 1px solid var(--hairline); }
+    .ad-chip.pass { color: var(--ok); border-color: rgba(63, 107, 69, 0.45); }
+    .ad-chip.fail { color: var(--red-deep); border-color: rgba(140, 47, 26, 0.45); background: var(--red-soft); }
+
     @media (prefers-reduced-motion: reduce) {
       .run-pill.is-running .dot { animation: none; }
       * { transition: none !important; }
@@ -462,7 +498,7 @@
         </div>
         <div class="mtable-wrap">
           <table class="mtable" id="sh-table">
-            <thead><tr><th>시각</th><th>라운드</th><th>결과</th><th>사유</th></tr></thead>
+            <thead><tr><th>시각</th><th>라운드</th><th colspan="2">알파 식</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -520,24 +556,6 @@
         <div class="micro" style="padding:0 2px 12px">세대 구성 — 라운드별 탐색·변이·교차·개선 비율</div>
       </div>
 
-      <!-- 탐색 조건 — Power Pool 주간 테마처럼 기한이 있는 필터. 끄기가 걸기만큼 중요하다.
-           (리서치 카드가 사라져도 조건 걸기는 폰에서 계속 되어야 한다) -->
-      <div class="mcard collapsible" data-fold-key="cs" data-fold-default="closed">
-        <div class="mcard-head" role="button" tabindex="0" aria-expanded="false">
-          <h3>탐색 조건</h3><span class="micro">Constraint</span>
-          <span class="rs-chev tools" aria-hidden="true">▾</span>
-        </div>
-        <div class="rs-input-row">
-          <textarea id="constraint-text" rows="2"
-            placeholder="탐색 조건 — 예: region=USA &amp; delay=1 &amp; universe=TOP1000 &amp; datasets not in ['pv1']"></textarea>
-          <button id="btn-constraint-save" type="button">적용</button>
-          <button id="btn-constraint-clear" type="button">해제</button>
-        </div>
-        <div class="micro" id="constraint-status" style="padding:0 2px 12px"></div>
-      </div>
-
-      <!-- delay 는 '탐색 조건'(delay=0|1)이 정한다 — 별도 토글은 2026-07-22 제거 -->
-
       <div class="updated-row">마지막 업데이트: <span id="updated-at">—</span></div>
 
       <div class="desktop-btn-row">
@@ -546,6 +564,14 @@
       </div>
     </section>
   </main>
+
+  <dialog id="alpha-dlg" class="alpha-dlg">
+    <div class="ad-head">
+      <h3 id="ad-title">알파 상세</h3>
+      <button id="ad-close" class="ad-close" type="button">닫기</button>
+    </div>
+    <div class="ad-body" id="ad-body"></div>
+  </dialog>
 
   <script>
   (() => {
@@ -1029,6 +1055,127 @@
     };
     const _num = (v) => { const f = parseFloat(v); return Number.isFinite(f) ? f.toFixed(2) : '—'; };
 
+    const itemName = (x) => (typeof x === 'string' ? x : (x && (x.name || x.title)) || String(x));
+    const numOrNull = (v) => {
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    function metricOf(a, key) {
+      const direct = numOrNull(a && a[key]);
+      return direct != null ? direct : numOrNull(a && a.metrics && a.metrics[key]);
+    }
+    function checkValues(a, name) {
+      const m = a.metrics || {};
+      const k = String(name || '').replace(/^(LOW|HIGH|IS)_/, '').toLowerCase();
+      return {
+        v: m[k] != null ? m[k] : m[k + '_check'],
+        c: m[k + '_cutoff'] != null ? m[k + '_cutoff'] : m[k + '_check_cutoff'],
+      };
+    }
+
+    function makeAlphaRow(tr, code) {
+      if (!code) return;
+      tr.classList.add('alpha-row');
+      tr.tabIndex = 0;
+      tr.title = '클릭 — 알파 상세';
+      const open = () => openAlphaRef(code);
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
+      });
+    }
+
+    async function openAlphaRef(code) {
+      const r = await api('/api/alpha?code=' + encodeURIComponent(code || ''));
+      if (r.ok && r.data && r.data.ok && r.data.alpha) {
+        openAlphaDetail(r.data.alpha);
+        return;
+      }
+      alert('이 알파의 상세 기록을 찾지 못했습니다 — 코드가 지워졌거나 다른 계정 기록입니다.');
+    }
+
+    function openAlphaDetail(a) {
+      const dlg = $('#alpha-dlg');
+      const body = $('#ad-body');
+      if (!dlg || !body) return;
+      const o = parseOrigin(a);
+      const wid = (a.metrics || {}).wqb_alpha_id || '';
+      $('#ad-title').textContent = `R${a.round_num || a.round || 0}${a.phase ? '·f' + a.phase : ''} #${a.idx || 0}`
+        + ` · ${ORIGIN_LABEL[o.op]}${o.gen ? ' g' + o.gen : ''}`;
+      body.replaceChildren();
+
+      const dl = document.createElement('dl');
+      dl.className = 'ad-meta';
+      const meta = [
+        ['알파 ID', String(a.id ?? '—')],
+        ['WQB ID', wid || '— (시뮬 실패/캐시)'],
+        ['부모', a.parent_alpha_id ? `#${a.parent_alpha_id}` : '— (신규 계보)'],
+        ['세대', String(a.generation ?? 0)],
+        ['설정', `${a.universe || '—'} × ${a.neutralization || '—'}`
+          + (a.decay != null ? ` · decay ${a.decay}` : '')
+          + (a.delay != null ? ` · D${a.delay}` : '')],
+        ['상태', a.submitted ? '제출됨' : (a.submit_status || (a.cached ? '캐시' : '미제출'))],
+      ];
+      for (const [key, value] of meta) {
+        const dt = document.createElement('dt'); dt.textContent = key;
+        const dd = document.createElement('dd'); dd.textContent = value;
+        dl.append(dt, dd);
+      }
+      body.appendChild(dl);
+
+      const stats = [
+        ['Sharpe', metricOf(a, 'sharpe'), (v) => v.toFixed(2)],
+        ['Fitness', metricOf(a, 'fitness'), (v) => v.toFixed(2)],
+        ['Turnover', metricOf(a, 'turnover'), (v) => (v * 100).toFixed(1) + '%'],
+        ['Self-corr', metricOf(a, 'self_corr'), (v) => v.toFixed(2)],
+      ];
+      const stat = document.createElement('div');
+      stat.className = 'ad-stats';
+      for (const [label, value, fmt] of stats) {
+        const box = document.createElement('span');
+        const em = document.createElement('em'); em.textContent = label;
+        const b = document.createElement('b'); b.textContent = value == null ? '—' : fmt(value);
+        box.append(em, b); stat.appendChild(box);
+      }
+      body.appendChild(stat);
+
+      const codeH = document.createElement('h4'); codeH.textContent = '알파 식';
+      const pre = document.createElement('pre'); pre.className = 'ad-code'; pre.textContent = a.code || '—';
+      body.append(codeH, pre);
+
+      for (const [title, items, cls] of [['PASS', a.pass_items || [], 'pass'], ['FAIL', a.fail_items || [], 'fail']]) {
+        const h = document.createElement('h4'); h.textContent = `${title} (${items.length})`;
+        const box = document.createElement('div'); box.className = 'ad-checks';
+        if (!items.length) {
+          const empty = document.createElement('span'); empty.className = 'micro'; empty.textContent = '— 없음';
+          box.appendChild(empty);
+        }
+        for (const item of items) {
+          const name = itemName(item);
+          const { v, c } = checkValues(a, name);
+          const chip = document.createElement('span'); chip.className = 'ad-chip ' + cls;
+          chip.textContent = name + (v != null ? ` ${v}` : '') + (c != null ? ` / 컷 ${c}` : '');
+          box.appendChild(chip);
+        }
+        body.append(h, box);
+      }
+
+      if (a.error_text) {
+        const h = document.createElement('h4'); h.textContent = '오류';
+        const err = document.createElement('pre'); err.className = 'ad-code err'; err.textContent = a.error_text;
+        body.append(h, err);
+      }
+      if (!dlg.open) dlg.showModal();
+    }
+
+    (function initAlphaDialog() {
+      const dlg = $('#alpha-dlg');
+      if (!dlg) return;
+      $('#ad-close').addEventListener('click', () => dlg.close());
+      dlg.addEventListener('click', (ev) => { if (ev.target === dlg) dlg.close(); });
+    })();
+
     function fillTable(id, rows, emptyId, countId, buildRow) {
       const table = $(id);
       if (!table) return;
@@ -1051,9 +1198,10 @@
         const t = a.ts ? new Date(a.ts * 1000) : null;
         tr.appendChild(_td(t ? `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}` : '—', 'dim'));
         tr.appendChild(_td(`r${a.round_num}${a.idx ? '-#' + a.idx : ''}`, 'dim'));
-        tr.appendChild(_td(a.submitted ? '✅\u00a0제출' : '⛔\u00a0거절', a.submitted ? 'ok' : ''));
-        // 사유는 자르지 않는다 — 좁은 칸에서 접히더라도 조건이 사라지는 편이 나쁘다.
-        tr.appendChild(_td(String(a.submit_status || ''), 'dim wrap'));
+        const expr = _td(a.code || '—', 'alpha-expr');
+        expr.colSpan = 2;
+        tr.appendChild(expr);
+        makeAlphaRow(tr, a.code);
         return tr;
       });
     }
@@ -1101,43 +1249,10 @@
       refreshLists();
       pollTimer = setInterval(refresh, 5000);
       evoTimer = setInterval(() => { refreshEvo(); refreshLists(); }, 30000);
-      try { initConstraint(); } catch (e) { console.error('initConstraint', e); }
     }
     function stopPolling() {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       if (evoTimer) { clearInterval(evoTimer); evoTimer = null; }
-    }
-
-    // ── Delay 테스트 모드 ──
-    // delay 는 아래 '탐색 조건'(delay=0|1)이 정한다 — 별도 토글 제거(2026-07-22).
-
-    // ── 탐색 조건 ──
-    let _cInit = false;
-    function renderConstraint(d) {
-      const st = $('#constraint-status'); if (!st) return;
-      if (!d || !d.active) { st.textContent = '걸린 조건 없음 (무제약 탐색)'; return; }
-      let m = '적용중: ' + d.summary + ' (다음 라운드)';
-      if (d.unparsed && d.unparsed.length) m += ' · 미해석: ' + d.unparsed.join('; ');
-      st.textContent = m;
-    }
-    async function initConstraint() {
-      const ta = $('#constraint-text'); if (!ta) return;
-      const r = await api('/api/constraint');
-      if (r.ok && r.data && r.data.ok) { ta.value = r.data.text || ''; renderConstraint(r.data); }
-      if (_cInit) return;                 // 리스너는 한 번만
-      _cInit = true;
-      $('#btn-constraint-save').addEventListener('click', async () => {
-        $('#constraint-status').textContent = '저장 중…';
-        const res = await api('/api/constraint', { method: 'POST', body: { text: ta.value } });
-        if (res.ok && res.data && res.data.ok) renderConstraint(res.data);
-        else $('#constraint-status').textContent = '저장 실패: ' + ((res.data && res.data.message) || '해석 불가');
-      });
-      $('#btn-constraint-clear').addEventListener('click', async () => {
-        $('#constraint-status').textContent = '해제 중…';
-        const res = await api('/api/constraint', { method: 'DELETE' });
-        if (res.ok && res.data && res.data.ok) { ta.value = ''; renderConstraint(res.data); }
-        else $('#constraint-status').textContent = '해제 실패';
-      });
     }
 
     $('#form-login').addEventListener('submit', async (e) => {

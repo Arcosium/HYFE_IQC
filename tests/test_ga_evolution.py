@@ -12,7 +12,7 @@
 """
 import pytest
 
-from server import db, genome_models, reward, worker
+from server import constraint_spec, db, genome_models, reward, worker
 
 
 @pytest.fixture
@@ -90,6 +90,36 @@ def test_recency_breaks_ties_against_the_incumbent(isolated_db):
     _run_rounds(uid, 3, sharpe_of=lambda p: 1.0)
     ids = [s['id'] for s in db.elite_seeds(uid, top_n=3)]
     assert ids == sorted(ids, reverse=True)
+
+
+def test_weekly_theme_switch_reorders_same_parent_pool(isolated_db):
+    """테마 전환은 DB 부모를 삭제하지 않고 새 required_check로 즉시 재정렬한다."""
+    uid = isolated_db
+    pop = genome_models.generate_population(
+        account_type='research_consultant', round_num=1, forced_delay='1', n=2)
+    rid = db.start_round(uid, 1)
+    statuses = [
+        {'THEME_ALPHA': 'PASS', 'THEME_BETA': 'WARNING'},
+        {'THEME_ALPHA': 'WARNING', 'THEME_BETA': 'PASS'},
+    ]
+    inserted = []
+    for p, checks in zip(pop, statuses):
+        inserted.append(db.insert_alpha(uid, rid, 1, {
+            'idx': p['idx'], 'code': p['code'], 'desc': p['desc'],
+            'pass_count': 4, 'fail_count': 0, 'error_count': 0,
+            'pending_count': 0, 'submitted': False, 'submit_status': '',
+            'error_text': '', 'metrics': dict(_metrics(1.5), _check_results=checks),
+            'settings': p['settings'], 'delay': '1', 'is_status': {},
+            'mode': '', 'cached': False, 'phase': 0,
+            'generation': p['generation'], 'genome': p['genome'],
+        }))
+
+    alpha_week = constraint_spec.parse('Theme Alpha test PASS')
+    beta_week = constraint_spec.parse('Theme Beta test PASS')
+    assert db.elite_seeds(uid, top_n=2, hall_of_fame=0,
+                          constraint=alpha_week)[0]['id'] == inserted[0]
+    assert db.elite_seeds(uid, top_n=2, hall_of_fame=0,
+                          constraint=beta_week)[0]['id'] == inserted[1]
 
 
 def test_seed_roundtrip_preserves_the_genome_exactly(isolated_db):
