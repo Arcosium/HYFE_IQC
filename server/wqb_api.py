@@ -1063,6 +1063,50 @@ class WqbApiClient:
             LOG.warning('alpha %s description PATCH err: %s', alpha_id, e)
             return False
 
+    def check_alpha(self, alpha_id: str, stop_event=None, tries: int = 12) -> dict | None:
+        """Return the latest submission-check payload without submitting.
+
+        A freshly completed simulation can still expose provisional WARNING/PENDING
+        statuses.  ``/alphas/{id}/check`` asks BRAIN to finish the same check
+        battery without consuming a submission slot, so callers can avoid a known
+        403 immediately before submit.
+        """
+        if not alpha_id or not self._ensure_auth():
+            return None
+        url = f'{BASE}/alphas/{alpha_id}/check'
+        for _ in range(max(1, int(tries or 1))):
+            if stop_event is not None and stop_event.is_set():
+                return None
+            try:
+                r = self.session.get(url, timeout=_HTTP_TIMEOUT,
+                                     headers={'Accept': _API_ACCEPT})
+            except Exception as e:
+                LOG.warning('alpha check %s network err: %s', alpha_id, e)
+                return None
+            retry_after = r.headers.get('Retry-After') or r.headers.get('retry-after')
+            if r.status_code == 200 and not retry_after:
+                try:
+                    body = r.json()
+                    return body if isinstance(body, dict) else None
+                except Exception:
+                    return None
+            # WQB sometimes throttles this endpoint with 429 but omits
+            # Retry-After.  Treat that as a transient queue response rather than
+            # falling back to the provisional simulation checks (which can make a
+            # just-finished alpha look submit-ready when it is not).
+            if not retry_after and r.status_code in (429, 503):
+                retry_after = '2'
+            if not retry_after:
+                LOG.warning('alpha check %s http_%s: %s', alpha_id, r.status_code,
+                            (getattr(r, 'text', '') or '')[:200])
+                return None
+            try:
+                sleep_s = max(0.5, min(30.0, float(retry_after)))
+            except (TypeError, ValueError):
+                sleep_s = 2.0
+            _time.sleep(sleep_s)
+        return None
+
     @staticmethod
     def _rejection_reason(body_j) -> str | None:
         """응답의 is.checks 에서 **FAIL 만** 골라 사람이 읽을 사유로. 없으면 None.

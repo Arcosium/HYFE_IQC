@@ -371,6 +371,45 @@ class ApiBackend:
         if corr is not None:
             metrics['self_correlation'] = str(corr)
 
+        # A simulation result can retain provisional WARNING/PENDING check states
+        # until the alpha's explicit check resource is polled.  Submission then
+        # re-runs the battery and returns a predictable 403.  Refresh once here
+        # (free; no submission quota) and make those actual FAILs visible to the
+        # regular submit gate and persisted result.
+        try:
+            fresh = self._client.check_alpha(alpha_id, stop_event=stop_event)
+            fresh_checks = ((fresh or {}).get('is') or {}).get('checks') or []
+            if fresh_checks:
+                from . import constraint_spec as _constraint_spec
+                fresh_status = {k: [] for k in PASS_FIELDS}
+                fresh_results = {}
+                for ch in fresh_checks:
+                    if not isinstance(ch, dict):
+                        continue
+                    name = str(ch.get('name') or '').strip()
+                    result = str(ch.get('result') or '').upper()
+                    if name:
+                        fresh_results[name.upper()] = result
+                    if not wqb_api._is_core_check(name):
+                        continue
+                    bucket = {'PASS': 'pass', 'FAIL': 'fail', 'PENDING': 'pending',
+                              'ERROR': 'error', 'WARNING': 'warning'}.get(result)
+                    if bucket:
+                        fresh_status[bucket].append({
+                            'name': name,
+                            'value': '' if ch.get('value') is None else str(ch.get('value')),
+                            'cutoff': '' if ch.get('limit') is None else str(ch.get('limit')),
+                            'result': result,
+                            'desc': wqb_api._check_desc(name, ch.get('value'),
+                                                        ch.get('limit'), result),
+                        })
+                if fresh_results:
+                    metrics[_constraint_spec.CHECK_RESULTS_METRIC] = fresh_results
+                    is_status = fresh_status
+        except Exception as e:
+            # Check refresh must not turn a healthy submission path into an outage.
+            LOG.warning('alpha %s fresh check failed (using sim checks): %s', alpha_id, e)
+
         submit_ok = False
         submit_status = ''
         acquired = False
