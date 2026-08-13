@@ -15,6 +15,7 @@ worker 가 라운드 시작 시 maybe_seed() 를 호출하면 스펙이 기존 v
 """
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import time as _time
@@ -86,7 +87,55 @@ def _in_window(now: float) -> bool:
     return nxt - PUSH_WINDOW_S <= now < nxt
 
 
-def _discover_axes(exclude: set, n: int) -> list[str]:
+def _scope() -> tuple[str, str, str]:
+    """활성 조건의 (region, universe, delay) — 없으면 GLB/TOPDIV3000/D1."""
+    try:
+        from . import run_config
+        c = run_config.get_constraint()
+        return ((str(getattr(c, 'region', '') or '') or 'GLB').upper(),
+                (str(getattr(c, 'universe', '') or '') or 'TOPDIV3000').upper(),
+                str(getattr(c, 'delay', '') or '1'))
+    except Exception:
+        return 'GLB', 'TOPDIV3000', '1'
+
+
+def _short_cats(user_id: int) -> dict[str, int]:
+    """이 스코프에서 아직 3건이 안 찬 피라미드 카테고리 → 남은 발 수."""
+    try:
+        from . import pyramids as _pyr
+        region, _u, delay = _scope()
+        return _pyr.shortfall(user_id, region, delay)
+    except Exception as e:
+        LOG.warning('피라미드 미달 조회 실패(다변화 우선순위 없음): %s', e)
+        return {}
+
+
+def _same_dataset_partners(field: str, rows: list[dict]) -> tuple[str, str] | None:
+    """같은 데이터셋 안의 중립축·보조축 2개 (커버리지 높은 순).
+
+    골격에 rsk70 을 섞으면 코드가 데이터셋 둘을 쓰게 되고, WQB 는 그런 알파를
+    risk 칸으로 셈한다 — 다변화가 그 자리에서 무효가 된다. 실측(2026-08-13):
+    데이터셋 하나만 쓰는 코드 4,865건은 피라미드 칸이 모순 0 으로 갈렸고,
+    둘 이상 섞인 코드는 어느 쪽 공로인지 판별 자체가 안 됐다.
+    """
+    from . import datafield_palette as _pal
+    ds = str(_pal.field_dataset_map().get(field) or '').strip().lower()
+    if not ds:
+        return None
+    same = []
+    for r in rows:
+        name = str(r.get('name') or '')
+        if name == field or str(r.get('category') or '').strip().lower() != ds:
+            continue
+        try:
+            same.append((-float(r.get('coverage') or 0), name))
+        except (TypeError, ValueError):
+            continue
+    same.sort()
+    return (same[0][1], same[1][1]) if len(same) >= 2 else None
+
+
+def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str]:
     """카탈로그(live_datafields)에서 새 신호 축을 스스로 발굴한다 — 축이 고갈되면
     사람을 부르는 게 아니라 여기로 온다(2026-08-02 사장: "알아서 찾아야지").
     Matrix형·현재 리전/유니버스/delay 일치·커버리지 60%+ 중에서 커뮤니티 사용
@@ -98,14 +147,9 @@ def _discover_axes(exclude: set, n: int) -> list[str]:
     except Exception as e:
         LOG.warning('축 발굴 실패 — 카탈로그 읽기: %s', e)
         return []
-    try:
-        from . import run_config
-        c = run_config.get_constraint()
-        region = (str(getattr(c, 'region', '') or '') or 'GLB').upper()
-        universe = (str(getattr(c, 'universe', '') or '') or 'TOPDIV3000').upper()
-        delay = str(getattr(c, 'delay', '') or '1')
-    except Exception:
-        region, universe, delay = 'GLB', 'TOPDIV3000', '1'
+    region, universe, delay = _scope()
+    short = _short_cats(user_id) if user_id else {}
+    from . import pyramids as _pyr
     cands = []
     for r in rows:
         name = str(r.get('name') or '')
@@ -125,9 +169,25 @@ def _discover_axes(exclude: set, n: int) -> list[str]:
             used = int(float(r.get('alphas') or 0))
         except (TypeError, ValueError):
             used = 0
-        cands.append((used, -cov, name))   # 저사용 → 고커버리지(GLB 강건성) 순
+        # 🔺 미달 피라미드 칸이 1순위 (2026-08-13 사장 결정). 이미 3건을 채운 칸에
+        #    덧쌓으면 피라미드는 그대로인데 PROD_CORRELATION 만 올라 그 계보가
+        #    통째로 제출 불능이 된다 — 그날 12/12 거절이 그 결과였다.
+        cat = _pyr.dataset_category(str(r.get('category') or ''))
+        rank = 0 if (cat and cat in short) else 1
+        cands.append((rank, used, -cov, name, cat))   # 미달칸 → 저사용 → 고커버리지
     cands.sort()
-    return [name for _, __, name in cands[:n]]
+    # 한 칸에 필요한 만큼만 뽑는다. 안 그러면 한 웨이브가 통째로 같은 데이터셋으로
+    # 채워져 방금 고친 병(한 칸에 16발)을 그대로 재현한다 — 실측: 미달 칸 우선만
+    # 켰더니 12개 중 10개가 macro_equity_signals 하나였다.
+    out, taken = [], collections.Counter()
+    for _rank, _used, _cov, name, cat in cands:
+        if cat and taken[cat] >= short.get(cat, n):
+            continue
+        taken[cat] += 1
+        out.append(name)
+        if len(out) >= n:
+            break
+    return out
 
 
 def _axis_stats(user_id: int) -> tuple[set, dict, str]:
@@ -169,15 +229,19 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
     if last and now - last < (COOLDOWN_S if focused else OFF_WINDOW_COOLDOWN_S):
         return 0
     burned, best, seen = _axis_stats(user_id)
+    short = _short_cats(user_id)
     # 창 안 = 검증된 큐레이션 축부터, 창 밖 = 다른 데이터셋 전용(발굴만).
+    # 단, 큐레이션 축(전부 risk70)은 **RISK 칸이 아직 미달일 때만** 쓴다. 칸이 차면
+    # 같은 골격을 더 쏴도 피라미드는 안 늘고 상관만 오른다. 분기가 바뀌어 칸이
+    # 다시 비면 검증된 골격이 저절로 돌아온다 — 손으로 켜고 끄지 않는다.
     cands = ([f for f in AXES if f not in burned and best.get(f, 9.9) >= DEAD_AXIS_SHARPE]
-             if focused else [])
+             if focused and 'RISK' in short else [])
     if len(cands) < n_axes:
         k = n_axes - len(cands)
         tried = burned | set(best) | set(AXES)
         # 넉넉히 받아 '이미 써본 필드'를 걸러낸다.
         # ponytail: 필드명 substring 검사 — 이름이 길어 충돌 없음, 틀리면 이름 집합 추출로.
-        found = [f for f in _discover_axes(tried, k * 4) if f not in seen][:k]
+        found = [f for f in _discover_axes(tried, k * 4, user_id) if f not in seen][:k]
         if found and log_fn:
             log_fn(f'🔭 축 발굴 — 카탈로그에서 신규 {len(found)}개: '
                    + ', '.join(found))
@@ -197,12 +261,28 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
     except Exception:
         universe, delay = BASE_GENOME['universe'], '1'
 
+    try:
+        from . import datafield_palette as _pal
+        pal_rows = _pal._all_rows()
+    except Exception:
+        pal_rows = []
+
     hid = None
     n = 0
+    skipped_mixed = []
     for field in cands[:n_axes]:
+        if field in AXES:
+            partners = (NEUT_FIELD, 'rsk70_mfm2_gemtrd_earnqlty')  # 검증된 원본 골격
+        else:
+            partners = _same_dataset_partners(field, pal_rows)
+            if partners is None:
+                # 같은 데이터셋에서 짝을 못 찾으면 **쏘지 않는다**. rsk70 을 섞어
+                # 내면 WQB 가 risk 칸으로 셈해 다변화가 그 자리에서 무효가 된다.
+                skipped_mixed.append(field)
+                continue
         for sign in (1, -1):
             g = dict(BASE_GENOME, universe=universe, sign=sign,
-                     fields=[field, NEUT_FIELD, 'rsk70_mfm2_gemtrd_earnqlty'])
+                     fields=[field, partners[0], partners[1]])
             try:
                 code = genome_models.render(genome_models._coerce_genome(g))
                 if alpha_lint.validate_alpha(code):
@@ -222,8 +302,12 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
                                       'nan_handling': 'OFF', 'delay': delay},
                             delay=delay, why=f'{field.rsplit("_", 1)[-1]} 축 sign={sign:+d}')
             n += 1
+    if skipped_mixed and log_fn:
+        log_fn('⏭ 같은 데이터셋 짝을 못 찾아 건너뜀(혼합 코드는 피라미드 칸이 어긋난다): '
+               + ', '.join(skipped_mixed))
     if n and log_fn:
         axes = ', '.join(f.rsplit('_', 1)[-1] for f in cands[:n_axes])
+        tail = f' · 미달 칸 [{", ".join(sorted(short))}]' if short else ''
         log_fn(f'{"🎯 자동 제출 푸시" if focused else "🌱 상시 다변화"} — 오늘 제출 '
-               f'{done}/{DAILY_SUBMIT_TARGET}, 신선 축 [{axes}] ±양부호 스펙 {n}개 장전')
+               f'{done}/{DAILY_SUBMIT_TARGET}, 신선 축 [{axes}] ±양부호 스펙 {n}개 장전{tail}')
     return n

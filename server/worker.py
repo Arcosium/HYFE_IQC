@@ -73,6 +73,9 @@ DAILY_SUBMIT_BUDGET = int(os.environ.get('IQC_DAILY_SUBMIT_BUDGET', '4'))
 # 예산 리셋(미 동부 자정 = KST 13:00) 직후에 바로 나가야 하므로 촘촘히 본다.
 # 큐가 비어 있으면 인덱스 조회 한 번(수 μs)으로 끝나 비용이 사실상 없다.
 _DRAIN_TICK_S = float(os.environ.get('IQC_DRAIN_TICK_S', '60'))
+# 한 틱에 훑어볼 대기 행 수 상한 — 폭주 방지용 바닥값일 뿐, 실제 제동은
+# _drain_one 안의 예산 확인이 건다(큐 200행 조회와 같은 자릿수로 둔다).
+_DRAIN_MAX_SCAN = int(os.environ.get('IQC_DRAIN_MAX_SCAN', '200'))
 
 # ── 결정론 레이어 (2026-07-26, WQB AAF·smilee 이식) — LLM 비용 0 ─────────────
 # ① 재조합(combine_layer): 탐색 라운드에서 검증된 IS 알파 둘을 결합해 후보 추가.
@@ -109,6 +112,16 @@ ALPHAS_PER_ROUND = int(os.environ.get('IQC_ALPHAS_PER_ROUND', '14'))
 #   (= 헛발질 반복은 막되, 첫 시도는 항상 해 본다).
 #   0 보다 큰 값을 넣으면 다시 예방적 차단이 켜진다.
 PP_SELFCORR_MAX = float(os.environ.get('IQC_PP_SELFCORR_MAX', '0'))
+
+# 프로덕션 상관 선독 컷 (2026-08-13). WQB 의 PROD_CORRELATION 하드컷과 같은 0.7.
+#   /alphas/{id}/correlations/prod 는 공짜 GET 이고, 이 값이 0.7 을 넘으면 제출은
+#   확정 403 이다. 실측: 같은 계보 12건을 연달아 쏴서 12건 전부 0.83~0.97 로 거절.
+#   0 이하로 두면 선독을 끈다(네트워크가 불안할 때 되돌리는 손잡이).
+PROD_CORR_MAX = float(os.environ.get('IQC_PROD_CORR_MAX', '0.7'))
+# 그 값을 기다려 줄 시간. 짧게 잡는다 — 실측(2026-08-13)상 이 자원은 **빨리 주거나
+# 아예 안 준다**. 167초를 폴링해도 안 나오는 알파가 있고, 같은 알파가 몇 분 전엔
+# 즉시 0.8867 을 냈다. 오래 기다려 봐야 제출만 늦어진다.
+PROD_CORR_READ_S = float(os.environ.get('IQC_PROD_CORR_READ_S', '12'))
 
 # ③ Yield Score (ACE) — arm 배분 점수에 '시뮬 1건당 게이트 통과율'을 섞는 비중.
 #   score = mean + w·(pass_sum+1)/(visits+2)  (라플라스 스무딩 — 냉시작 arm 은
@@ -153,8 +166,52 @@ def _constraint_result_state(result: dict, constraint) -> str:
         return 'unknown'
 
 
-def _constraint_gate_reasons(constraint, metrics: dict, code: str = '') -> list[str]:
-    """활성 조건 하나로 제출 직전 scope/dataset/check를 함께 검증한다."""
+def _prod_corr(user_id: int, wqb_alpha_id: str) -> float | None:
+    """프로덕션 상관 실측. 못 읽으면 None → 게이트는 통과시킨다(fail-open).
+
+    제출을 조용히 누락하는 것보다 헛발 한 번이 낫다.
+    """
+    try:
+        from . import wqb_api as _wqb_api
+        u, p = _db.get_user_credentials(user_id)[:2]
+        pc = _wqb_api.WqbApiClient(u, p).read_prod_correlation(
+            wqb_alpha_id, deadline_s=PROD_CORR_READ_S)
+        if pc is None:
+            # 조용히 통과시키면 가드가 통째로 꺼진 걸 아무도 모른다 — 반드시 남긴다.
+            LOG.warning('프로덕션 상관 없음(제출 진행): %s', wqb_alpha_id)
+        return pc
+    except Exception as e:
+        LOG.warning('프로덕션 상관 조회 실패(제출 진행): %s', e)
+        return None
+
+
+def _pyramid_short(user_id: int, metrics: dict) -> bool:
+    """이 알파가 **미달 피라미드 칸**에 들어가나.
+
+    추론하지 않는다 — WQB 가 체크 응답에서 칸 이름을 직접 준다
+    (`metrics['pyramids']` = 'GLB/D1/RISK'). 칸을 모르면 면제도 없다.
+    """
+    names = [n.strip().upper() for n in
+             str((metrics or {}).get('pyramids') or '').split(',') if n.strip()]
+    if not names:
+        return False
+    try:
+        from . import pyramids as _pyr
+        have = _pyr.counts(user_id)
+        return any(have.get(n, 0) < _pyr.PYRAMID_MIN for n in names)
+    except Exception as e:
+        LOG.warning('피라미드 미달 판정 실패(면제 없음): %s', e)
+        return False
+
+
+def _constraint_gate_reasons(constraint, metrics: dict, code: str = '',
+                             waive_checks: bool = False) -> list[str]:
+    """활성 조건 하나로 제출 직전 scope/dataset/check를 함께 검증한다.
+
+    waive_checks=True 면 **필수 체크만** 면제한다(다변화 우대 — Worker 참조).
+    scope(region/delay/universe/중립화)와 금지 데이터셋은 어떤 경우에도 면제하지
+    않는다. 그건 조건을 어기는 것이지 다르게 해석하는 게 아니다.
+    """
     if constraint is None:
         return []
     m = dict(metrics or {})
@@ -174,7 +231,12 @@ def _constraint_gate_reasons(constraint, metrics: dict, code: str = '') -> list[
             datasets=_datasets_used_by_code(code),
             checks=normalized,
         )
-        return [] if ok else reasons
+        if ok:
+            return []
+        if waive_checks:
+            waived = set(constraint.required_check_reasons(checks=normalized))
+            reasons = [r for r in reasons if r not in waived]
+        return reasons
     except Exception as exc:
         return [f'활성 조건 평가 오류: {exc}']
 
@@ -427,14 +489,25 @@ class Worker(threading.Thread):
         # 문자열 리스트일 수도 있다 — 둘 다 받는다.
         names = [str((f.get('name') if isinstance(f, dict) else f) or '').strip()
                  for f in (fail_items or [])]
-        blocking = [n for n in names if n and _criteria.is_blocking(n)]
+        # REGULAR_SUBMISSION 은 알파 결함이 아니라 "오늘 쿼터 다 씀" 신호다 — 아래
+        # 예산 분기가 대기 큐로 보내야 한다. 여기서 막으면 익일 재시도 안전망이 통째로
+        # 우회된다 (2026-08-13 실측: NY 8/12 14:37 이후 이 FAIL 단독 알파 27건이
+        # 큐에 하나도 안 들어가고 그대로 버려졌다 — S 2.29 두 건 포함).
+        blocking = [n for n in names
+                    if n and n != 'REGULAR_SUBMISSION' and _criteria.is_blocking(n)]
         if blocking:
             # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
         active_constraint = getattr(self, '_active_constraint', None)
+        # 🔭 다변화 우대 (2026-08-13 사장 결정) — 아직 3건이 안 찬 피라미드 칸이면
+        #    활성 조건의 **필수 체크만** 면제한다. 주간 테마가 요구하는 HT 계열은
+        #    회전이 빠른 데이터에서만 나오는데, 미개척 칸(Fundamental·Analyst)은
+        #    본질적으로 느린 데이터라 그 요구와 양립하지 않는다. 테마 배수는 이미
+        #    1.0(최저)이고 피라미드는 분기 내내 남으니 칸을 여는 쪽이 남는 장사다.
         constraint_reasons = _constraint_gate_reasons(
-            active_constraint, metrics or {}, str(code or ''))
+            active_constraint, metrics or {}, str(code or ''),
+            waive_checks=_pyramid_short(self.user_id, metrics))
         if constraint_reasons:
             return False, 'active_constraint(' + '; '.join(constraint_reasons) + ')'
         # 같은 식 차단은 **여기서 하나도 하지 않는다** (2026-08-04 사장 지시 "제출은 일단
@@ -511,6 +584,10 @@ class Worker(threading.Thread):
         except Exception as e:
             LOG.warning('submitted_today 조회 실패 (제출 강행): %s', e)
             return True, ''
+        # WQB 자체 카운터(REGULAR_SUBMISSION FAIL)가 우리 집계보다 권위 있다 —
+        # 둘이 어긋나면 소진 쪽을 믿는다.
+        if 'REGULAR_SUBMISSION' in names:
+            used = max(used, DAILY_SUBMIT_BUDGET)
         if used >= DAILY_SUBMIT_BUDGET:
             # 예산 초과분은 버리지 않고 대기 큐에 — 다음 날 _drain_submit_queue 가
             # 자동 재시도한다 (2026-07-27 사장 지시).
@@ -533,6 +610,17 @@ class Worker(threading.Thread):
             # 넣지도 못했으면서 '→queued' 라고 적지 않는다 — 라이브 피드가 거짓말한다.
             tail = '→queued' if queued else '→미보관'
             return False, f'daily_budget({used}/{DAILY_SUBMIT_BUDGET}){tail}'
+        # 🔎 프로덕션 상관 선독 — 여기까지 온 알파만 읽는다(호출을 아낀다).
+        #   읽기 실패는 통과시킨다: 제출을 조용히 누락하는 것보다 헛발 한 번이 낫다.
+        wid = str((metrics or {}).get('wqb_alpha_id') or '')
+        if PROD_CORR_MAX > 0 and wid:
+            # 시뮬 직후에 이미 받아 둔 값이 있으면 그걸 쓴다 — 네트워크 0회.
+            try:
+                pc = float(str((metrics or {}).get('prod_correlation')))
+            except (TypeError, ValueError):
+                pc = _prod_corr(self.user_id, wid)
+            if pc is not None and pc > PROD_CORR_MAX:
+                return False, f'prod_corr({pc:.4f}>{PROD_CORR_MAX:g})'
         # 품질 문턱(below_value)은 2026-07-28 사장 지시로 제거했다. **낼 수 있으면 낸다.**
         # 하루 4칸을 아끼자는 장치였는데 실측이 정반대였다 — 제출 실적이 1·1·2·4·2 건으로
         # 대개 4칸을 못 채우면서 같은 기간 330건을 문턱으로 걸렀다. 안 쓴 예산은 이월되지
@@ -727,13 +815,18 @@ class Worker(threading.Thread):
         # 한도만큼만 돈다 — 게이트가 보류시키면 _drain_one 이 None 으로 루프를 끊는다.
         # 이번 판에 이미 건드린 행은 다시 집지 않는다 — 일시 거절로 pending 에 되돌린
         # 행을 곧바로 재선택하면 그 한 건이 루프를 독점해 뒤의 대기 건이 굶는다.
+        # 반복 상한은 '이번 판에 볼 수 있는 행 수'다 — **제출 수가 아니다**. 예산 초과는
+        # _drain_one 이 자체적으로 막는다(_submitted_today 확인). 상한을 예산(4)에 묶어
+        # 두면 게이트 보류가 4건만 앞에 있어도 뒤가 통째로 굶는다 — 2026-08-13 실측:
+        # 활성 조건에 걸린 q94·96·98·100 이 매 틱 4칸을 다 먹어 q101~109 는 20분간
+        # 한 번도 안 불렸다. 보류는 제출을 쓰지 않으니 예산을 깎을 이유가 없다.
         tried: set[int] = set()
-        for _ in range(max(1, DAILY_SUBMIT_BUDGET)):
+        for _ in range(_DRAIN_MAX_SCAN):
             if self._stop_event.is_set():
                 return
             rid = self._drain_one(round_num, username, password, skip=tried)
             if rid is None:
-                return
+                return                       # 예산이 닫혔거나 더 볼 행이 없다
             tried.add(rid)
 
     @staticmethod
@@ -782,9 +875,17 @@ class Worker(threading.Thread):
                                             fail_items=[], genome=None,
                                             code=str(row.get('code') or ''))
         if not ok_gate:
-            if not reason.startswith('daily_budget'):
-                _db.submit_queue_mark(row['id'], 'pending', f'게이트 보류: {reason}')
-            return None
+            if reason.startswith('daily_budget'):
+                return None          # 예산이 닫혔다 — 이번 판은 더 볼 것이 없다
+            # 보류는 **이 한 건만** 넘긴다. None 을 돌려주면 호출측 루프가 '더 볼 게
+            # 없다'로 읽고 끊겨, 뒤의 대기 건이 통째로 굶는다 (2026-08-13 실측: 활성
+            # 조건에 걸린 q94 한 건이 60초마다 다시 집히며 뒤 15건을 40분간 막았다).
+            # 프로덕션 상관은 오르기만 한다 — 재시도해도 안 바뀌니 목록에서 내린다
+            # (criteria.QUEUE_HOPELESS_CHECKS 의 PROD_CORRELATION 과 같은 정책).
+            hopeless = reason.startswith('prod_corr')
+            _db.submit_queue_mark(row['id'], 'skipped' if hopeless else 'pending',
+                                  f'{"손절" if hopeless else "게이트 보류"}: {reason}')
+            return int(row['id'])
         # 🔒 선점 — 네트워크에 나가기 **전에** 'submitting' 으로 찍어 남이 못 집게 한다.
         #   2026-07-29 실측: 드레인 두 갈래(라운드 훅 + 티커)가 같은 pending 행을 동시에
         #   집어 같은 알파를 두 번 제출했다(제출은 4분씩 걸려 그동안 계속 pending 이었다).
@@ -2750,6 +2851,8 @@ def _skip_reason_ko(sub_st: str) -> str:
         return f'같은 식이 이미 거절됨 — {r[len("already_rejected"):].strip("()")}'
     if r.startswith('already_submitted'):
         return '같은 식이 이미 제출됨(OS) — 재제출 무의미'
+    if r.startswith('prod_corr'):
+        return f'프로덕션 상관 초과 {r[len("prod_corr"):].strip("()")} — 발사 전 차단'
     if r.startswith('below_value'):
         return f'품질 문턱 미달 {r[len("below_value"):].strip("()")}'
     return r        # 모르는 사유는 통째로 넘긴다 — 잘라내면 사유가 사유 아닌 게 된다

@@ -1625,15 +1625,31 @@ class WqbApiClient:
             pass
 
     def read_self_correlation(self, alpha_id: str, deadline_s: float = 60.0) -> float | None:
+        return self._read_correlation(alpha_id, 'self', deadline_s)
+
+    def read_prod_correlation(self, alpha_id: str, deadline_s: float = 60.0) -> float | None:
+        """프로덕션 상관 (공짜 GET) — 0.7 초과면 제출은 반드시 403 이다.
+
+        2026-08-13 실측: 같은 계보 12건을 연달아 쐈는데 12건 전부 0.83~0.97 로
+        거절됐다. 쿼터는 안 깎이지만 한 발에 30~60초씩 태웠다. 발사 전에 읽으면
+        그만큼이 그대로 남는다.
+        """
+        return self._read_correlation(alpha_id, 'prod', deadline_s)
+
+    def _read_correlation(self, alpha_id: str, kind: str,
+                          deadline_s: float = 60.0) -> float | None:
         # Task 2 스모크로 경로/키 확정. 일반형: records 의 max.
         # 갓 완료된 알파는 계산 중이라 200 + Retry-After(본문 없음)를 주므로
         # 헤더가 사라질 때까지 deadline 안에서 짧게 폴링한다.
-        if not alpha_id:
+        # ⚠ 인증을 먼저 확인한다. 갓 만든 클라이언트는 미인증이라 401 이 오고, 이 함수는
+        #   실패를 None 으로 돌려주므로 호출측이 '읽어 봤는데 문제없음'으로 오해한다
+        #   (2026-08-13 실측: prod 선독을 붙였는데 그대로 발사돼 403 두 발을 더 태웠다).
+        if not alpha_id or not self._ensure_auth():
             return None
         start = _time.monotonic()
         while True:
             try:
-                r = self.session.get(f'{BASE}/alphas/{alpha_id}/correlations/self',
+                r = self.session.get(f'{BASE}/alphas/{alpha_id}/correlations/{kind}',
                                      timeout=_HTTP_TIMEOUT,
                                      headers={'Accept': _API_ACCEPT})
             except Exception:

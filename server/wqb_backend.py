@@ -371,6 +371,13 @@ class ApiBackend:
         if corr is not None:
             metrics['self_correlation'] = str(corr)
 
+        # ⚠ 여기서 프로덕션 상관을 '미리 깨워두는' 짓은 하지 말 것 — 2026-08-13 실측으로
+        #   반증됐다. /correlations/prod 는 준비 여부와 무관하게 200 + Retry-After:1.0 +
+        #   빈 본문을 주고, 한 번 두드려 둬도 **두 시간 뒤까지 그대로**였다(5/5).
+        #   167초를 폴링해도 안 나오는 알파가 있는가 하면 같은 알파가 몇 분 전엔 0.8867 을
+        #   내주기도 한다. 예열되는 자원이 아니라 그냥 들쭉날쭉한 자원이다.
+        #   시뮬마다 요청 한 번을 더 쓰면서 얻는 게 없다.
+
         # A simulation result can retain provisional WARNING/PENDING check states
         # until the alpha's explicit check resource is polled.  Submission then
         # re-runs the battery and returns a predictable 403.  Refresh once here

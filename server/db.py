@@ -2976,6 +2976,24 @@ def submitted_count_since(conn, user_id: int, since_ts: float) -> int:
 
 
 @_with_conn
+def submitted_metrics_since(conn, user_id: int, since_ts: float) -> list[str]:
+    """제출(OS)된 알파의 metrics JSON — 피라미드 칸별 보유 수 집계용."""
+    return [r[0] or '' for r in conn.execute(
+        'SELECT metrics FROM alphas WHERE user_id=? AND ts>=? AND submitted=1',
+        (user_id, since_ts))]
+
+
+@_with_conn
+def code_pyramid_pairs(conn) -> list[tuple]:
+    """(code, pyramids) 쌍 — 데이터셋→피라미드 카테고리 사상을 실측으로 학습한다.
+    제출 여부와 무관하다. 체크를 받아 본 알파면 WQB 가 칸을 이미 알려줬다."""
+    return [(r[0] or '', r[1] or '') for r in conn.execute(
+        "SELECT code, json_extract(metrics, '$.pyramids') FROM alphas "
+        "WHERE metrics LIKE '%pyramids%'")
+        if r[1]]
+
+
+@_with_conn
 def code_sharpe_submitted_since(conn, user_id: int, since_ts: float) -> list[tuple]:
     """(code, sharpe, submitted) 목록 — 축 소진/죽은 축 판정용."""
     return [(r[0] or '', r[1], int(r[2] or 0)) for r in conn.execute(
