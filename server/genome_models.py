@@ -1292,6 +1292,8 @@ class BaseGenomeModel:
     def _dedup_key(g: Genome) -> str:
         # 코드가 같아도 settings 유전자가 다르면 다른 후보다 (settings 스윕 자식 보존).
         # decay_style 은 render() 산출물에 이미 드러나므로 따로 넣지 않는다.
+        # ⚠ 절단은 키에 남겨 둔다 — 골든 계약(test_genome_v2)이 이 형식을 고정한다.
+        #   중복 시뮬 위험은 _genome() 에서 절단을 탐색 축에서 내려 이미 사라졌다.
         return (f"{render(g)}|{g.universe}|{g.neutralization}|{g.decay}"
                 f"|{g.truncation}|{g.nan_handling}")
 
@@ -1535,9 +1537,13 @@ class BaseGenomeModel:
             if want is not None and want != int(d.get("decay") or 0):
                 d["decay"] = want
             else:
-                cur = int(d.get("decay") or 0)
-                cand = [x for x in SWEEP_DECAYS if x != cur] or list(SWEEP_DECAYS)
-                d["decay"] = cand[(attempt - 1) % len(cand)]
+                # 회전율이 이미 목표면 감쇠는 더 볼 것이 없다 — **맹목 순회를 하지 않는다**.
+                # 그 슬롯은 알파의 핵심 유전자에 쓰는 편이 수율이 높다(부트캠프 5주차:
+                # "DK 를 20번 스윕해야 그중 하나가 나온다. 그것보다 데이터 필드를 바꾸고
+                #  유의미한 변형을 20개 돌리는 게 낫다"). 절단은 같은 이유로 이미 뺐다.
+                cur = d.get("transform_a")
+                cand = [t for t in self.transforms if t != cur] or list(self.transforms)
+                d["transform_a"] = cand[(attempt - 1) % len(cand)]
         d["generation"] = int(d.get("generation") or 0) + 1
         return Genome(**d)
 
@@ -1617,7 +1623,11 @@ class BaseGenomeModel:
             universe=rng.choice(UNIVERSES),
             neutralization=rng.choice(NEUTRALIZATIONS),
             decay=rng.choice(self.decays),
-            truncation=rng.choice(self.truncations),
+            # 절단은 **무작위로 탐색하지 않는다**. 실측(2026-07-21)에서 0.05~0.15 가 결과
+            # 동일이었고 그때 스윕 축에서 이미 뺐는데, 무작위 슬롯에선 계속 굴리고 있었다.
+            # 필요한 곳(집중도 미달 정향변이)에선 그대로 조정한다 — 유전자를 없애는 게
+            # 아니라 탐색 축에서 내리는 것이다.
+            truncation=self.truncations[0],
             nan_handling="ON" if family in ("fundamental", "analyst", "option", "news") else "OFF",
             decay_style=rng.choice(DECAY_STYLES),
             generation=0,

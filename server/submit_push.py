@@ -18,6 +18,7 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import re
 import time as _time
 
 from . import db as _db
@@ -43,6 +44,136 @@ AXES_PER_WAVE = 4             # 축 4 × 부호 2 = 스펙 8 (라운드 limit)
 OFF_WINDOW_AXES = int(os.environ.get('IQC_PUSH_OFF_AXES', '1'))
 OFF_WINDOW_COOLDOWN_S = float(os.environ.get('IQC_PUSH_OFF_COOLDOWN_S', '2700'))
 TITLE = '자동 제출 푸시'
+
+# ── prod 상관 완화 레인 (2026-08-14 사장 지시) ────────────────────────────────
+# 부트캠프 5주차 조언: "0.9 가 넘는 알파를 바꿔서 prod 상관을 줄이려는 건 그냥 어렵다,
+# 그건 버려야 한다. 0.8 정도(0.79)면 어느 정도 가능성이 있으니 neutralization 스윕을
+# 해보거나 vector_neut·regression_neut 에 다른 알파를 넣어 봐라."
+# 우리 실측(2026-08-14)도 같은 그림이었다 — 발사 134건의 prod 상관 중앙값 0.9028,
+# **최소가 0.7111 로 0.7 아래가 한 건도 없었다.** 구제할 값어치는 문턱 바로 위에만 있다.
+RESCUE_TITLE = 'prod 상관 완화'
+PROD_RESCUE_LO = float(os.environ.get('IQC_PROD_RESCUE_LO', '0.70'))
+PROD_RESCUE_HI = float(os.environ.get('IQC_PROD_RESCUE_HI', '0.80'))
+RESCUE_MAX_ALPHAS = int(os.environ.get('IQC_PROD_RESCUE_ALPHAS', '2'))
+RESCUE_COOLDOWN_S = float(os.environ.get('IQC_PROD_RESCUE_COOLDOWN_S', '1800'))
+# 손잡이는 둘뿐이다. decay·truncation·winsorize 는 "알파를 마지막에 살짝 튜닝하는 값이지
+# 알파 자체를 바꾸는 연산이 아니라"(5주차) 상관을 못 움직인다 — 유전자로 넣지 않는다.
+RESCUE_NEUTS = ('SUBINDUSTRY', 'INDUSTRY', 'SECTOR', 'MARKET', 'STATISTICAL', 'CROWDING')
+RESCUE_CODE_MAX = 900          # 직교화는 식 둘을 겹치므로 길이를 본다
+_PROD_RX = re.compile(r'PROD_CORRELATION\(\s*([\d.]+)\s+vs|prod_corr\(\s*([\d.]+)\s*>')
+
+
+def _json_genome(raw):
+    """alphas.genome 은 JSON 문자열로 저장된다. 못 읽으면 None — 그 알파는 건너뛴다."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        import json as _json
+        v = _json.loads(str(raw or '') or 'null')
+        return v if isinstance(v, dict) else None
+    except Exception:
+        return None
+
+
+def prod_corr_of(status) -> float | None:
+    """거절 사유 문자열에서 prod 상관 실값. 403 본문과 발사 전 가드 두 형식을 다 읽는다."""
+    m = _PROD_RX.search(str(status or ''))
+    if not m:
+        return None
+    try:
+        return float(m.group(1) or m.group(2))
+    except (TypeError, ValueError):
+        return None
+
+
+def maybe_rescue(user_id: int, log_fn=None, now: float | None = None) -> int:
+    """문턱 바로 위(0.70~0.80)에서 막힌 알파의 **중립화를 스윕해** 재장전한다.
+
+    0.80 이상은 손대지 않는다 — 되돌아오지 않는다는 게 강의 조언이자 우리 실측이다.
+
+    ⚠ 원본 유전체가 있어야 한다. 스펙 경로(worker → spec_genomes)는 `code` 컬럼이 아니라
+      **유전체를 다시 render 해서** 시뮬하므로, 유전체로 표현 못 하는 식(예: 알파 둘을
+      vector_neut 로 겹치는 직교화)은 조용히 기본 유전체로 뭉개진다(2026-08-14 실측 —
+      raw code 13개가 후보 1개로 붕괴). 직교화는 verbatim 경로가 생긴 뒤에 붙인다.
+    반환: 주입한 스펙 수.
+    """
+    now = _time.time() if now is None else now
+    if _db.pending_specs(user_id, limit=1):
+        return 0                                   # 탄약 소화 중 — 겹장전 금지
+    last = _db.last_hypothesis_ts(user_id, RESCUE_TITLE)
+    if last and now - last < RESCUE_COOLDOWN_S:
+        return 0
+    try:
+        rows = _db.prod_corr_rejected(user_id, now - 3 * 86400)
+    except Exception as e:
+        LOG.warning('상관 완화 후보 조회 실패: %s', e)
+        return 0
+
+    from . import alpha_lint, genome_models
+    try:
+        allowed = set(genome_models._allowed_neutralizations())
+    except Exception:
+        allowed = set(RESCUE_NEUTS)
+
+    seen, targets, no_genome = set(), [], 0
+    for r in rows:
+        pc = prod_corr_of(r['status'])
+        code = str(r['code'] or '')
+        if pc is None or not (PROD_RESCUE_LO <= pc < PROD_RESCUE_HI) or code in seen:
+            continue
+        g = genome_models._coerce_genome(_json_genome(r['genome']))
+        if g is None:
+            no_genome += 1
+            continue
+        seen.add(code)
+        targets.append((pc, r, g))
+    if not targets:
+        if no_genome and log_fn:
+            log_fn(f'🧬 {RESCUE_TITLE} — 문턱 근접 {no_genome}건이 원본 유전체가 없어 건너뜀')
+        return 0
+
+    hid, n, used = None, 0, []
+    for pc, r, g in targets:
+        if len(used) >= RESCUE_MAX_ALPHAS:
+            break
+        cur = str(getattr(g, 'neutralization', '') or '').upper()
+        fresh = 0
+        for nz in RESCUE_NEUTS:
+            if nz == cur or nz not in allowed:
+                continue
+            d = dict(g.__dict__)
+            d['neutralization'] = nz
+            d['generation'] = int(d.get('generation') or 0) + 1
+            try:
+                child = genome_models._coerce_genome(d)
+                code = genome_models.render(child)
+                if child is None or alpha_lint.validate_alpha(code):
+                    continue
+            except Exception as e:
+                LOG.warning('상관 완화 변주 렌더 실패 %s: %s', nz, e)
+                continue
+            if _db.get_alpha_by_code(user_id, code):
+                continue        # 이미 돌려본 변주 — 부모는 계속 거절 상태라 웨이브마다 재탕된다
+            if hid is None:
+                hid = _db.insert_hypothesis(
+                    _db.latest_run_id(user_id), user_id,
+                    {'title': f'{RESCUE_TITLE} {_time.strftime("%Y-%m-%d", _time.localtime(now))}',
+                     'rationale': 'PROD_CORRELATION 이 컷 바로 위에서 막힌 알파의 중립화를 훑는다. '
+                                  '0.80 이상은 되돌아오지 않으므로 제외(부트캠프 5주차 조언·자체 실측).'})
+            _db.insert_spec(
+                hid, user_id, genome=dict(child.__dict__), code=code,
+                settings={'universe': child.universe, 'neutralization': nz,
+                          'decay': str(child.decay), 'truncation': str(child.truncation),
+                          'nan_handling': child.nan_handling, 'delay': str(r['delay'] or 1)},
+                delay=r['delay'], why=f'prod {pc:.4f} → 중립화 {cur or "?"}→{nz}')
+            n += 1
+            fresh += 1
+        if fresh:
+            used.append(pc)
+    if n and log_fn:
+        log_fn(f'🧬 {RESCUE_TITLE} — 문턱 근접 {len(used)}건'
+               f'(prod {", ".join(f"{p:.3f}" for p in used)}) 중립화 스윕 스펙 {n}개 장전')
+    return n
 
 NEUT_FIELD = 'rsk70_mfm2_gemtrd_indmom'
 # 신호 축 후보 — 이상현상 성격(계절성·리버설·저변동성) 우선, 고전 팩터는 뒤로.
@@ -223,6 +354,10 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
     done = _db.submitted_count_since(user_id, _day0(now))
     if done >= DAILY_SUBMIT_TARGET:
         return 0
+    # 문턱 바로 위에서 막힌 알파가 있으면 그게 신규 축보다 제출에 가깝다 — 먼저 쏜다.
+    rescued = maybe_rescue(user_id, log_fn=log_fn, now=now)
+    if rescued:
+        return rescued
     if _db.pending_specs(user_id, limit=1):
         return 0                                  # 탄약 소화 중 — 겹장전 금지
     last = _db.last_hypothesis_ts(user_id, TITLE)

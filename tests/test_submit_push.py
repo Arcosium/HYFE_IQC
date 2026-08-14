@@ -40,6 +40,9 @@ def _wire(monkeypatch, *, submitted=0, pending=False, last_ts=None, rows=(),
                         lambda uid, limit=8: [{'id': 1}] if pending else [])
     monkeypatch.setattr(sp._db, 'last_hypothesis_ts', lambda uid, pfx: last_ts)
     monkeypatch.setattr(sp._db, 'code_sharpe_submitted_since', lambda uid, ts: list(rows))
+    # 상관 완화 레인은 maybe_seed 앞단에 붙어 있다 — 비워 두지 않으면 라이브 DB 를
+    # 읽어 무관한 테스트가 그날의 거절 이력에 따라 깨진다.
+    monkeypatch.setattr(sp._db, 'prod_corr_rejected', lambda uid, since: [])
     monkeypatch.setattr(sp._db, 'latest_run_id', lambda uid: 21)
     inserted = []
     monkeypatch.setattr(sp._db, 'insert_hypothesis', lambda rid, uid, h: 999)

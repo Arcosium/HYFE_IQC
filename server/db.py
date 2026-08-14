@@ -3002,6 +3002,25 @@ def code_sharpe_submitted_since(conn, user_id: int, since_ts: float) -> list[tup
 
 
 @_with_conn
+def prod_corr_rejected(conn, user_id: int, since_ts: float) -> list[dict]:
+    """PROD_CORRELATION 이 실린 채 막힌 알파들 — 상관 완화 변주의 원본 후보.
+
+    값이 확실히 들어오는 곳은 403 본문(=submit_status)과 발사 전 가드 두 곳뿐이다.
+    `/alphas/{id}/correlations/prod` 는 준비 여부와 무관하게 빈 본문을 준다(2026-08-13 실측).
+    """
+    return [{'code': r[0] or '', 'sharpe': r[1], 'universe': r[2] or '',
+             'delay': r[3], 'neutralization': (r[4] or '').upper(),
+             'decay': r[5], 'truncation': r[6], 'status': r[7] or '', 'ts': r[8],
+             'genome': r[9] or ''}
+            for r in conn.execute(
+                'SELECT code, sharpe, universe, delay, neutralization, decay, truncation, '
+                'submit_status, ts, genome FROM alphas '
+                'WHERE user_id=? AND ts>=? AND submitted=0 AND code IS NOT NULL '
+                "AND (submit_status LIKE '%PROD_CORRELATION(%' OR submit_status LIKE '%prod_corr(%') "
+                'ORDER BY ts DESC', (user_id, since_ts))]
+
+
+@_with_conn
 def latest_run_id(conn, user_id: int) -> int:
     row = conn.execute(
         'SELECT MAX(run_id) FROM hypotheses WHERE user_id=?', (user_id,)).fetchone()
