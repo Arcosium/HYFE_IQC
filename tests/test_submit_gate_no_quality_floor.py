@@ -64,18 +64,22 @@ def test_budget_exhausted_without_alpha_id_does_not_claim_it_queued(wk):
     assert db.submit_queue_list(wk.user_id) == []
 
 
-def test_active_weekly_required_check_is_a_dynamic_submit_gate(wk):
+def test_weekly_required_check_no_longer_blocks_submission(wk):
+    """주간 테마의 필수 체크는 **배수** 조건이지 제출 자격이 아니다 (2026-08-17 사장 승인).
+
+    08-10·08-17 두 주 연속 테마가 HT 회전비율 PASS 를 요구했고, 그 사이 이 게이트가
+    10 PASS / 1 FAIL 짜리 알파까지 문 앞에서 돌려보냈다. 배수 선호는 reward 의
+    multiplier 항이 이미 들고 있으니 여기서 두 번 걸지 않는다.
+    """
     wk._active_constraint = constraint_spec.parse(
         'region=GLB & delay=1 & universe=TOPDIV3000 & Theme Alpha test PASS')
     base = dict(_WEAK, region='GLB', _delay='1', universe='TOPDIV3000')
 
-    failed = dict(base, _check_results={'THEME_ALPHA': 'WARNING'})
-    ok, reason = wk._submit_gate(failed, None, fail_items=[], code='rank(opt6_vimtaxp)')
-    assert ok is False and 'THEME_ALPHA=WARNING' in reason
-
-    passed = dict(base, _check_results={'THEME_ALPHA': 'PASS'})
-    ok, reason = wk._submit_gate(passed, None, fail_items=[], code='rank(opt6_vimtaxp)')
-    assert ok is True, reason
+    for result in ('WARNING', 'PASS'):
+        metrics = dict(base, _check_results={'THEME_ALPHA': result})
+        ok, reason = wk._submit_gate(metrics, None, fail_items=[],
+                                     code='rank(opt6_vimtaxp)')
+        assert ok is True, f'{result}: {reason}'
 
 
 def test_active_scope_mismatch_is_blocked_before_submit(wk):

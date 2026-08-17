@@ -186,29 +186,47 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+#: 저회전 봉우리의 중심 — Fitness 분모가 바닥치는 지점(0.125) 언저리.
+LOW_TURNOVER_BAND: tuple = (0.10, 0.15)
+#: 두 봉우리 사이 골의 깊이. 0 으로 두면 GA 가 대역을 못 건너간다.
+BAND_VALLEY: float = 0.72
+
+
 def _turnover_term(turnover: float, cap: float = _criteria.TURNOVER_MAX) -> float:
-    """회전율 대역 항 — **고회전 대역(20~70%) 안이면 만점**.
+    """회전율 대역 항 — **두 제출 경로에 각각 봉우리**를 둔다.
 
-    2026-07-21 방향 전환. 옛 공식은 회전율이 낮을수록 점수를 줬는데(0.125 아래 평평),
-    개편된 규칙에서 그건 '제출 불가능한 알파를 만들라' 는 지시와 같다: HT 분류
-    문턱이 20% 이고, 그 분류를 못 얻으면 D0 기준 Sharpe 2.69·Fitness 1.5 라는
-    사실상 도달 불가능한 컷을 정면으로 뚫어야 한다.
+    2026-07-21 에는 고회전 대역(20~65%)만 만점이었다. 주간 테마가 HT 분류를 요구했고,
+    그 분류를 못 얻으면 표준 컷을 정면으로 뚫어야 했기 때문이다.
 
-    구간: [0, 0.20) 선형 상승 · [0.20, 0.65] 만점 · (0.65, 0.70) 급감 · ≥0.70 은 0
-    (0.70 초과는 HIGH_TURNOVER FAIL = 제출 차단이므로 대역 상단은 피해야 한다).
+    2026-08-17 실측이 그 전제의 절반을 뒤집었다. 고회전 대역 안에서 우리 신호의
+    적합도는 **구조적으로 0.6 언저리에 갇힌다** — Fitness = Sharpe·√(|Returns|/max(회전,0.125))
+    이라 회전 0.58 은 회전 0.115 대비 √(0.58/0.115) = 2.25 배의 벌점을 문다.
+    같은 날 실측: GLB 고회전 계보 S 1.59 → 적합도 0.60, mdl177 저회전 계보 S 1.61 →
+    적합도 1.12. 적합도 1.0 은 제출 하드 컷이므로 고회전 대역만 파면 제출이 안 난다.
+
+    그렇다고 옛 공식으로 되돌리지는 않는다 — 그건 0.3% 까지 회전을 떨어뜨려 신호를
+    죽였다(위 이력 1번). 바닥(0.125) 아래는 Fitness 가 더 안 좋아지니 그 밑으로는
+    다시 깎는다.
+
+    구간: [0, 0.10) 상승 · [0.10, 0.15] 만점(표준 경로) · (0.15, 0.20) 골
+          · [0.20, 0.65] 만점(HT 경로) · (0.65, 0.70) 급감 · ≥0.70 은 0
     """
     t = max(0.0, float(turnover or 0.0))
     hi = cap if cap and cap > 0 else _criteria.TURNOVER_MAX
     safe_hi = hi * 0.93           # 0.70 대비 0.65 — 컷 바로 밑에 붙지 않게 여유를 둔다
     lo = _criteria.HT_TURNOVER_MIN
-    if t >= hi:
+    band_lo, band_hi = LOW_TURNOVER_BAND
+    if t <= 0 or t >= hi:
         return 0.0
-    if t <= 0:
-        return 0.0
-    if t < lo:
-        return _clamp(t / lo, 0.0, 1.0)
+    if t < band_lo:                          # 바닥 아래 — Fitness 가 더 안 좋아진다
+        return _clamp(t / band_lo, 0.0, 1.0)
+    if t <= band_hi:
+        return 1.0                           # 표준 경로 봉우리
+    if t < lo:                               # 두 봉우리 사이 골
+        return _clamp(BAND_VALLEY + (1.0 - BAND_VALLEY) * (t - band_hi) / (lo - band_hi),
+                      BAND_VALLEY, 1.0)
     if t <= safe_hi:
-        return 1.0
+        return 1.0                           # HT 경로 봉우리
     return _clamp((hi - t) / (hi - safe_hi), 0.0, 1.0)
 
 

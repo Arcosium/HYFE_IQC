@@ -270,6 +270,8 @@ class Genome:
     lookback_c: int = 0             # 0 = auto → max(20, lookback_b) (기존 동작)
     regime: str = "OFF"             # 레짐 조건부: 조건 밖에서 신호를 0 으로 (보유 X)
     hump: float = 0.0               # 0 = off. 신호 변화 억제 → turnover 직접 제어
+    # ── v4 유전자 (2026-08-17) — 같은 골든 계약: 기본값이면 render() 산출물 불변.
+    sentinel: str = "OFF"           # 센티널 값을 NaN 으로 (OFF | -1 | 0)
 
 
 # 표준 시간창 — BRAIN "Recommended Practices" 권고: "DO restrict parameter search to
@@ -427,6 +429,9 @@ def _coerce_genome(obj) -> Genome | None:
         d["lookback_c"] = max(0, min(252, _lc))
         d["regime"] = d.get("regime") if d.get("regime") in REGIME_KINDS else "OFF"
         d["hump"] = _snap_hump(d.get("hump"))
+        # v4 — 값은 문자열로 다룬다. 0 과 '0' 을 섞으면 'OFF' 로 떨어져 조용히 무력화된다.
+        d["sentinel"] = (str(d.get("sentinel"))
+                         if str(d.get("sentinel")) in SENTINELS else "OFF")
         # 탐색 조건은 **맨 마지막**에 건다 — 위의 정규화가 끝난 뒤라야 유니버스·중립화·
         # 필드가 확정된 상태에서 안전하게 덮어쓸 수 있다.
         _apply_constraint(d)
@@ -585,14 +590,27 @@ def genome_from_alpha(code: str, settings: dict | None = None,
     return dict(g.__dict__)
 
 
-def _field_expr(field: str) -> str:
+#: 센티널 유전자가 고를 수 있는 값. 'OFF' 는 감싸지 않는다(골든 계약).
+SENTINELS = ("OFF", "-1", "0")
+
+
+def _field_expr(field: str, sentinel: str = "OFF") -> str:
     """유전자의 field 한 칸 → FASTEXPR 조각.
 
     합성 팩터(syn_*)는 이름이 아니라 **식**으로 전개된다 — WQB 에 그런 필드는 없다.
+
+    sentinel 은 '값이 없음' 을 뜻하는 약속값을 NaN 으로 되돌린다. 애널리스트 점수
+    필드의 -1 이 대표적인데, 그대로 두면 최저 등급으로 취급돼 신호가 뒤집힌다.
+    0 을 주면 안 되고 NaN 이어야 한다 — 0 은 중립화에서 평균을 끌고 다니지만 NaN 은
+    그 종목의 롱·숏을 청산한다(2026-08-12 5주차 강의 실측: 샤프 1.24 → 2.10).
+    합성 팩터는 이미 식이라 감싸지 않는다.
     """
     if field in SYNTHETIC_FIELDS:
         return SYNTHETIC_FIELDS[field]
-    return f"vec_avg({field})" if field in VECTOR_FIELDS else field
+    expr = f"vec_avg({field})" if field in VECTOR_FIELDS else field
+    if sentinel and sentinel != "OFF":
+        expr = f"to_nan({expr},value={sentinel})"
+    return expr
 
 
 def _transform(expr: str, kind: str, window: int) -> str:
@@ -650,7 +668,7 @@ def render(genome: Genome) -> str:
     regime 이 group/decay 안쪽인 것이 중요하다 — 조건 밖 0 을 먼저 만들고 그 위에
     중립화·평활을 얹어야 6월 3.77 알파의 구조가 재현된다.
     """
-    f1, f2, f3 = (_field_expr(f) for f in genome.fields)
+    f1, f2, f3 = (_field_expr(f, genome.sentinel) for f in genome.fields)
     a = _transform(f1, genome.transform_a, genome.lookback_a)
     b = _transform(f2, genome.transform_b, genome.lookback_b)
     # lookback_c=0 → 기존 동작(max(20, lookback_b))을 그대로 재현하는 auto 값.
@@ -1433,7 +1451,7 @@ class BaseGenomeModel:
                     ("fields", "transform_a", "transform_b", "transform_c", "combine",
                      "sign", "lookback_a", "lookback_b", "lookback_c", "decay_style",
                      "trade_when", "group_op", "group_by", "winsor_std",
-                     "weight_scheme", "regime", "hump"),
+                     "weight_scheme", "regime", "hump", "sentinel"),
                     k=rng.choice((1, 2))):
                 if gene == "decay_style":
                     d["decay_style"] = rng.choice(DECAY_STYLES)
@@ -1468,6 +1486,8 @@ class BaseGenomeModel:
                     d["regime"] = rng.choice(REGIME_KINDS)
                 elif gene == "hump":
                     d["hump"] = rng.choice(HUMPS)
+                elif gene == "sentinel":
+                    d["sentinel"] = rng.choice(SENTINELS)
                 else:
                     d["lookback_b"] = rng.choice(CANONICAL_LOOKBACKS[2:])
         d["model"] = self.name

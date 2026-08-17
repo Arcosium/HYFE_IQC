@@ -62,11 +62,37 @@ def test_soft_proof_beats_rejection_co_occurrence(wired):
 
 
 def test_soft_set_survives_a_flood_of_rejections(wired):
-    """거절이 성공보다 훨씬 잦아도 소프트 집합이 비면 안 된다 (2026-08-07 회귀)."""
+    """거절이 성공보다 훨씬 잦아도 소프트 집합이 비면 안 된다 (2026-08-07 회귀).
+
+    실제 403 본문은 그 알파의 FAIL 을 전부 싣는다 — 소프트 이름 옆엔 늘 진짜 원인이
+    같이 오른다. 그 형태로 아무리 쏟아져도 소프트는 살아남아야 한다.
+    """
     wired['rows'] = ([_submitted(NOW - 10 * 86400, 'LOW_FITNESS')]
-                     + [_rejected(NOW - i, 'LOW_FITNESS') for i in range(20)])
+                     + [_rejected(NOW - i, 'LOW_FITNESS', 'IS_LADDER_SHARPE')
+                        for i in range(20)])
     obs = gate_watch.observe(2)
-    assert obs['soft'] == ['LOW_FITNESS'] and obs['hard'] == []
+    assert obs['soft'] == ['LOW_FITNESS'] and obs['hard'] == ['IS_LADDER_SHARPE']
+
+
+def test_all_soft_rejection_revokes_the_soft_evidence(wired):
+    """FAIL 이 전부 소프트인 거절이 반복되면 소프트가 틀린 것이다 (2026-08-17 실측).
+
+    전부 안 막는다면 403 이 날 수가 없다. 그날 96 번을 쏘고 0 건이 붙었고, 소프트
+    증거의 출처는 컷이 완화된 Power Pool 제출이었다.
+    """
+    wired['rows'] = ([_submitted(NOW - 86400, 'LOW_FITNESS', 'LOW_2Y_SHARPE')]
+                     + [_rejected(NOW - i, 'LOW_FITNESS', 'LOW_2Y_SHARPE')
+                        for i in range(gate_watch.CONTRADICT_MIN)])
+    obs = gate_watch.observe(2)
+    assert obs['soft'] == []
+    assert obs['hard'] == ['LOW_2Y_SHARPE', 'LOW_FITNESS']
+
+
+def test_one_odd_rejection_does_not_flip_the_gate(wired):
+    """모순 한 번은 잡음일 수 있다 — CONTRADICT_MIN 미만이면 소프트를 지킨다."""
+    wired['rows'] = ([_submitted(NOW - 86400, 'LOW_FITNESS')]
+                     + [_rejected(NOW, 'LOW_FITNESS')])
+    assert gate_watch.observe(2)['soft'] == ['LOW_FITNESS']
 
 
 def test_sync_reports_the_change(wired):

@@ -30,6 +30,9 @@ LOG = logging.getLogger('genomicwqb.gate_watch')
 
 #: 관측 창 — 이보다 오래된 판정은 현재 집행을 대변하지 못한다.
 WINDOW_S = float(14 * 86400)
+#: 소프트 증거를 취소하는 데 필요한 '전원 소프트인 거절' 횟수. 1 이면 잡음 한 번에
+#: 게이트가 뒤집히고, 크면 오늘 같은 전멸을 며칠씩 못 잡는다.
+CONTRADICT_MIN = 3
 #: 체크 이름 추출 (예: 'rejected:LOW_FITNESS(0.65 vs 1.0); IS_LADDER_SHARPE(...) (http_403)')
 _NAME_RX = re.compile(r'[A-Z][A-Z0-9_]{4,}')
 #: 사유 문자열에 섞이는 비-체크 토큰 ('rejected:' 접두어·'(http_403)' 꼬리 등)
@@ -51,6 +54,7 @@ def observe(user_id: int, since_s: float | None = None) -> dict:
     window = WINDOW_S if since_s is None else float(since_s)
     hard_at: dict[str, float] = {}
     soft_at: dict[str, float] = {}
+    rejected_sets: list[set] = []
     n_rej = n_sub = 0
     try:
         rows = _db.rejection_and_success_checks(user_id, time.time() - window)
@@ -64,7 +68,9 @@ def observe(user_id: int, since_s: float | None = None) -> dict:
                 soft_at[n] = max(soft_at.get(n, 0.0), float(ts or 0))
         elif str(status or '').startswith('rejected:'):
             n_rej += 1
-            for n in _names(status):
+            names = _names(status)
+            rejected_sets.append(names)
+            for n in names:
                 hard_at[n] = max(hard_at.get(n, 0.0), float(ts or 0))
     # ⚖ 증거의 무게가 비대칭이다 (2026-08-07 수정).
     #   · "FAIL 인데도 제출됐다" = 그 체크가 안 막는다는 **증명**이다.
@@ -79,6 +85,23 @@ def observe(user_id: int, since_s: float | None = None) -> dict:
     # — 소프트로 틀리면 공짜 거절 한 번이고, 하드로 틀리면 제출 기회를 통째로 버린다.
     soft = set(soft_at)
     hard = set(hard_at) - soft
+    # 🔁 소프트가 반증되는 자리 (2026-08-17 실측). 거절 본문의 FAIL 이 **전부 소프트**면
+    #   모순이다 — 전부 안 막는다면 403 이 날 수가 없다. 그날 96번을 쏘고 0건이 붙었는데
+    #   28건이 이 모양이었다(`rejected:LOW_FITNESS(0.79 vs 1.0); LOW_2Y_SHARPE(1.22 vs 1.58)`).
+    #   원인은 소프트 증거의 출처였다: LOW_SHARPE·LOW_FITNESS 를 달고 통과한 알파들은
+    #   Power Pool 제출(S≥1.0, 적합도 검사 없음)이었고, 그 완화된 컷을 일반 제출에
+    #   그대로 적용하고 있었다. 한 번은 우연일 수 있으니 반복될 때만 소프트를 취소한다.
+    contradicted: dict[str, int] = {}
+    for names in rejected_sets:
+        if names and names <= soft:
+            for n in names:
+                contradicted[n] = contradicted.get(n, 0) + 1
+    demoted = {n for n, c in contradicted.items() if c >= CONTRADICT_MIN}
+    if demoted:
+        LOG.warning('소프트 반증 — 전원 소프트인 거절이 반복돼 하드로 되돌림: %s',
+                    ', '.join(sorted(demoted)))
+    soft -= demoted
+    hard |= demoted
     return {'hard': sorted(hard), 'soft': sorted(soft),
             'n_rejected': n_rej, 'n_submitted': n_sub}
 

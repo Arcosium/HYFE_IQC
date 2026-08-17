@@ -500,14 +500,18 @@ class Worker(threading.Thread):
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
         active_constraint = getattr(self, '_active_constraint', None)
-        # 🔭 다변화 우대 (2026-08-13 사장 결정) — 아직 3건이 안 찬 피라미드 칸이면
-        #    활성 조건의 **필수 체크만** 면제한다. 주간 테마가 요구하는 HT 계열은
-        #    회전이 빠른 데이터에서만 나오는데, 미개척 칸(Fundamental·Analyst)은
-        #    본질적으로 느린 데이터라 그 요구와 양립하지 않는다. 테마 배수는 이미
-        #    1.0(최저)이고 피라미드는 분기 내내 남으니 칸을 여는 쪽이 남는 장사다.
+        # 🔭 필수 체크는 **제출을 막지 않는다** (2026-08-17 사장 승인).
+        #    원래는 미달 피라미드 칸일 때만 면제했는데(2026-08-13), 그 예외를 상시로
+        #    넓힌다. 주간 테마의 필수 체크는 Power Pool **배수** 조건이지 일반 제출
+        #    자격이 아니다. 08-10·08-17 두 주 연속 테마가 HT 회전비율 PASS 를 요구했고,
+        #    그 사이 이 게이트가 막은 알파 중엔 10 PASS / 1 FAIL 짜리도 있었다.
+        #    5주차 강의(08-12)에서도 "저 딜 맞추느라 애쓰느니 상관 줄이는 쪽이 효율적"
+        #    이라고 했다. 배수 선호는 reward 의 multiplier 항이 이미 들고 있으니
+        #    여기서 두 번 걸 이유가 없다.
+        #    ⚠ scope(region/delay/universe)와 금지 데이터셋은 그대로 막는다 — 그건
+        #      조건을 어기는 것이라 WQB 가 어차피 거절한다.
         constraint_reasons = _constraint_gate_reasons(
-            active_constraint, metrics or {}, str(code or ''),
-            waive_checks=_pyramid_short(self.user_id, metrics))
+            active_constraint, metrics or {}, str(code or ''), waive_checks=True)
         if constraint_reasons:
             return False, 'active_constraint(' + '; '.join(constraint_reasons) + ')'
         # 같은 식 차단은 **여기서 하나도 하지 않는다** (2026-08-04 사장 지시 "제출은 일단

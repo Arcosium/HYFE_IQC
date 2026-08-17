@@ -1122,7 +1122,21 @@ class WqbApiClient:
         checks = ((body_j.get('is') or {}).get('checks')) or []
         failed = [c for c in checks if str(c.get('result') or '').upper() == 'FAIL']
         if not failed:
-            return None
+            # FAIL 이 하나도 없는데 거절되는 경우가 있다 (2026-08-17 실측, e73XlV8d).
+            # WQB 가 체크를 **계산하지 못하면** ERROR 로 두고 제출을 막는다. 그 알파는
+            # 전 항목 PASS 에 샤프 2.1·적합도 1.2 였는데 LOW_GLB_AMER/EMEA_SHARPE 가
+            # ERROR 였다 — 포지션이 한 지역에 몰려 나머지 지역 샤프가 정의되지 않은 것.
+            # 이걸 안 적으면 기록이 `submit_http_403:{"is":{"checks":[…` 로 잘려 남아
+            # 사유를 영영 재구성할 수 없다(그래서 이 실패 유형이 여태 안 보였다).
+            # 기준은 **ERROR 하나**다. PENDING 만 있는 응답은 사유로 적지 않는다 —
+            # 아직 계산 중일 뿐이고, 그걸 거절 사유로 남기면 2026-07-28 사장이 지적한
+            # "표시가 실제 이유로 안 읽힌다" 가 재발한다(test_rejection_reason).
+            if not any(str(c.get('result') or '').upper() == 'ERROR' for c in checks):
+                return None
+            broken = [c for c in checks
+                      if str(c.get('result') or '').upper() in ('ERROR', 'PENDING')]
+            return '; '.join(f"{c.get('name') or '?'}={str(c.get('result')).upper()}"
+                             for c in broken)
         # ⚠ 앞 3개만 자르면 **결정적인 체크가 잘려 나간다**(2026-07-28). WQB 체크 순서상
         #   LOW_SHARPE·LOW_FITNESS·LOW_GLB_* 가 맨 앞이고 REGULAR_SUBMISSION·
         #   POWER_POOL_CORRELATION 처럼 진짜로 막는 것은 한참 뒤에 온다 — 잘린 자리에
