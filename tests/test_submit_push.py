@@ -130,10 +130,45 @@ def test_filled_risk_cell_retires_curated_axes(monkeypatch):
     assert not any(a in codes.replace(NEUT, '') for a in sp.AXES)
 
 
-def test_axis_without_same_dataset_partner_is_skipped(monkeypatch):
-    """짝을 못 찾으면 안 쏜다 — rsk70 을 섞으면 WQB 가 risk 칸으로 셈해 다변화가 무효."""
+def test_same_dataset_partner_is_preferred(monkeypatch):
+    """같은 데이터셋 짝이 있으면 그쪽을 쓴다 — 피라미드 귀속이 흐려지지 않는다."""
+    inserted = _wire(monkeypatch, short=('FUNDAMENTAL',))
+    monkeypatch.setattr(sp, '_same_dataset_partners',
+                        lambda field, rows: ('fnd6_same_a', 'fnd6_same_b'))
+    monkeypatch.setattr(sp, '_cross_dataset_partners',
+                        lambda field, rows: ('other_x', 'other_y'))
+    monkeypatch.setattr(sp, '_discover_axes',
+                        lambda exclude, n, uid=None: ['fnd6_newfieldx'][:n])
+    monkeypatch.setattr('server.alpha_lint.validate_alpha', lambda code: [])
+    assert sp.maybe_seed(2, now=IN_WINDOW) > 0
+    codes = ' '.join(s['code'] for s in inserted)
+    assert 'fnd6_same_a' in codes and 'other_x' not in codes
+
+
+def test_cross_dataset_partner_is_borrowed_when_none_at_home(monkeypatch):
+    """같은 데이터셋에 짝이 없으면 **다른 데이터셋에서 빌린다** (2026-08-18 사장 지시).
+
+    원래는 여기서 통째로 건너뛰었는데, 그 규칙이 제출 가능한 조합을 시작도 못 하게
+    막고 있었다 — 08-17~18 에 실제로 통과한 알파 3건은 전부 데이터셋이 다른 둘의
+    합성이었다(EMEA 되는 재료와 IS_LADDER 되는 재료가 서로 다른 데이터셋에만 있다).
+    """
     inserted = _wire(monkeypatch, short=('FUNDAMENTAL',))
     monkeypatch.setattr(sp, '_same_dataset_partners', lambda field, rows: None)
+    monkeypatch.setattr(sp, '_cross_dataset_partners',
+                        lambda field, rows: ('other_x', 'other_y'))
+    monkeypatch.setattr(sp, '_discover_axes',
+                        lambda exclude, n, uid=None: ['fnd6_newfieldx'][:n])
+    monkeypatch.setattr('server.alpha_lint.validate_alpha', lambda code: [])
+    assert sp.maybe_seed(2, now=IN_WINDOW) > 0
+    codes = ' '.join(s['code'] for s in inserted)
+    assert 'fnd6_newfieldx' in codes and 'other_x' in codes
+
+
+def test_axis_is_skipped_when_no_partner_anywhere(monkeypatch):
+    """어디에도 짝이 없으면 그때는 안 쏜다 — 한 필드짜리 신호는 이 골격이 아니다."""
+    inserted = _wire(monkeypatch, short=('FUNDAMENTAL',))
+    monkeypatch.setattr(sp, '_same_dataset_partners', lambda field, rows: None)
+    monkeypatch.setattr(sp, '_cross_dataset_partners', lambda field, rows: None)
     monkeypatch.setattr(sp, '_discover_axes',
                         lambda exclude, n, uid=None: ['fnd6_newfieldx'][:n])
     monkeypatch.setattr('server.alpha_lint.validate_alpha', lambda code: [])

@@ -27,7 +27,11 @@ _API_ACCEPT = 'application/json;version=2.0'
 # 180 → 480 (2026-07-23): 제출 확인은 SELF/PROD correlation 계산을 기다리는 구간이라
 # 3분을 자주 넘긴다. 7/23 라이브에서 전 체크 PASS 알파(Sharpe 1.59)가 180초 타임아웃으로
 # 유실됐다. 제출은 하루 4건뿐이라 스레드가 몇 분 더 기다리는 비용은 무시할 만하다.
-_SUBMIT_ALPHA_DEADLINE_S = float(os.environ.get('HYFE_IQC_ALPHA_SUBMIT_DEADLINE_S', '480'))
+# 제출 폴링 시한. WQB 배터리가 이보다 길면 submit_pending_timeout 으로 끊기는데,
+# 그건 거절이 아니라 **우리가 기다림을 포기한 것**이라 사유를 못 받는다. 480 초로는
+# 2026-08-17 하루에만 10회 넘게 끊겼고, 52건을 되쏴서 확인해야 했다(전부 거절이었다).
+# 제출은 하루 4건뿐이라 오래 기다려도 잃는 게 없다.
+_SUBMIT_ALPHA_DEADLINE_S = float(os.environ.get('HYFE_IQC_ALPHA_SUBMIT_DEADLINE_S', '900'))
 # 일일 시뮬 쿼터 잔여가 이 밑이면 경고 로그 (WQB 플랫폼도 1000 에서 경고한다).
 _SIM_QUOTA_WARN = float(os.environ.get('IQC_SIM_QUOTA_WARN', '1000'))
 

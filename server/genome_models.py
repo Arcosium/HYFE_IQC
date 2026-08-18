@@ -358,6 +358,10 @@ WINSOR_STDS = (0, 3, 4, 5)
 # (product/ratio/corr 은 스케일이 상쇄되거나 의미가 달라져 가중이 무의미).
 WEIGHT_SCHEMES = {"1:1": None, "2:1": (2, 1), "1:2": (1, 2), "3:1": (3, 1)}
 
+#: PROD/SELF 상관 거절 뒤 시도할 decay 사다리 (2026-08-18 실측 기반).
+#: 24 와 36 에서 실제 제출이 나왔다. 12 는 못 뚫었고, 42 이상은 신호가 죽기 시작한다.
+DECORR_DECAYS = (24, 30, 36, 42)
+
 _GENE_NAMES = tuple(f.name for f in dataclasses.fields(Genome))
 
 
@@ -1373,6 +1377,15 @@ class BaseGenomeModel:
             # 그룹 기준·가중도 값싼 탈상관 레버 — 같은 신호도 다른 알파가 된다.
             d["group_by"] = rng.choice(GROUP_BYS)
             d["weight_scheme"] = rng.choice(tuple(WEIGHT_SCHEMES))
+            # 🔑 decay 를 상관 축으로 올린다 (2026-08-18 사장 지시).
+            #    08-17~18 에 **상관을 실제로 움직인 유일한 설정**이 이것이다:
+            #      pv47 단독      decay  6 → 12   상관 0.78 → 0.74
+            #      2재료 합성     decay 12 → 24   상관 0.75 → 통과 (첫 제출)
+            #      srisk 조립     decay 24 → 36   상관 0.73 → 통과 (둘째 제출)
+            #    회전이 내려가면서 겹치는 구간이 줄어드는 것으로 보인다. 부모보다
+            #    **올리는 쪽으로만** 간다 — 내리면 상관이 도로 올라간 게 실측이다.
+            d["decay"] = min(60, rng.choice(DECORR_DECAYS
+                                            + (int(d.get("decay") or 0) + 12,)))
         elif directive == "boost":      # ── Fitness 미달 → returns 를 올린다 ──
             # Fitness = Sharpe·sqrt(|Returns|/max(Turnover,0.125)). 라이브 turnover 는
             # 이미 ~3% 로 바닥(0.125) 한참 아래라 **더 낮춰도 Fitness 는 안 오른다**.

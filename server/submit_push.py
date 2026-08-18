@@ -35,6 +35,12 @@ DAILY_SUBMIT_TARGET = int(os.environ.get('IQC_PUSH_DAILY_SUBMITS', '4'))
 PUSH_WINDOW_S = float(os.environ.get('IQC_PUSH_WINDOW_S', str(3 * 3600)))
 COOLDOWN_S = float(os.environ.get('IQC_PUSH_COOLDOWN_S', '600'))
 DEAD_AXIS_SHARPE = 1.0        # 이 골격 시도의 최고 S 가 이 미만이면 죽은 축
+#: 발굴이 노리는 커뮤니티 사용량 구간 (2026-08-17 실측).
+#: 사용 0~1 필드 24종을 쏴 봤더니 **전부 샤프 0.5 이하**였다 — 아무도 안 쓰는 건
+#: 안 붐비는 게 아니라 신호가 없는 것이었다. 반대로 3000 이상은 실제로 붐빈다
+#: (rsk70 계열 상관 0.84). 커뮤니티가 검증했지만 아직 포화는 아닌 구간을 판다.
+SIGNAL_USAGE_MIN = float(os.environ.get('IQC_SIGNAL_USAGE_MIN', '120'))
+SIGNAL_USAGE_MAX = float(os.environ.get('IQC_SIGNAL_USAGE_MAX', '3000'))
 AXES_PER_WAVE = 4             # 축 4 × 부호 2 = 스펙 8 (라운드 limit)
 # 창 밖 상시 다변화 웨이브 (2026-08-04 사장 지시) — Power Pool 점수는 개수가 아니라
 # 풀에 더한 순증분이라, 같은 데이터셋(rsk70) 형제를 아무리 쌓아도 1개어치다. 창 밖에선
@@ -266,6 +272,39 @@ def _same_dataset_partners(field: str, rows: list[dict]) -> tuple[str, str] | No
     return (same[0][1], same[1][1]) if len(same) >= 2 else None
 
 
+def _cross_dataset_partners(field: str, rows: list[dict]) -> tuple[str, str] | None:
+    """다른 데이터셋에서 짝 2개 — 같은 데이터셋에 짝이 없을 때의 폴백.
+
+    한 재료로는 제출 조건 다섯 개를 동시에 못 만족시킨다(2026-08-17~18 실측 300여 건):
+    EMEA 샤프가 서는 데이터셋은 IS_LADDER 가 안 서고, 래더가 서는 ML 예측 계열은
+    EMEA 가 0.03 이다. 통과한 알파 3건은 전부 그 둘을 **가로질러** 합성한 것이다.
+
+    커버리지가 높고 커뮤니티 사용이 중간대인 필드를 고른다 — 사용 0~수십인 필드는
+    안 붐비는 게 아니라 신호가 없었다(08-17 실측: 그런 필드 24종 전부 샤프 0.5 이하).
+    """
+    from . import datafield_palette as _pal
+    ds = str(_pal.field_dataset_map().get(field) or '').strip().lower()
+    out = []
+    for r in rows:
+        name = str(r.get('name') or '')
+        if not name or name == field:
+            continue
+        if str(r.get('category') or '').strip().lower() == ds:
+            continue                      # 같은 데이터셋은 위에서 이미 시도했다
+        try:
+            cov = float(r.get('coverage') or 0)
+            used = float(r.get('alphas') or 0)
+        except (TypeError, ValueError):
+            continue
+        if cov < 95 or not (SIGNAL_USAGE_MIN <= used <= SIGNAL_USAGE_MAX):
+            continue
+        out.append((-cov, used, name))
+    if len(out) < 2:
+        return None
+    out.sort()
+    return (out[0][2], out[1][2])
+
+
 def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str]:
     """카탈로그(live_datafields)에서 새 신호 축을 스스로 발굴한다 — 축이 고갈되면
     사람을 부르는 게 아니라 여기로 온다(2026-08-02 사장: "알아서 찾아야지").
@@ -300,12 +339,16 @@ def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str
             used = int(float(r.get('alphas') or 0))
         except (TypeError, ValueError):
             used = 0
+        # 사용량 구간 밖은 버린다 — 아래 정렬이 '저사용 우선' 이라 이 필터가 없으면
+        # 신호 없는 필드(사용 0~1)가 매 웨이브를 통째로 차지한다(2026-08-17 실측).
+        if not (SIGNAL_USAGE_MIN <= used <= SIGNAL_USAGE_MAX):
+            continue
         # 🔺 미달 피라미드 칸이 1순위 (2026-08-13 사장 결정). 이미 3건을 채운 칸에
         #    덧쌓으면 피라미드는 그대로인데 PROD_CORRELATION 만 올라 그 계보가
         #    통째로 제출 불능이 된다 — 그날 12/12 거절이 그 결과였다.
         cat = _pyr.dataset_category(str(r.get('category') or ''))
         rank = 0 if (cat and cat in short) else 1
-        cands.append((rank, used, -cov, name, cat))   # 미달칸 → 저사용 → 고커버리지
+        cands.append((rank, used, -cov, name, cat))   # 미달칸 → 저사용(구간 안) → 고커버리지
     cands.sort()
     # 한 칸에 필요한 만큼만 뽑는다. 안 그러면 한 웨이브가 통째로 같은 데이터셋으로
     # 채워져 방금 고친 병(한 칸에 16발)을 그대로 재현한다 — 실측: 미달 칸 우선만
@@ -411,10 +454,18 @@ def maybe_seed(user_id: int, log_fn=None, now: float | None = None) -> int:
         else:
             partners = _same_dataset_partners(field, pal_rows)
             if partners is None:
-                # 같은 데이터셋에서 짝을 못 찾으면 **쏘지 않는다**. rsk70 을 섞어
-                # 내면 WQB 가 risk 칸으로 셈해 다변화가 그 자리에서 무효가 된다.
-                skipped_mixed.append(field)
-                continue
+                # 같은 데이터셋에 짝이 없으면 **다른 데이터셋에서 빌린다**
+                # (2026-08-18 사장 지시). 원래는 여기서 통째로 건너뛰었는데,
+                # 그 규칙이 제출 가능한 조합을 시작도 못 하게 막고 있었다 —
+                # 08-17~18 에 실제로 통과한 알파 3건은 전부 **데이터셋이 다른 둘**의
+                # 합성이었다(EMEA 가 되는 재료와 IS_LADDER 가 되는 재료가 서로 다른
+                # 데이터셋에만 있다). 한 재료로 다섯 조건을 다 만족시킬 수 없다.
+                # 대가는 피라미드 귀속이 흐려지는 것인데, 칸을 여는 것보다 제출이
+                # 먼저다(칸은 분기 내내 남는다).
+                partners = _cross_dataset_partners(field, pal_rows)
+                if partners is None:
+                    skipped_mixed.append(field)
+                    continue
         for sign in (1, -1):
             g = dict(BASE_GENOME, universe=universe, sign=sign,
                      fields=[field, partners[0], partners[1]])
