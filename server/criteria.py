@@ -27,6 +27,7 @@ High Turnover Alphas" · "Understanding PnL Realization Horizon" · "Multiplier 
 from __future__ import annotations
 
 import math
+import re as _re
 
 # ── 표준 제출 컷 (CHN 제외 전 지역) ──────────────────────────────────────────
 # "Fitness > 1.5 for Delay 0, > 1 for Delay 1 / Sharpe > 2.69 for D0, > 1.58 for D1"
@@ -357,7 +358,10 @@ def queue_hopeless(reason) -> str:
         reason = ' '.join(str((r.get('name') if isinstance(r, dict) else r) or '')
                           for r in (reason or []))
     up = reason.upper()
-    return next((n for n in QUEUE_HOPELESS_CHECKS if n in up), '')
+    # '=PENDING'/'=ERROR' 는 값 미상·평가 실패지 FAIL 이 아니다 — 손절 근거가 못 된다
+    # (2026-08-20 실측: PROD_CORRELATION=PENDING 인 403 을 손절로 오판해 재시도를 막았다).
+    return next((n for n in QUEUE_HOPELESS_CHECKS
+                 if _re.search(n + r'(?!=(?:PENDING|ERROR))', up)), '')
 
 
 def cutoffs(delay, region=None) -> dict:

@@ -113,15 +113,8 @@ ALPHAS_PER_ROUND = int(os.environ.get('IQC_ALPHAS_PER_ROUND', '14'))
 #   0 보다 큰 값을 넣으면 다시 예방적 차단이 켜진다.
 PP_SELFCORR_MAX = float(os.environ.get('IQC_PP_SELFCORR_MAX', '0'))
 
-# 프로덕션 상관 선독 컷 (2026-08-13). WQB 의 PROD_CORRELATION 하드컷과 같은 0.7.
-#   /alphas/{id}/correlations/prod 는 공짜 GET 이고, 이 값이 0.7 을 넘으면 제출은
-#   확정 403 이다. 실측: 같은 계보 12건을 연달아 쏴서 12건 전부 0.83~0.97 로 거절.
-#   0 이하로 두면 선독을 끈다(네트워크가 불안할 때 되돌리는 손잡이).
-PROD_CORR_MAX = float(os.environ.get('IQC_PROD_CORR_MAX', '0.7'))
-# 그 값을 기다려 줄 시간. 짧게 잡는다 — 실측(2026-08-13)상 이 자원은 **빨리 주거나
-# 아예 안 준다**. 167초를 폴링해도 안 나오는 알파가 있고, 같은 알파가 몇 분 전엔
-# 즉시 0.8867 을 냈다. 오래 기다려 봐야 제출만 늦어진다.
-PROD_CORR_READ_S = float(os.environ.get('IQC_PROD_CORR_READ_S', '12'))
+# 프로덕션 상관 선독 컷(2026-08-13)은 2026-08-20 사장 지시로 제거 — 제출 시도는
+# 공짜인데 신뢰 불가 API 수치(경계값 0.7146 실측)로 문 앞에서 버리는 벽이었다.
 
 # ③ Yield Score (ACE) — arm 배분 점수에 '시뮬 1건당 게이트 통과율'을 섞는 비중.
 #   score = mean + w·(pass_sum+1)/(visits+2)  (라플라스 스무딩 — 냉시작 arm 은
@@ -166,25 +159,6 @@ def _constraint_result_state(result: dict, constraint) -> str:
         return 'unknown'
 
 
-def _prod_corr(user_id: int, wqb_alpha_id: str) -> float | None:
-    """프로덕션 상관 실측. 못 읽으면 None → 게이트는 통과시킨다(fail-open).
-
-    제출을 조용히 누락하는 것보다 헛발 한 번이 낫다.
-    """
-    try:
-        from . import wqb_api as _wqb_api
-        u, p = _db.get_user_credentials(user_id)[:2]
-        pc = _wqb_api.WqbApiClient(u, p).read_prod_correlation(
-            wqb_alpha_id, deadline_s=PROD_CORR_READ_S)
-        if pc is None:
-            # 조용히 통과시키면 가드가 통째로 꺼진 걸 아무도 모른다 — 반드시 남긴다.
-            LOG.warning('프로덕션 상관 없음(제출 진행): %s', wqb_alpha_id)
-        return pc
-    except Exception as e:
-        LOG.warning('프로덕션 상관 조회 실패(제출 진행): %s', e)
-        return None
-
-
 def _pyramid_short(user_id: int, metrics: dict) -> bool:
     """이 알파가 **미달 피라미드 칸**에 들어가나.
 
@@ -204,53 +178,11 @@ def _pyramid_short(user_id: int, metrics: dict) -> bool:
         return False
 
 
-#: 하루 앞 몇 칸을 **미개척 피라미드 칸**에 남겨 둘지 (2026-08-18 사장 결정, B안).
-PYRAMID_RESERVE = int(os.environ.get('IQC_PYRAMID_RESERVE', '2'))
-#: 플랫폼일 경계 이 시간 안이면 예약을 푼다 — 미개척 알파가 안 나온 날 쿼터를 버리지 않는다.
-PYRAMID_RELEASE_S = float(os.environ.get('IQC_PYRAMID_RELEASE_S', str(3 * 3600)))
-
-
-def _pyramid_saturated(user_id: int, metrics: dict) -> bool:
-    """이 알파가 들어갈 칸이 **전부 이미 3건 이상**인가.
-
-    `_pyramid_short` 의 반대다. 칸 이름을 모르면(빈 pyramids) False — 모르는 것을
-    후순위로 밀면 새 데이터셋이 통째로 늦어진다.
-    """
-    names = [n.strip().upper() for n in
-             str((metrics or {}).get('pyramids') or '').split(',') if n.strip()]
-    if not names:
-        return False
-    try:
-        from . import pyramids as _pyr
-        have = _pyr.counts(user_id)
-        return all(have.get(n, 0) >= _pyr.PYRAMID_MIN for n in names)
-    except Exception as e:
-        LOG.warning('피라미드 포화 판정 실패(후순위 없음): %s', e)
-        return False
-
-
-def _pyramid_defer(user_id: int, metrics: dict, used: int,
-                   now: float | None = None) -> bool:
-    """포화 칸 알파를 이번엔 뒤로 미룰까.
-
-    최근 14일 제출 27건 중 **21건이 GLB/D1/PV 한 칸**이었다(2026-08-18 실측).
-    칸은 3건이면 차는데 거기 21건을 쌓는 동안 피라미드는 하나도 안 늘고 상관만
-    올라 그 계보가 통째로 제출 불능이 됐다.
-
-    막지는 않는다(A안) — 미개척 칸에서 통과 알파가 안 나오는 날 쿼터를 통째로
-    버리게 되기 때문이다. 앞 PYRAMID_RESERVE 칸만 남겨 두고, 플랫폼일 경계가
-    가까우면 그마저 푼다.
-    """
-    if used >= PYRAMID_RESERVE:
-        return False
-    try:
-        from .submit_push import _day0
-        now = time.time() if now is None else now
-        if (_day0(now) + 86400.0) - now <= PYRAMID_RELEASE_S:
-            return False                    # 마감 임박 — 예약 해제
-    except Exception as e:
-        LOG.warning('플랫폼일 경계 조회 실패(예약 유지): %s', e)
-    return _pyramid_saturated(user_id, metrics)
+# 피라미드 예약(PYRAMID_RESERVE, 2026-08-18 B안)은 2026-08-20 사장 지시로 제거.
+# "일단 쏘는 건 자원이 안 드니까 쏴보고 실패하면 그때 넣어라" — 포화 칸이어도 제출을
+# 보류하지 않는다. 실측 사고: 8/19 하루 유일한 게이트 통과작(d5jVZZEE)이 kind='pyramid'
+# 로 큐에 들어갔는데 그 kind 는 드레인 대상이 아니라 쿼터 0 으로 하루가 끝났다.
+# 다변화는 생성 단계(submit_push 미개척 칸 겨냥)에서만 민다 — 게이트에서 막지 말 것.
 
 
 def _constraint_gate_reasons(constraint, metrics: dict, code: str = '',
@@ -637,19 +569,6 @@ class Worker(threading.Thread):
         except Exception as e:
             LOG.warning('submitted_today 조회 실패 (제출 강행): %s', e)
             return True, ''
-        # 🔺 피라미드 배분 — 이미 찬 칸은 **후순위**로만 민다 (2026-08-18 사장 결정).
-        if _pyramid_defer(self.user_id, metrics or {}, used):
-            wid = str((metrics or {}).get('wqb_alpha_id') or '')
-            if wid:
-                try:
-                    _db.submit_queue_add(
-                        self.user_id, wqb_alpha_id=wid, kind='pyramid',
-                        code=str(code or ''),
-                        note=f'피라미드 포화 칸 — 앞 {PYRAMID_RESERVE}칸은 미개척 칸 우선',
-                        metrics=dict(metrics or {}))
-                except Exception as e:
-                    LOG.warning('submit_queue 추가 실패(무시): %s', e)
-            return False, f'pyramid_full(예약 {used}/{PYRAMID_RESERVE})→queued'
         # WQB 자체 카운터(REGULAR_SUBMISSION FAIL)가 우리 집계보다 권위 있다 —
         # 둘이 어긋나면 소진 쪽을 믿는다.
         if 'REGULAR_SUBMISSION' in names:
@@ -676,17 +595,10 @@ class Worker(threading.Thread):
             # 넣지도 못했으면서 '→queued' 라고 적지 않는다 — 라이브 피드가 거짓말한다.
             tail = '→queued' if queued else '→미보관'
             return False, f'daily_budget({used}/{DAILY_SUBMIT_BUDGET}){tail}'
-        # 🔎 프로덕션 상관 선독 — 여기까지 온 알파만 읽는다(호출을 아낀다).
-        #   읽기 실패는 통과시킨다: 제출을 조용히 누락하는 것보다 헛발 한 번이 낫다.
-        wid = str((metrics or {}).get('wqb_alpha_id') or '')
-        if PROD_CORR_MAX > 0 and wid:
-            # 시뮬 직후에 이미 받아 둔 값이 있으면 그걸 쓴다 — 네트워크 0회.
-            try:
-                pc = float(str((metrics or {}).get('prod_correlation')))
-            except (TypeError, ValueError):
-                pc = _prod_corr(self.user_id, wid)
-            if pc is not None and pc > PROD_CORR_MAX:
-                return False, f'prod_corr({pc:.4f}>{PROD_CORR_MAX:g})'
+        # 프로덕션 상관 선독 벽은 2026-08-20 사장 지시로 제거 — "일단 쏘는 건 자원이
+        # 안 드니까 쏴보고 실패하면 그때 넣어라". 이 API 는 신뢰 불가 판정이 나 있고
+        # (준비 무관 빈 본문·수 분 사이 값 요동 — 2026-08-13 실측), 실제로 0.7146 같은
+        # 경계값이 공짜 제출 시도를 문 앞에서 버렸다. 진짜 값은 403 본문이 준다.
         # 품질 문턱(below_value)은 2026-07-28 사장 지시로 제거했다. **낼 수 있으면 낸다.**
         # 하루 4칸을 아끼자는 장치였는데 실측이 정반대였다 — 제출 실적이 1·1·2·4·2 건으로
         # 대개 4칸을 못 채우면서 같은 기간 330건을 문턱으로 걸렀다. 안 쓴 예산은 이월되지
