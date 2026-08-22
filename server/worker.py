@@ -1972,6 +1972,29 @@ class Worker(threading.Thread):
                 else:
                     to_simulate.append(s)
             cache_hit_total = len(cached_results)
+            # 📤 캐시히트도 발사한다 (2026-08-22 사장 비상 지시의 항구 수정) —
+            # 캐시로 돌아온 알파는 partial 스트림(즉시 제출 경로)을 안 타서, 차단
+            # FAIL 0 이라도 **한 번도 발사되지 않은 채** 버려졌다(8/21~22 무결점
+            # 24건 방치 → 하루 제출 0 사고). 게이트 ok 면 kind='budget' 큐로 —
+            # 드레인이 정상 경로로 쏜다. submit_queue_add 의 (user,wid,kind)
+            # 중복 무시가 "한 번 쏘고, 실패하면 그때 넣는다"의 '한 번'을 지킨다.
+            for _cr in cached_results:
+                try:
+                    _cm = dict(_cr.get('metrics') or {})
+                    _cw = str(_cm.get('wqb_alpha_id') or '')
+                    if not _cw:
+                        continue
+                    _ok, _why = self._submit_gate(
+                        _cm, fail_items=_cr.get('fail_items') or [],
+                        code=_cr.get('code'))
+                    if _ok and _db.submit_queue_add(
+                            self.user_id, wqb_alpha_id=_cw, kind='budget',
+                            code=str(_cr.get('code') or ''), metrics=_cm,
+                            note='캐시히트 미발사분 — 큐 경유 발사'):
+                        self._log(round_num,
+                                  f'  📤 캐시히트 무발사분 큐 장전 — {_cw}')
+                except Exception as e:
+                    self._log_quiet(round_num, f'⚠ 캐시히트 큐 장전 실패(무시): {e}')
             if _novelty_n:
                 self._log(round_num,
                           f'  ♻ 신규성 압력 — 기지(旣知) 조합 {_novelty_n}개를 '
