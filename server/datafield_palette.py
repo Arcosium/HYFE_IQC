@@ -220,6 +220,44 @@ def dataset_category_map() -> dict:
     return _DATASET_CATEGORY_CACHE
 
 
+# ── 데이터셋 Value Score (WQB Data Explorer) ─────────────────────────────────
+# WQB 피드백(2026-08-26): "다른 데이터셋을 안 쓴다 — Dataset Value Score 로 저사용
+# 고가치 필드를 찾아라." 그 Value Score·dateUpdated 를 데이터셋 단위로 한 번만 캡처해
+# (`data/dataset_meta.json`, wqb_data_service.refresh 가 일일 갱신) 여기서 조회한다.
+# 29,000행 필드 CSV 에 컬럼을 복제하지 않는다 — 데이터셋 id(=category 컬럼)로 붙이면 된다.
+_DATASET_META_PATH = os.path.join(os.path.dirname(_LIVE_CSV_PATH), 'dataset_meta.json')
+_DATASET_META_CACHE: dict = {}
+_DATASET_META_MTIME: float = -1.0
+
+
+def dataset_meta() -> dict:
+    """{dataset_id(lower): {vs, userCount, alphaCount, dateUpdated, ...}}. 없으면 빈 dict."""
+    global _DATASET_META_CACHE, _DATASET_META_MTIME
+    try:
+        mt = os.path.getmtime(_DATASET_META_PATH)
+    except OSError:
+        return {}
+    if mt != _DATASET_META_MTIME:
+        try:
+            with open(_DATASET_META_PATH, encoding='utf-8') as fh:
+                _DATASET_META_CACHE = json.load(fh) or {}
+        except (OSError, ValueError):
+            _DATASET_META_CACHE = {}
+        _DATASET_META_MTIME = mt
+    return _DATASET_META_CACHE
+
+
+def dataset_value_score(ds_id) -> float:
+    """데이터셋의 Value Score (0.0 = 미상). 필드 선택 다변화 가중치용."""
+    m = dataset_meta().get(str(ds_id or '').strip().lower())
+    if not m:
+        return 0.0
+    try:
+        return float(m.get('vs') or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def classify_family(name: str) -> str | None:
     """필드명 → family.
 
@@ -545,10 +583,19 @@ def family_pools(per_family: int | None = None,
         gems = sorted(rs, key=lambda r: (_safe_int(r.get('alphas')),
                                          -_safe_int(r.get('coverage')),
                                          r.get('name', '')))
+        # 🆕 고가치·저사용 (2026-08-26, WQB Data Explorer 피드백) — Dataset Value Score
+        #   높은 데이터셋의 필드를 셋째 바구니로 끼운다. 한 family(특히 'model')가
+        #   risk70·pv 같은 대형 데이터셋에 눌려 고가치 소형 데이터셋(quant_factor_lib
+        #   VS5·ai_news_scores VS4 등)을 팔레트에 못 올리던 편중을 깬다. VS 미상(0)이면
+        #   자연히 뒤로 밀려 기존 동작과 같다(fail-open).
+        valued = sorted(rs, key=lambda r: (-dataset_value_score(r.get('category')),
+                                           _safe_int(r.get('alphas')),
+                                           -_safe_int(r.get('coverage')),
+                                           r.get('name', '')))
         picked: list[str] = []
         seen: set[str] = set()
         for i in range(len(rs)):
-            for src in (proven, gems):
+            for src in (proven, gems, valued):
                 if i < len(src):
                     nm = src[i].get('name', '')
                     if nm and nm not in seen:

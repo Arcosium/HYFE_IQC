@@ -305,6 +305,35 @@ def _cross_dataset_partners(field: str, rows: list[dict]) -> tuple[str, str] | N
     return (out[0][2], out[1][2])
 
 
+_OUR_DS_CACHE: dict = {}
+
+
+def _our_submitted_datasets(user_id: int) -> set:
+    """우리가 이미 OS 에 올린 데이터셋 id 집합 — 그 계보는 PROD_CORRELATION 이
+    올라 재사용이 어렵다(2026-08-26 실측: 저장 지표 완벽한 rsk70_earnyild 계보가
+    LOW_FITNESS 단독 403 = 숨은 PROD). 발굴이 이 집합을 피해 고가치 미제출
+    데이터셋으로 가면 신선 계보가 생겨 상관 벽을 넘는다. 30분 캐시(웨이브 간격보다 짧게)."""
+    import time as _t
+    ent = _OUR_DS_CACHE.get(user_id)
+    if ent and _t.time() - ent[0] < 1800:
+        return ent[1]
+    from . import datafield_palette as _pal
+    fmap = _pal.field_dataset_map()
+    out = set()
+    try:
+        for code, _s, sub in _db.code_sharpe_submitted_since(user_id, 0):
+            if not sub:
+                continue
+            for f in set(re.findall(r'\b([a-z][a-z0-9_]+)\b', code or '')):
+                d = fmap.get(f)
+                if d:
+                    out.add(str(d).lower())
+    except Exception as e:
+        LOG.warning('제출 데이터셋 집합 조회 실패(무시): %s', e)
+    _OUR_DS_CACHE[user_id] = (_t.time(), out)
+    return out
+
+
 def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str]:
     """카탈로그(live_datafields)에서 새 신호 축을 스스로 발굴한다 — 축이 고갈되면
     사람을 부르는 게 아니라 여기로 온다(2026-08-02 사장: "알아서 찾아야지").
@@ -319,6 +348,7 @@ def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str
         return []
     region, universe, delay = _scope()
     short = _short_cats(user_id) if user_id else {}
+    our_ds = _our_submitted_datasets(user_id) if user_id else set()
     from . import pyramids as _pyr
     cands = []
     for r in rows:
@@ -346,15 +376,20 @@ def _discover_axes(exclude: set, n: int, user_id: int | None = None) -> list[str
         # 🔺 미달 피라미드 칸이 1순위 (2026-08-13 사장 결정). 이미 3건을 채운 칸에
         #    덧쌓으면 피라미드는 그대로인데 PROD_CORRELATION 만 올라 그 계보가
         #    통째로 제출 불능이 된다 — 그날 12/12 거절이 그 결과였다.
-        cat = _pyr.dataset_category(str(r.get('category') or ''))
+        ds_id = str(r.get('category') or '').strip().lower()
+        cat = _pyr.dataset_category(ds_id)
         rank = 0 if (cat and cat in short) else 1
-        cands.append((rank, used, -cov, name, cat))   # 미달칸 → 저사용(구간 안) → 고커버리지
+        # 🆕 (2026-08-26) 신선 고가치 우선 — 아직 우리가 OS 에 안 올린 데이터셋(0)을
+        #    먼저, 그다음 Value Score 높은 순. 미달칸 우선은 그대로 1순위.
+        our_penalty = 1 if ds_id in our_ds else 0
+        vs = _pal.dataset_value_score(ds_id)
+        cands.append((rank, our_penalty, -vs, used, -cov, name, cat))
     cands.sort()
     # 한 칸에 필요한 만큼만 뽑는다. 안 그러면 한 웨이브가 통째로 같은 데이터셋으로
     # 채워져 방금 고친 병(한 칸에 16발)을 그대로 재현한다 — 실측: 미달 칸 우선만
     # 켰더니 12개 중 10개가 macro_equity_signals 하나였다.
     out, taken = [], collections.Counter()
-    for _rank, _used, _cov, name, cat in cands:
+    for _rank, _our, _vs, _used, _cov, name, cat in cands:
         if cat and taken[cat] >= short.get(cat, n):
             continue
         taken[cat] += 1

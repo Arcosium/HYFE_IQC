@@ -1,7 +1,7 @@
 """하우스 RC 계정으로 /data-fields·/operators 실시간 조회 → data/live_datafields.csv.
 실패는 절대 생성 흐름을 막지 않는다(호출부가 폴백)."""
 from __future__ import annotations
-import csv, logging, os, tempfile, threading, time
+import csv, json, logging, os, tempfile, threading, time
 from . import db as _db
 from . import wqb_api
 
@@ -303,6 +303,75 @@ def _constraint_grid_extra() -> tuple:
         return ()
 
 
+DATASET_META_PATH = os.path.join(_DATA_DIR, 'dataset_meta.json')
+
+
+def refresh_dataset_meta(client, grid) -> bool:
+    """그리드별 /data-sets 를 받아 데이터셋 Value Score·dateUpdated 를 캡처한다
+    → data/dataset_meta.json (2026-08-26, WQB Data Explorer 피드백).
+
+    /data-sets 는 그리드당 3~6페이지로 싸다(필드 수집과 별개). Value Score 는
+    그리드마다 다를 수 있어 **최댓값**을 남긴다. 실패는 조용히 넘어간다(fail-open —
+    없으면 datafield_palette.dataset_value_score 가 0.0 폴백)."""
+    meta: dict = {}
+    try:
+        with open(DATASET_META_PATH, encoding='utf-8') as fh:
+            meta = json.load(fh) or {}
+    except (OSError, ValueError):
+        meta = {}
+    changed = False
+    for region, universe, delay in grid:
+        try:
+            for d in _get_paged_all(client, region, universe, delay):
+                k = str(d.get('id') or '').strip().lower()
+                if not k:
+                    continue
+                vs = d.get('valueScore')
+                prev = meta.get(k, {})
+                pv = prev.get('vs')
+                cat = d.get('category')
+                cat = cat.get('id') if isinstance(cat, dict) else cat
+                meta[k] = {
+                    'vs': max([x for x in (vs, pv) if x is not None], default=None),
+                    'userCount': d.get('userCount'), 'alphaCount': d.get('alphaCount'),
+                    'fieldCount': d.get('fieldCount'), 'dateUpdated': d.get('dateUpdated'),
+                    'name': (d.get('name') or '')[:60], 'category': cat}
+                changed = True
+        except Exception as e:
+            LOG.warning('dataset_meta %s/%s/D%s 수집 skip: %s', region, universe, delay, e)
+    if not changed:
+        return False
+    try:
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=_DATA_DIR, suffix='.tmp')
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(meta, fh, ensure_ascii=False)
+        os.replace(tmp, DATASET_META_PATH)
+        LOG.info('dataset_meta 갱신: %d datasets', len(meta))
+        return True
+    except OSError as e:
+        LOG.warning('dataset_meta 쓰기 실패: %s', e)
+        return False
+
+
+def _get_paged_all(client, region, universe, delay) -> list:
+    """그 그리드의 /data-sets 전체 dict 목록 (fieldCount 만이 아니라 원본 필드 보존)."""
+    out, offset = [], 0
+    while True:
+        j = _get_paged(client, '/data-sets',
+                       {'region': region, 'universe': universe, 'delay': delay,
+                        'instrumentType': 'EQUITY', 'limit': _PAGE_LIMIT, 'offset': offset})
+        if j is None:
+            break
+        res = j.get('results') or []
+        out += res
+        offset += _PAGE_LIMIT
+        if not res or offset >= int(j.get('count') or 0):
+            break
+        time.sleep(_PAGE_SLEEP_S)
+    return out
+
+
 def refresh(now_ts: float | None = None, grid=None) -> bool:
     """하우스 계정으로 grid 별 /data-fields 페이지네이션 수집 → 라이브 CSV. 성공 True.
 
@@ -330,6 +399,11 @@ def refresh(now_ts: float | None = None, grid=None) -> bool:
             refresh_operators(c)
         except Exception as e:
             LOG.warning('operators 새로고침 skip: %s', e)
+        # 데이터셋 Value Score/dateUpdated 캡처 (싸고 독립적 — 필드 수집 전에).
+        try:
+            refresh_dataset_meta(c, grid)
+        except Exception as e:
+            LOG.warning('dataset_meta 새로고침 skip: %s', e)
         # ⚠ 그리드별로 **부분 갱신**한다 (2026-07-27). 예전엔 전체를 새로 쓰고 한
         #   그리드라도 결손이면 통째로 버렸는데, 실제로 GLB 29343행을 20분에 걸쳐
         #   멀쩡히 받아 놓고 뒤이은 USA/D1 이 429 로 111개 데이터셋을 놓치자 GLB 까지
