@@ -33,6 +33,10 @@ _PAGE_LIMIT = 50                      # /data-fields·/data-sets 의 하드 상�
 _MIN_GRID_COVERAGE = float(os.environ.get('IQC_DATAFIELDS_MIN_COVERAGE', '0.9'))
 
 
+class _AuthExpired(RuntimeError):
+    """Stop a whole palette refresh after the house session expires."""
+
+
 def map_datafields(api_results, region, universe, delay) -> list[dict]:
     rows = []
     for d in api_results or []:
@@ -192,6 +196,11 @@ def _get_paged(client, path, params):
         r = client.session.get(f'{wqb_api.BASE}{path}', params=params)
         if r.ok:
             return r.json()
+        if r.status_code in (401, 403):
+            # Returning None only stops the current dataset, so the outer loop
+            # would keep issuing one unauthorized request per dataset for
+            # minutes.  Authentication loss invalidates the entire refresh.
+            raise _AuthExpired(f'http_{r.status_code}')
         if r.status_code != 429:
             return None
         ra = r.headers.get('Retry-After')
@@ -431,6 +440,8 @@ def refresh(now_ts: float | None = None, grid=None) -> bool:
         LOG.info('live datafields 새로고침: %d rows (갱신 그리드 %d, 유지 %d)',
                  len(all_rows), len(fresh), len(kept) - len(fresh))
         return True
+    except _AuthExpired as e:
+        LOG.info('datafields 갱신 중단 — WQB 인증 만료(%s)', e)
     except Exception as e:
         LOG.warning('refresh 실패(폴백 유지): %s', e)
     finally:

@@ -188,6 +188,21 @@ def obj_vector(d, sharpe_2y_default=None) -> list:
         _criteria.submittability(m) if turnover is not None else 0.0,
         -(self_corr if self_corr is not None else 0.0),
     ]
+    try:
+        from . import run_config as _run_config
+        _v2 = _run_config.is_architecture_v2_enabled()
+    except Exception:
+        _v2 = False
+    if _v2:
+        from . import research_v2 as _v2_policy
+        dims = _v2_policy.portfolio_dimensions(m)
+        # 지역 값이 없으면 0, PROD 가 아직 관측되지 않았으면 컷(0.7)을 중립값으로 둔다.
+        # 실측 0.62는 -0.62로 미관측 -0.70보다 우위, 0.83은 열위가 된다.
+        out.extend([
+            _damp(dims['min_region_sharpe'] or 0.0, _t),
+            -(dims['prod_correlation']
+              if dims['prod_correlation'] is not None else 0.7),
+        ])
     if sharpe_2y_default is not None:
         v = measured_2y(d)
         out.append(_damp(v if v is not None else float(sharpe_2y_default), _t))
@@ -210,8 +225,17 @@ def composite_scores(records, weights=None):
     if not records:
         return []
     objs, has_2y = _obj_matrix(records)
+    try:
+        from . import run_config as _run_config
+        _v2 = _run_config.is_architecture_v2_enabled()
+    except Exception:
+        _v2 = False
     if weights:
         w = list(weights)
+    elif _v2 and has_2y:
+        w = [0.22, 0.16, 0.12, 0.08, 0.17, 0.10, 0.15]
+    elif _v2:
+        w = [0.27, 0.19, 0.14, 0.09, 0.19, 0.12]
     elif has_2y:
         w = [0.32, 0.24, 0.12, 0.12, 0.20]
     else:

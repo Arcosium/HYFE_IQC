@@ -407,6 +407,89 @@ def init() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_specs_user_status
                 ON strategy_specs(user_id, status, id);
+
+            -- ── GenomicWQB 2.0: canonical identity + replayable evidence ──────
+            CREATE TABLE IF NOT EXISTS canonical_alphas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                canonical_key TEXT NOT NULL,
+                code TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                settings_fp TEXT NOT NULL,
+                lineage_key TEXT NOT NULL DEFAULT '',
+                dataset_key TEXT NOT NULL DEFAULT '',
+                expression_key TEXT NOT NULL DEFAULT '',
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                times_seen INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(user_id, canonical_key),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_canonical_user_lineage
+                ON canonical_alphas(user_id, lineage_key, last_seen);
+
+            CREATE TABLE IF NOT EXISTS alpha_experiments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                round_id INTEGER NOT NULL,
+                round_num INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                canonical_id INTEGER,
+                alpha_id INTEGER,
+                spec_id INTEGER,
+                parent_alpha_id INTEGER,
+                search_mode TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                genes_changed TEXT NOT NULL DEFAULT '[]',
+                policy_version TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(user_id, round_id, idx),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(canonical_id) REFERENCES canonical_alphas(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiments_user_state
+                ON alpha_experiments(user_id, state, updated_at);
+
+            CREATE TABLE IF NOT EXISTS wqb_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                alpha_id INTEGER,
+                wqb_alpha_id TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                observed_at REAL NOT NULL,
+                policy_version TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_snapshots_wid_kind
+                ON wqb_snapshots(user_id, wqb_alpha_id, kind, observed_at);
+
+            CREATE TABLE IF NOT EXISTS evidence_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                experiment_id INTEGER,
+                alpha_id INTEGER,
+                conclusion TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                evidence TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(user_id, experiment_id),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS policy_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                version TEXT NOT NULL,
+                config TEXT NOT NULL DEFAULT '{}',
+                active INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                UNIQUE(user_id, version),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             ''')
 
             # ── 스키마/데이터 마이그레이션 (PRAGMA user_version 게이트) ──
@@ -3315,9 +3398,47 @@ def set_alpha_submit_result(alpha_pk: int, submitted: bool,
             if row is None:
                 return
             pk = int(row['id'])
-        conn.execute(
-            'UPDATE alphas SET submitted=?, submit_status=? WHERE id=?',
-            (1 if submitted else 0, str(submit_status or '')[:300], pk))
+        # Queue/retry submissions receive the 403 after the alpha row already exists.
+        # Promote PROD/SELF correlation into the same metrics/fail contract used by
+        # fresh simulation results so selection and the next mutation can learn it.
+        try:
+            old = conn.execute(
+                'SELECT metrics,fail_items FROM alphas WHERE id=?', (pk,)).fetchone()
+            metrics = json.loads(old['metrics'] or '{}') if old else {}
+            from . import research_v2 as _v2_policy
+            promoted = _v2_policy.promote_submit_evidence({
+                'metrics': metrics, 'is_status': {'fail': []},
+                'submit_status': str(submit_status or '')})
+            metrics = promoted.get('metrics') or metrics
+            new_fails = [str(x.get('name') or '?')
+                         for x in (promoted.get('is_status') or {}).get('fail', [])]
+            if new_fails:
+                try:
+                    previous = json.loads(old['fail_items'] or '[]') if old else []
+                except (TypeError, ValueError):
+                    previous = []
+                fail_names = list(dict.fromkeys([*previous, *new_fails]))
+            else:
+                fail_names = None
+        except Exception:
+            metrics, fail_names = None, None
+        if metrics is not None and fail_names is not None:
+            conn.execute(
+                'UPDATE alphas SET submitted=?,submit_status=?,metrics=?,fail_items=?,'
+                'fail_count=?,self_corr=? WHERE id=?',
+                (1 if submitted else 0, str(submit_status or '')[:300],
+                 json.dumps(metrics, ensure_ascii=False),
+                 json.dumps(fail_names, ensure_ascii=False), len(fail_names),
+                 _coerce_float_or_none(metrics.get('self_correlation')), pk))
+        elif metrics is not None:
+            conn.execute(
+                'UPDATE alphas SET submitted=?,submit_status=?,metrics=? WHERE id=?',
+                (1 if submitted else 0, str(submit_status or '')[:300],
+                 json.dumps(metrics, ensure_ascii=False), pk))
+        else:
+            conn.execute(
+                'UPDATE alphas SET submitted=?, submit_status=? WHERE id=?',
+                (1 if submitted else 0, str(submit_status or '')[:300], pk))
 
 
 def rejected_fieldsets(user_id: int, *, since_s: float = 86400.0,
@@ -3426,3 +3547,231 @@ def submitted_fieldsets_today(user_id: int, now: float | None = None) -> list[fr
         if fs:
             out.add(fs)
     return list(out)
+
+
+# ── GenomicWQB 2.0 evidence spine ───────────────────────────────────────────
+
+def v2_register_candidate(user_id: int, round_id: int, round_num: int, idx: int, *,
+                          canonical: dict, lineage: dict, search_mode: str,
+                          spec_id=None, parent_alpha_id=None, genes_changed=None,
+                          policy_version: str = '') -> dict[str, Any]:
+    """Register canonical identity and a preflight experiment atomically."""
+    init()
+    now = time.time()
+    key = str(canonical.get('canonical_key') or '')
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            'SELECT id, times_seen FROM canonical_alphas '
+            'WHERE user_id=? AND canonical_key=?', (user_id, key)).fetchone()
+        duplicate = row is not None
+        if row is None:
+            cur = conn.execute(
+                'INSERT INTO canonical_alphas '
+                '(user_id,canonical_key,code,code_hash,settings_fp,lineage_key,'
+                'dataset_key,expression_key,first_seen,last_seen,times_seen) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,1)',
+                (user_id, key, str(canonical.get('code') or ''),
+                 code_hash(str(canonical.get('code') or '')),
+                 str(canonical.get('settings_fp') or ''),
+                 str(lineage.get('lineage_key') or ''),
+                 str(lineage.get('dataset_key') or ''),
+                 str(lineage.get('expression_key') or ''), now, now))
+            canonical_id = int(cur.lastrowid)
+            times_seen = 1
+        else:
+            canonical_id = int(row['id'])
+            times_seen = int(row['times_seen'] or 0) + 1
+            conn.execute(
+                'UPDATE canonical_alphas SET last_seen=?, times_seen=? WHERE id=?',
+                (now, times_seen, canonical_id))
+        cur = conn.execute(
+            'INSERT INTO alpha_experiments '
+            '(user_id,round_id,round_num,idx,canonical_id,spec_id,parent_alpha_id,'
+            'search_mode,state,genes_changed,policy_version,created_at,updated_at) '
+            "VALUES (?,?,?,?,?,?,?,?,'PREFLIGHTED',?,?,?,?) "
+            'ON CONFLICT(user_id,round_id,idx) DO UPDATE SET '
+            'canonical_id=excluded.canonical_id, search_mode=excluded.search_mode, '
+            'state=excluded.state, updated_at=excluded.updated_at',
+            (user_id, round_id, round_num, int(idx), canonical_id,
+             int(spec_id) if spec_id is not None else None,
+             int(parent_alpha_id) if parent_alpha_id is not None else None,
+             str(search_mode or ''), json.dumps(list(genes_changed or []), ensure_ascii=False),
+             str(policy_version or ''), now, now))
+        exp = conn.execute(
+            'SELECT id FROM alpha_experiments WHERE user_id=? AND round_id=? AND idx=?',
+            (user_id, round_id, int(idx))).fetchone()
+    return {'canonical_id': canonical_id, 'experiment_id': int(exp['id']),
+            'duplicate': duplicate, 'times_seen': times_seen}
+
+
+def v2_mark_experiment(user_id: int, round_id: int, idx: int, state: str, *,
+                       reason: str = '', alpha_id=None) -> None:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        conn.execute(
+            'UPDATE alpha_experiments SET state=?, reason=?, '
+            'alpha_id=COALESCE(?,alpha_id), updated_at=? '
+            'WHERE user_id=? AND round_id=? AND idx=?',
+            (str(state), str(reason or '')[:500],
+             int(alpha_id) if alpha_id is not None else None,
+             time.time(), user_id, round_id, int(idx)))
+
+
+def v2_record_snapshot(user_id: int, *, kind: str, payload: dict,
+                       alpha_id=None, wqb_alpha_id: str = '',
+                       policy_version: str = '') -> int:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        cur = conn.execute(
+            'INSERT INTO wqb_snapshots '
+            '(user_id,alpha_id,wqb_alpha_id,kind,payload,observed_at,policy_version) '
+            'VALUES (?,?,?,?,?,?,?)',
+            (user_id, int(alpha_id) if alpha_id is not None else None,
+             str(wqb_alpha_id or ''), str(kind),
+             json.dumps(dict(payload or {}), ensure_ascii=False), time.time(),
+             str(policy_version or '')))
+        return int(cur.lastrowid)
+
+
+def v2_close_evidence_card(user_id: int, round_id: int, idx: int, *,
+                           alpha_id=None, conclusion: str = '', confidence: float = 0.5,
+                           evidence: dict | None = None) -> None:
+    init()
+    now = time.time()
+    with _DB_LOCK, _connect() as conn:
+        exp = conn.execute(
+            'SELECT id FROM alpha_experiments WHERE user_id=? AND round_id=? AND idx=?',
+            (user_id, round_id, int(idx))).fetchone()
+        if exp is None:
+            return
+        eid = int(exp['id'])
+        conn.execute(
+            'INSERT INTO evidence_cards '
+            '(user_id,experiment_id,alpha_id,conclusion,confidence,evidence,created_at,updated_at) '
+            'VALUES (?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(user_id,experiment_id) DO UPDATE SET '
+            'alpha_id=excluded.alpha_id, conclusion=excluded.conclusion, '
+            'confidence=excluded.confidence, evidence=excluded.evidence, '
+            'updated_at=excluded.updated_at',
+            (user_id, eid, int(alpha_id) if alpha_id is not None else None,
+             str(conclusion or '')[:500], max(0.0, min(1.0, float(confidence))),
+             json.dumps(dict(evidence or {}), ensure_ascii=False), now, now))
+
+
+def v2_recent_observation_candidates(user_id: int, *, limit: int = 20,
+                                     since_s: float = 172800.0,
+                                     min_interval_s: float = 900.0) -> list[dict[str, Any]]:
+    """Recently submitted/attempted WQB alphas whose post-submit snapshot is due."""
+    init()
+    since = time.time() - float(since_s)
+    due = time.time() - float(min_interval_s)
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT a.id,a.code,a.metrics,a.submit_status,a.ts FROM alphas a "
+            "WHERE a.user_id=? AND a.ts>? AND a.metrics LIKE '%wqb_alpha_id%' "
+            "AND (a.submitted=1 OR TRIM(a.submit_status)<>'') "
+            "AND NOT EXISTS (SELECT 1 FROM wqb_snapshots s WHERE s.user_id=a.user_id "
+            "AND s.alpha_id=a.id AND s.kind='post_submit' AND s.observed_at>?) "
+            'ORDER BY a.id DESC LIMIT ?', (user_id, since, due, int(limit) * 3)).fetchall()
+    out, seen = [], set()
+    for row in rows:
+        try:
+            metrics = json.loads(row['metrics'] or '{}')
+        except (TypeError, ValueError):
+            metrics = {}
+        wid = str(metrics.get('wqb_alpha_id') or '')
+        if not wid or wid in seen:
+            continue
+        seen.add(wid)
+        out.append({'alpha_id': int(row['id']), 'wqb_alpha_id': wid,
+                    'code': row['code'] or '', 'metrics': metrics,
+                    'submit_status': row['submit_status'] or '', 'ts': row['ts']})
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def v2_update_alpha_observation(user_id: int, alpha_id: int, harvested: dict) -> None:
+    """Merge a later WQB harvest into the original alpha without losing raw snapshot."""
+    init()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute('SELECT metrics FROM alphas WHERE id=? AND user_id=?',
+                           (int(alpha_id), user_id)).fetchone()
+        if row is None:
+            return
+        try:
+            metrics = json.loads(row['metrics'] or '{}')
+        except (TypeError, ValueError):
+            metrics = {}
+        metrics.update(dict((harvested or {}).get('metrics') or {}))
+        status = dict((harvested or {}).get('is_status') or {})
+        passes = list(status.get('pass') or [])
+        fails = list(status.get('fail') or [])
+        errors = list(status.get('error') or [])
+        pending = list(status.get('pending') or [])
+        conn.execute(
+            'UPDATE alphas SET metrics=?, pass_count=?,pass_items=?,fail_count=?,fail_items=?,'
+            'error_count=?,pending_count=?,self_corr=?,sharpe=?,fitness=?,turnover=?,'
+            'drawdown=?,margin=?,returns=? WHERE id=? AND user_id=?',
+            (json.dumps(metrics, ensure_ascii=False), len(passes),
+             json.dumps([str(x.get('name') or '?') for x in passes], ensure_ascii=False),
+             len(fails), json.dumps([str(x.get('name') or '?') for x in fails], ensure_ascii=False),
+             len(errors), len(pending),
+             _coerce_float_or_none(metrics.get('self_correlation')),
+             _coerce_float_or_none(metrics.get('sharpe')),
+             _coerce_float_or_none(metrics.get('fitness')),
+             _coerce_float_or_none(metrics.get('turnover')),
+             _coerce_float_or_none(metrics.get('drawdown')),
+             _coerce_float_or_none(metrics.get('margin')),
+             _coerce_float_or_none(metrics.get('returns')),
+             int(alpha_id), user_id))
+
+
+def v2_activate_policy(user_id: int, version: str, config: dict) -> None:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        conn.execute('UPDATE policy_versions SET active=0 WHERE user_id=?', (user_id,))
+        conn.execute(
+            'INSERT INTO policy_versions (user_id,version,config,active,created_at) '
+            'VALUES (?,?,?,?,?) ON CONFLICT(user_id,version) DO UPDATE SET '
+            'config=excluded.config,active=1',
+            (user_id, str(version), json.dumps(dict(config or {}), ensure_ascii=False),
+             1, time.time()))
+
+
+def v2_summary(user_id: int, since_ts: float) -> dict[str, Any]:
+    init()
+    with _DB_LOCK, _connect() as conn:
+        exp = conn.execute(
+            'SELECT COUNT(*) n, COUNT(DISTINCT canonical_id) u, '
+            "SUM(CASE WHEN state='REJECTED' THEN 1 ELSE 0 END) rejected "
+            'FROM alpha_experiments WHERE user_id=? AND created_at>=?',
+            (user_id, float(since_ts))).fetchone()
+        snaps = conn.execute(
+            'SELECT COUNT(*) FROM wqb_snapshots WHERE user_id=? AND observed_at>=?',
+            (user_id, float(since_ts))).fetchone()[0]
+        cards = conn.execute(
+            'SELECT COUNT(*) FROM evidence_cards WHERE user_id=? AND created_at>=?',
+            (user_id, float(since_ts))).fetchone()[0]
+    return {'experiments': int(exp['n'] or 0), 'unique_canonical': int(exp['u'] or 0),
+            'rejected_preflight': int(exp['rejected'] or 0),
+            'snapshots': int(snaps or 0), 'evidence_cards': int(cards or 0)}
+
+
+def v2_lineage_submitted_today(user_id: int, code: str) -> bool:
+    """True when today's successful portfolio already contains this structural lineage."""
+    if not code:
+        return False
+    init()
+    start = day_start_ts()
+    with _DB_LOCK, _connect() as conn:
+        rows = conn.execute(
+            'SELECT code FROM alphas WHERE user_id=? AND submitted=1 AND ts>=?',
+            (user_id, start)).fetchall()
+    try:
+        from . import research_v2
+        target = research_v2.lineage_profile(code).get('lineage_key')
+        return any(research_v2.lineage_profile(r['code'] or '').get('lineage_key') == target
+                   for r in rows)
+    except Exception:
+        return False

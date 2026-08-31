@@ -115,7 +115,7 @@ def maybe_rescue(user_id: int, log_fn=None, now: float | None = None) -> int:
         LOG.warning('상관 완화 후보 조회 실패: %s', e)
         return 0
 
-    from . import alpha_lint, genome_models
+    from . import alpha_ast, alpha_lint, genome_models
     try:
         allowed = set(genome_models._allowed_neutralizations())
     except Exception:
@@ -153,12 +153,15 @@ def maybe_rescue(user_id: int, log_fn=None, now: float | None = None) -> int:
             try:
                 child = genome_models._coerce_genome(d)
                 code = genome_models.render(child)
+                canonical_code = alpha_ast.apply_field_hygiene(code)
                 if child is None or alpha_lint.validate_alpha(code):
                     continue
             except Exception as e:
                 LOG.warning('상관 완화 변주 렌더 실패 %s: %s', nz, e)
                 continue
-            if _db.get_alpha_by_code(user_id, code):
+            if (_db.get_alpha_by_code(user_id, code)
+                    or (canonical_code != code
+                        and _db.get_alpha_by_code(user_id, canonical_code))):
                 continue        # 이미 돌려본 변주 — 부모는 계속 거절 상태라 웨이브마다 재탕된다
             if hid is None:
                 hid = _db.insert_hypothesis(

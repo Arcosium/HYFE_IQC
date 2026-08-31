@@ -212,3 +212,12 @@ def is_grounding_enabled() -> bool:
 
 def set_grounding_enabled(enabled: bool) -> None:
     _set_flag('grounding_enabled', enabled)
+
+
+def is_architecture_v2_enabled() -> bool:
+    """증거 원장·정규화·두 속도 탐색·집중도 제한을 한꺼번에 켜는 운영 플래그."""
+    return _flag('architecture_v2_enabled', default=False)
+
+
+def set_architecture_v2_enabled(enabled: bool) -> None:
+    _set_flag('architecture_v2_enabled', enabled)

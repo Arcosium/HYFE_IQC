@@ -16,3 +16,7 @@ def _no_live_gate_profile(monkeypatch):
     """
     from server import run_config
     monkeypatch.setattr(run_config, 'get_gate_profile', lambda: {}, raising=False)
+    # 라이브 run_config.json 이 v2 를 켜도 레거시 단위테스트의 벡터 길이와 생성 비율이
+    # 외부 상태에 따라 흔들리지 않게 한다. v2 테스트는 이 값을 명시적으로 덮어쓴다.
+    monkeypatch.setattr(run_config, 'is_architecture_v2_enabled', lambda: False,
+                        raising=False)

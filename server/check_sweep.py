@@ -75,3 +75,47 @@ def sweep(client, user_id: int, *, top_n: int = TOP_N, log_fn=None) -> list[dict
         log_fn(f'  🔎 무료 체크 {len(out)}건 — 오늘 제출 가능 {n_ok}건 '
                f'(쿼터 소모 없음)')
     return out
+
+
+def observe_recent(client, user_id: int, *, top_n: int = 20,
+                   min_interval_s: float = 900.0, log_fn=None) -> list[dict]:
+    """Refresh submitted/attempted alphas and persist the raw post-submit evidence.
+
+    Theme assignment, grade, OS checks, and PROD correlation can settle after the
+    initial submit response.  An experiment is not complete until this later
+    state is merged back into the alpha and its immutable payload is archived.
+    """
+    try:
+        candidates = _db.v2_recent_observation_candidates(
+            user_id, limit=top_n, min_interval_s=min_interval_s)
+    except Exception as e:
+        LOG.warning('사후 관측 후보 조회 실패: %s', e)
+        return []
+    out = []
+    try:
+        from . import research_v2
+        version = research_v2.POLICY_VERSION
+    except Exception:
+        version = ''
+    for candidate in candidates:
+        wid = candidate['wqb_alpha_id']
+        harvested = client.harvest_alpha(wid)
+        if not harvested:
+            continue
+        try:
+            _db.v2_record_snapshot(
+                user_id, kind='post_submit', payload=harvested,
+                alpha_id=candidate['alpha_id'], wqb_alpha_id=wid,
+                policy_version=version)
+            _db.v2_update_alpha_observation(user_id, candidate['alpha_id'], harvested)
+        except Exception as e:
+            LOG.warning('사후 관측 저장 실패 %s: %s', wid, e)
+            continue
+        out.append({'wqb_alpha_id': wid, 'alpha_id': candidate['alpha_id'],
+                    'metrics': harvested.get('metrics') or {},
+                    'is_status': harvested.get('is_status') or {}})
+    if log_fn and out:
+        themed = sum(1 for r in out if (r.get('metrics') or {}).get('themes'))
+        prod = sum(1 for r in out if (r.get('metrics') or {}).get('prod_correlation'))
+        log_fn(f'  🧾 제출 후 관측 {len(out)}건 갱신 — 테마 {themed} · PROD 상관 {prod}')
+    return out

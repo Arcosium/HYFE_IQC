@@ -87,6 +87,26 @@ def test_collect_grid_beats_the_alphabet_cap(monkeypatch):
     assert all(r['region'] == 'GLB' for r in rows)
 
 
+def test_auth_expiry_stops_entire_refresh_after_one_page(monkeypatch):
+    class ExpiredApi:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, params=None, **kw):
+            self.calls += 1
+            return type('R', (), {'ok': False, 'status_code': 401,
+                                  'headers': {}})()
+
+    api = ExpiredApi()
+    client = type('C', (), {'session': api,
+                            'authenticate': lambda self: True})()
+    monkeypatch.setattr(ds, '_house_client', lambda: client)
+    monkeypatch.setattr(ds, 'refresh_operators', lambda c: True)
+    monkeypatch.setattr(ds, 'refresh_dataset_meta', lambda c, grid: True)
+    assert ds.refresh(grid=(('GLB', 'TOPDIV3000', 1),)) is False
+    assert api.calls == 1
+
+
 def test_refresh_keeps_old_palette_when_a_grid_comes_up_short(monkeypatch, tmp_path):
     """그리드 하나가 결손이면 CSV 를 덮어쓰지 않는다 — 조용한 팔레트 퇴화 방지."""
     monkeypatch.setattr(ds, '_PAGE_SLEEP_S', 0)

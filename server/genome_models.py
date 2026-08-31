@@ -21,6 +21,7 @@ import os as _os
 
 import dataclasses
 from dataclasses import dataclass
+import math
 import random
 import re
 import zlib
@@ -1132,7 +1133,8 @@ class BaseGenomeModel:
                  parent_genome=None, fail_items=None, seed_genomes=None,
                  slot_settings=None, salt: int = 0,
                  parent_alpha_id=None, seed_alpha_ids=None, directive_stats=None,
-                 spec_genomes=None, spec_ids=None, parent_metrics=None):
+                 spec_genomes=None, spec_ids=None, parent_metrics=None,
+                 search_mode: str = 'legacy'):
         self.round_num = int(round_num or 0)
         self.forced_delay = forced_delay
         self.feedback = feedback or []
@@ -1161,6 +1163,7 @@ class BaseGenomeModel:
         # (category, directive) → {'n','wins'} 관측 행렬. None 이면 규칙 기반 선택,
         # dict(빈 것 포함)이면 Thompson sampling 학습 선택.
         self.directive_stats = directive_stats
+        self.search_mode = str(search_mode or 'legacy')
         self._last_directive: str | None = None
         # LLM 전략스펙 — **변이 없이 그대로** 시뮬되는 초기 개체(1회성).
         # 사용자가 요청한 아이디어를 GA 가 손대기 전에 원본 그대로 한 번 측정해야
@@ -1195,6 +1198,26 @@ class BaseGenomeModel:
 
     def _plan_ga(self, n: int) -> list[tuple[str, Genome | None, Genome | None]]:
         if self.parent is not None:
+            if self.search_mode == 'exploit':
+                plan = [("sweep", self.parent, None)] * min(SWEEP_SLOTS, n)
+                while len(plan) < n:
+                    plan.append(("local", self.parent, None))
+                # 소수 교차 슬롯은 국소 basin 에 새 유전자를 공급한다.
+                for j in range(min(2, len(self.seeds), max(0, n - 2))):
+                    plan[n - 1 - j] = ("crossover", self.parent, self.seeds[j])
+                return plan
+            if self.search_mode == 'escape':
+                # A focus parent on a correlation wall must stop donating its
+                # signal to the remainder of the batch.  Live 2.0 evidence
+                # showed the former crossover tail reproducing the parent's
+                # risk70 lineage and failing PROD correlation around 0.84.
+                # Keep most slots as explicit structural jumps and spend the
+                # rest on independent genomes; neither path preserves the
+                # blocked parent expression.
+                plan = [("escape", self.parent, None)] * max(1, math.ceil(n * 0.75))
+                while len(plan) < n:
+                    plan.append(("random", None, None))
+                return plan[:n]
             plan: list[tuple[str, Genome | None, Genome | None]] = [
                 ("mutate", self.parent, None)] * n
             # ── 노브 스윕 슬롯 ──────────────────────────────────────────────
@@ -1211,6 +1234,36 @@ class BaseGenomeModel:
             return plan
         plan = []
         if self.seeds:
+            if self.search_mode == 'exploit':
+                # 리서치 결과: 유망 부모 주변은 정확히 1~2축을 바꾼 국소 변이가
+                # 다축보다 덜 무너졌다. 70%는 local/sweep, 나머지만 새 구조에 쓴다.
+                for _ in range(min(SWEEP_SLOTS, n)):
+                    plan.append(("sweep", self.seeds[0], None))
+                local_n = max(0, math.ceil(n * 0.70) - len(plan))
+                for j in range(local_n):
+                    plan.append(("local", self.seeds[j % len(self.seeds)], None))
+                while len(plan) < n:
+                    plan.append(("random", None, None))
+                return plan
+            if self.search_mode == 'escape':
+                # 정체·PROD 상관벽에서는 필드/데이터 계열/결합을 함께 움직여
+                # 현재 basin 을 벗어난다. 설정만 바꾸는 탈상관은 여기서 만들지 않는다.
+                # A correlation-wall round must mostly leave the existing
+                # basin.  The earlier 35% share still let elite crossovers
+                # dominate; live 2.0 evidence produced strong IS results that
+                # repeated the same high PROD correlation.  Match the parent
+                # escape path and move 60% structurally.
+                escape_n = max(1, math.ceil(n * 0.60))
+                for j in range(escape_n):
+                    plan.append(("escape", self.seeds[j % len(self.seeds)], None))
+                cross_n = max(1, math.floor(n * 0.20)) if len(self.seeds) > 1 else 0
+                for j in range(cross_n):
+                    a = self.seeds[j % len(self.seeds)]
+                    b = self.seeds[(j + 1) % len(self.seeds)]
+                    plan.append(("crossover", a, b))
+                while len(plan) < n:
+                    plan.append(("random", None, None))
+                return plan[:n]
             # ⚠ 2026-07-22 — 스윕을 **탐색 라운드에도** 넣는다. 처음엔 부모가 있는
             #   포커스 라운드에만 달았는데, 라이브에서 실제로 도는 건 대부분 이 시드
             #   경로라 스윕이 한 번도 발현되지 않았다(재시작 후 7시간 관측).
@@ -1268,6 +1321,14 @@ class BaseGenomeModel:
                 g = self._mutate(a, rng, directed=(i <= n * 5))
                 directive = self._last_directive
                 base = a
+            elif op == "local":
+                g = self._local_mutate(a, rng)
+                directive = "local_1_2_axis"
+                base = a
+            elif op == "escape":
+                g = self._escape_mutate(a, rng)
+                directive = "structural_escape"
+                base = a
             elif op == "sweep":
                 # 한 축만 바꾼다 — 슬롯 순서로 축·값을 정해 **결정론적**으로 훑는다.
                 # (같은 라운드에서 같은 축의 같은 값이 두 번 나오면 dedup 이 걸러낸다.)
@@ -1320,6 +1381,56 @@ class BaseGenomeModel:
                 f"|{g.truncation}|{g.nan_handling}")
 
     # ── GA operators ─────────────────────────────────────────
+    def _local_mutate(self, parent: Genome, rng: random.Random) -> Genome:
+        """Change exactly one or two interpretable axes around a strong parent."""
+        d = dict(parent.__dict__)
+        axes = ["neutralization", "decay", "universe", "lookback_a",
+                "lookback_b", "trade_when", "regime"]
+        for axis in rng.sample(axes, k=1 if rng.random() < 0.65 else 2):
+            if axis == "neutralization":
+                vals = [x for x in _allowed_neutralizations()
+                        if x != d.get("neutralization")]
+                if vals:
+                    d[axis] = rng.choice(vals)
+            elif axis == "decay":
+                vals = [x for x in self.decays if x != int(d.get("decay") or 0)]
+                d[axis] = rng.choice(vals)
+            elif axis == "universe":
+                vals = [x for x in self.universes if x != d.get("universe")]
+                d[axis] = rng.choice(vals)
+            elif axis in ("lookback_a", "lookback_b"):
+                vals = [x for x in CANONICAL_LOOKBACKS if x != int(d.get(axis) or 0)]
+                d[axis] = rng.choice(vals)
+            elif axis == "trade_when":
+                vals = [x for x in TRADE_WHEN_KINDS if x != d.get(axis)]
+                d[axis] = rng.choice(vals)
+            elif axis == "regime":
+                vals = [x for x in REGIME_KINDS if x != d.get(axis)]
+                d[axis] = rng.choice(vals)
+        d["model"] = self.name
+        d["generation"] = int(parent.generation or 0) + 1
+        return Genome(**d)
+
+    def _escape_mutate(self, parent: Genome, rng: random.Random) -> Genome:
+        """Structural jump for a plateau or correlation wall (at least three axes)."""
+        d = dict(parent.__dict__)
+        families = [f for f in self.families if f != d.get("family")]
+        family = rng.choice(families or list(self.families))
+        d["family"] = family
+        d["fields"] = _pick_fields(rng, family, self.forbidden, self.forced_delay)
+        d["combine"] = rng.choice([x for x in self.combines if x != d.get("combine")]
+                                  or list(self.combines))
+        d["transform_a"] = rng.choice(self.transforms)
+        if rng.random() < 0.65:
+            d["transform_b"] = rng.choice(self.transforms)
+        preferred = list(FAMILY_NEUTRALIZATION.get(family, ()))
+        if preferred:
+            d["neutralization"] = rng.choice(preferred)
+        d["lookback_a"] = rng.choice(CANONICAL_LOOKBACKS)
+        d["model"] = self.name
+        d["generation"] = int(parent.generation or 0) + 1
+        return Genome(**d)
+
     def _mutate(self, parent: Genome, rng: random.Random, directed: bool = True) -> Genome:
         d = dict(parent.__dict__)
         directive = None
@@ -1741,7 +1852,8 @@ def generate_population(*, account_type: str, round_num: int, forced_delay=None,
                         slot_settings=None, salt: int = 0,
                         parent_alpha_id=None, seed_alpha_ids=None,
                         directive_stats=None, spec_genomes=None,
-                        spec_ids=None, parent_metrics=None) -> list[dict]:
+                        spec_ids=None, parent_metrics=None,
+                        search_mode: str = 'legacy') -> list[dict]:
     cls = (ResearchConsultantGenomeModel
            if account_type == "research_consultant" else StandardGenomeModel)
     return cls(round_num=round_num, forced_delay=forced_delay, errors=errors,
@@ -1750,4 +1862,5 @@ def generate_population(*, account_type: str, round_num: int, forced_delay=None,
                salt=salt, parent_alpha_id=parent_alpha_id,
                seed_alpha_ids=seed_alpha_ids,
                directive_stats=directive_stats, spec_genomes=spec_genomes,
-               spec_ids=spec_ids, parent_metrics=parent_metrics).generate(n=n)
+               spec_ids=spec_ids, parent_metrics=parent_metrics,
+               search_mode=search_mode).generate(n=n)

@@ -135,6 +135,21 @@ def test_focus_population_mixes_parent_seed_crossover_when_seeds_exist():
     assert origins.count('mutate') == 8 - 2 - genome_models.SWEEP_SLOTS
 
 
+def test_focus_escape_drops_parent_crossover_tail():
+    """상관벽 탈출은 부모 식을 보존하는 교차·국소 슬롯을 남기지 않는다."""
+    parent = _parent(family='risk', fields=('close', 'vwap', 'volume'))
+    seeds = [_parent(family='pv', fields=('open', 'high', 'low'))]
+    rows = genome_models.generate_population(
+        account_type='standard', round_num=10, forced_delay='1', n=12,
+        parent_genome=parent, seed_genomes=seeds, search_mode='escape',
+    )
+    origins = [r['origin'] for r in rows]
+    assert origins.count('escape') == 9
+    assert origins.count('random') == 3
+    assert origins.count('crossover') == 0
+    assert origins.count('local') == 0
+
+
 def test_exploration_population_uses_elite_seeds():
     seeds = [_parent(generation=0),
              _parent(family='pv', fields=('close', 'vwap', 'volume'),

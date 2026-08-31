@@ -480,6 +480,17 @@ class Worker(threading.Thread):
             # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
             # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
             return False, f'blocking_fail({",".join(blocking)})'
+        if run_config.is_architecture_v2_enabled():
+            try:
+                from . import research_v2 as _v2_policy
+                quality_misses = _v2_policy.submit_quality_reasons(metrics)
+                if quality_misses:
+                    return False, f'v2_quality_floor({",".join(quality_misses)})'
+            except Exception as e:
+                # A quality-gate implementation error must not silently relax
+                # the v2 policy and spend a scarce submission slot.
+                LOG.warning('v2 quality floor failed closed: %s', e)
+                return False, 'v2_quality_floor(error)'
         active_constraint = getattr(self, '_active_constraint', None)
         # 🔭 필수 체크는 **제출을 막지 않는다** (2026-08-17 사장 승인).
         #    원래는 미달 피라미드 칸일 때만 면제했는데(2026-08-13), 그 예외를 상시로
@@ -521,6 +532,12 @@ class Worker(threading.Thread):
                 return False, 'submit_mode=list→queued'
         except Exception as e:
             LOG.warning('제출 모드 조회 실패 (자동 제출로 진행): %s', e)
+        if run_config.is_architecture_v2_enabled() and code:
+            try:
+                if _db.v2_lineage_submitted_today(self.user_id, str(code)):
+                    return False, 'v2_same_lineage_today'
+            except Exception as e:
+                LOG.warning('v2 lineage 제출 가드 실패(계속 진행): %s', e)
         # 필드셋 쿨다운 (2026-07-24) — 같은 필드 조합이 최근 24h 에 3회+ 거절됐으면
         # 제출을 보류한다. 상관(PROD/PP)은 아이디어=필드 수준 속성이라 중립화·감쇠만
         # 바꾼 형제는 같은 벽에 부딪힌다(실측: 같은 mdl177 3종 변형 19연속 거절).
@@ -625,6 +642,20 @@ class Worker(threading.Thread):
                                         user_id=self.user_id, code=code)
         except Exception as e:
             LOG.warning('alphas 제출 결과 기록 실패: %s', e)
+        if run_config.is_architecture_v2_enabled():
+            try:
+                from . import research_v2 as _v2_policy
+                _row = (_db.get_alpha_by_id(self.user_id, int(alpha_pk or 0))
+                        if int(alpha_pk or 0) > 0 else _db.get_alpha_by_code(self.user_id, code))
+                _aid = int((_row or {}).get('id') or 0)
+                _db.v2_record_snapshot(
+                    self.user_id, kind='submit_response', alpha_id=_aid or None,
+                    wqb_alpha_id=wid,
+                    payload={'submitted': bool(ok), 'submit_status': str(st or ''),
+                             'code_hash': _db.code_hash(code) if code else ''},
+                    policy_version=_v2_policy.POLICY_VERSION)
+            except Exception as e:
+                LOG.warning('v2 제출 증거 저장 실패: %s', e)
         try:
             _db.record_submit_attempt(self.user_id, round_num, 0,
                                       code or wid, ok, f'{tag}{st}')
@@ -1003,12 +1034,19 @@ class Worker(threading.Thread):
         형제가 OS 에 올라 PROD_CORRELATION 이 움직인다. 체크는 쿼터를 안 쓰므로 공짜다.
         """
         now = time.time()
-        if now - getattr(self, '_last_check_sweep', 0.0) < CHECK_SWEEP_EVERY_S:
+        _observe_interval = (900.0 if run_config.is_architecture_v2_enabled()
+                             else CHECK_SWEEP_EVERY_S)
+        if now - getattr(self, '_last_check_sweep', 0.0) < _observe_interval:
             return
         self._last_check_sweep = now
         try:
             from . import check_sweep, wqb_api as _wapi
             client = _wapi.WqbApiClient(username, password)
+            if run_config.is_architecture_v2_enabled():
+                check_sweep.observe_recent(
+                    client, self.user_id, top_n=20,
+                    min_interval_s=_observe_interval,
+                    log_fn=lambda m: self._log(0, m))
             for rec in check_sweep.sweep(client, self.user_id,
                                          log_fn=lambda m: self._log(0, m)):
                 if not rec.get('ready'):
@@ -1127,6 +1165,20 @@ class Worker(threading.Thread):
             return
         username, password, api_key = creds
         account_type = _db.get_account_type(self.user_id)
+        _v2_enabled = run_config.is_architecture_v2_enabled()
+        if _v2_enabled and not getattr(self, '_v2_policy_registered', False):
+            try:
+                from . import research_v2 as _v2_policy
+                _db.v2_activate_policy(
+                    self.user_id, _v2_policy.POLICY_VERSION,
+                    {'dataset_share': _v2_policy.MAX_DATASET_SHARE,
+                     'expression_share': _v2_policy.MAX_EXPRESSION_SHARE,
+                     'search': 'adaptive exploit/escape',
+                     'post_submit_observation_s': 900.0})
+                self._v2_policy_registered = True
+                self._log(0, f'🧬 GenomicWQB 2.0 정책 활성화 — {_v2_policy.POLICY_VERSION}')
+            except Exception as e:
+                self._log_quiet(0, f'⚠ v2 정책 등록 실패(계속 진행): {e}')
         # 시뮬 백엔드는 이제 WQB REST API 단일이다 (2026-07-13 Playwright 경로 제거).
         # users.backend 는 세션 keep-alive 가 'api' 계정을 고르는 데 쓰이므로, 미탐침('')
         # 계정은 여기서 1회 탐침해 저장한다(POST /authentication 1회 — 5/min 한도 안).
@@ -1206,11 +1258,14 @@ class Worker(threading.Thread):
         # 🎯 자동 제출 푸시 (2026-08-02 사장 지시) — 오늘 제출이 목표 미달이면
         # 검증 골격 × 신선 축 스펙을 스스로 장전한다. pending_specs 조회 전에
         # 넣어야 이번 라운드가 바로 소비한다.
-        try:
-            from . import submit_push as _push
-            _push.maybe_seed(self.user_id, log_fn=lambda m: self._log(0, m))
-        except Exception as e:
-            self._log_quiet(0, f'⚠ 자동 제출 푸시 실패(무시): {e}')
+        if not _v2_enabled:
+            try:
+                from . import submit_push as _push
+                _push.maybe_seed(self.user_id, log_fn=lambda m: self._log(0, m))
+            except Exception as e:
+                self._log_quiet(0, f'⚠ 자동 제출 푸시 실패(무시): {e}')
+        else:
+            self._log_quiet(0, 'v2: risk70 고정 골격 자동 푸시 중단 — GA 다변화 슬롯으로 회수')
 
         u = _db.get_user(self.user_id)
 
@@ -1249,6 +1304,17 @@ class Worker(threading.Thread):
 
         # focus 큐 — PASS=6 알파에 대한 sub-round 가 대기중이면 그것을 먼저 실행.
         focus_queue = [] if is_spec_round else _db.get_focus_queue(self.user_id)
+        if _v2_enabled and focus_queue:
+            try:
+                from . import research_v2 as _v2_policy
+                focus_queue, _focus_pruned = _v2_policy.prune_focus_queue(
+                    focus_queue, int((u or {}).get('last_round_num') or 0))
+                if _focus_pruned:
+                    _db.set_focus_queue(self.user_id, focus_queue)
+                    self._log(0, f'🧹 v2 focus 부채 {_focus_pruned}건 정리 — '
+                                 '현재 메인 라운드의 부모·phase 1만 유지')
+            except Exception as e:
+                self._log_quiet(0, f'⚠ v2 focus 큐 정리 실패(기존 큐 유지): {e}')
         # Near-miss priority: sort by closeness_score (near-pass first).
         # Safe: entries with unparseable fail_items fall to neutral (0.0);
         # a sort error will be caught by the outer try/except and the round
@@ -1306,6 +1372,21 @@ class Worker(threading.Thread):
             focus_kind = 'fail'
             self_corr_value = ''
             parent_settings = {}
+
+        _search_mode = 'legacy'
+        _v2_recent = []
+        if _v2_enabled:
+            try:
+                from . import research_v2 as _v2_policy
+                _v2_recent = _db.list_recent_alphas(self.user_id, limit=60)
+                _search_mode, _mode_reason = _v2_policy.choose_search_mode(
+                    round_num, _v2_recent,
+                    has_specs=is_spec_round,
+                    focus_code=(parent_code if is_focus else ''))
+                self._log(round_num,
+                          f'  🧭 v2 탐색 모드 = {_search_mode} — {_mode_reason}')
+            except Exception as e:
+                self._log_quiet(round_num, f'⚠ v2 탐색 모드 결정 실패(legacy 폴백): {e}')
 
         errors = _db.list_error_patterns(self.user_id, limit=100)
         # 이미 제출된 알파 + Submit 거절/무응답으로 끝난 알파 코드 — Non-RC 사전 유사도
@@ -1562,17 +1643,21 @@ class Worker(threading.Thread):
                 directive_stats=_dstats,
                 spec_genomes=[s['genome'] for s in pending_specs] or None,
                 spec_ids=[s['id'] for s in pending_specs] or None,
+                search_mode=_search_mode,
             )
             if not strategies:
                 raise RuntimeError('Genome generated no strategies')
 
-            _origins = {'random': 0, 'mutate': 0, 'crossover': 0, 'spec': 0}
+            _origins = {'random': 0, 'mutate': 0, 'local': 0, 'escape': 0,
+                        'crossover': 0, 'sweep': 0, 'spec': 0}
             for _s in strategies:
                 _origins[_s.get('origin') or 'random'] = _origins.get(_s.get('origin') or 'random', 0) + 1
             self._log(round_num,
                       f'  세대 구성 — '
                       + (f'전략스펙 {_origins.get("spec", 0)} · ' if _origins.get('spec') else '')
                       + f'탐색 {_origins.get("random", 0)} · '
+                      f'국소 {_origins.get("local", 0) + _origins.get("sweep", 0)} · '
+                      f'탈출 {_origins.get("escape", 0)} · '
                       f'변이 {_origins.get("mutate", 0)} · 교차 {_origins.get("crossover", 0)}'
                       + (f' (밴딧 arm {min(len(_slot_settings), _origins.get("random", 0))}개 주입)'
                          if _slot_settings else ''))
@@ -1654,7 +1739,8 @@ class Worker(threading.Thread):
                                       f'  🚑 HT 구제 레이어 — 고샤프·고회전 풀 '
                                       f'{len(_hpool)}개 중 α#{_hp["id"]} 회전 절감 '
                                       f'변형 {len(_hvars)}개 주입')
-                if IMPROVE_LAYER_N > 0 and is_focus and phase == 1 and parent_code:
+                if (IMPROVE_LAYER_N > 0 and is_focus and phase == 1 and parent_code
+                        and _search_mode != 'escape'):
                     from . import improve_layer
                     _ivars = improve_layer.variants(
                         parent_code, parent_settings, parent_metrics,
@@ -1667,6 +1753,11 @@ class Worker(threading.Thread):
                                   f'  🔧 개선 레이어 — 부모 회전율 등급 '
                                   f'{improve_layer.turnover_class(parent_metrics.get("turnover"))}'
                                   f' 그리드 변형 {len(_ivars)}개 추가')
+                elif (IMPROVE_LAYER_N > 0 and is_focus and phase == 1
+                      and parent_code and _search_mode == 'escape'):
+                    self._log(round_num,
+                              '  🧭 v2 상관벽 탈출 — 부모 식을 보존하는 '
+                              '결정론 개선 레이어 생략')
             except Exception as _e:
                 self._log_quiet(round_num, f'⚠ 결정론 레이어 실패(무시): {_e}')
 
@@ -1826,6 +1917,67 @@ class Worker(threading.Thread):
             if _n_reg:
                 self._log_quiet(round_num, f'리전 미지정 후보 {_n_reg}개에 조건 리전 주입')
 
+            # GenomicWQB 2.0: 모든 origin 에 동일한 정규화·집중도·증거 정책을 적용한다.
+            # 스펙/구제/일반 GA 중 어느 경로도 이 지점을 우회하지 못한다.
+            if _v2_enabled:
+                try:
+                    from . import research_v2 as _v2_policy
+                    strategies, _conc_dropped = _v2_policy.concentration_filter(
+                        strategies, min_keep=8, recent=_v2_recent)
+                    for _d in _conc_dropped:
+                        _idx = int(_d.get('idx') or 0)
+                        _can = _v2_policy.canonicalize(
+                            _d.get('code', ''), _d.get('settings') or {}, forced_delay)
+                        _lin = _d.get('_v2_lineage') or _v2_policy.lineage_profile(
+                            _can['code'], _d.get('genome') or {})
+                        _db.v2_register_candidate(
+                            self.user_id, round_id, round_num, _idx,
+                            canonical=_can, lineage=_lin, search_mode=_search_mode,
+                            spec_id=_d.get('spec_id'),
+                            parent_alpha_id=_d.get('parent_alpha_id'),
+                            genes_changed=_d.get('genes_changed'),
+                            policy_version=_v2_policy.POLICY_VERSION)
+                        _db.v2_mark_experiment(
+                            self.user_id, round_id, _idx, 'REJECTED',
+                            reason=_d.get('_v2_drop_reason') or 'concentration')
+                        genome_by_idx.pop(_idx, None)
+                        meta_by_idx.pop(_idx, None)
+                    if _conc_dropped:
+                        self._log(round_num,
+                                  f'  🧬 v2 집중도 차단 {_conc_dropped.__len__()}개 — '
+                                  f'단일 데이터셋 25% · 표현형 30% 상한')
+                    _round_datasets = set()
+                    for _s in strategies:
+                        _round_datasets.update(_v2_policy.dataset_tokens(
+                            _s.get('code', ''), _s.get('genome') or {}))
+                    _recent_datasets = set()
+                    for _a in _v2_recent:
+                        _recent_datasets.update(_v2_policy.dataset_tokens(
+                            _a.get('code', ''), _a.get('genome') or {}))
+                    self._log(round_num,
+                              f'  🗂 v2 데이터셋 커버리지 {_round_datasets.__len__()}종 · '
+                              f'최근 60개 미사용 {_round_datasets.difference(_recent_datasets).__len__()}종')
+                    for _s in strategies:
+                        _idx = int(_s.get('idx') or 0)
+                        _can = _v2_policy.canonicalize(
+                            _s.get('code', ''), _s.get('settings') or {}, forced_delay)
+                        _s['code'] = _can['code']
+                        _lin = _s.get('_v2_lineage') or _v2_policy.lineage_profile(
+                            _s['code'], _s.get('genome') or {})
+                        _s['_v2_canonical'] = _can
+                        _s['_v2_lineage'] = _lin
+                        _db.v2_register_candidate(
+                            self.user_id, round_id, round_num, _idx,
+                            canonical=_can, lineage=_lin, search_mode=_search_mode,
+                            spec_id=_s.get('spec_id'),
+                            parent_alpha_id=_s.get('parent_alpha_id'),
+                            genes_changed=_s.get('genes_changed'),
+                            policy_version=_v2_policy.POLICY_VERSION)
+                    if not strategies:
+                        raise RuntimeError('v2 집중도·정규화 게이트 뒤 후보 0건')
+                except Exception as _e:
+                    self._log_quiet(round_num, f'⚠ v2 사전정책 실패(기존 후보로 진행): {_e}')
+
             # 캐시 hit 분리 (settings-aware 키: code_hash + settings_fingerprint).
             cached_results: list[dict] = []
             to_simulate: list[dict] = []
@@ -1851,6 +2003,12 @@ class Worker(threading.Thread):
             def _alpha_entry(r: dict) -> dict:
                 """시뮬 결과 1건 → alphas 행. 즉시 저장과 라운드 끝 저장이 **같은
                 한 곳**을 쓴다 — 두 벌로 두면 반드시 어긋난다."""
+                if _v2_enabled:
+                    try:
+                        from . import research_v2 as _v2_policy
+                        _v2_policy.promote_submit_evidence(r)
+                    except Exception:
+                        pass
                 i = int(r.get('idx') or 0)
                 _m = dict(r.get('metrics') or {})
                 # delay-aware 캐시 stamp — 갓 시뮬한 결과엔 이번 라운드 강제 delay를,
@@ -1900,6 +2058,32 @@ class Worker(threading.Thread):
                 try:
                     alpha_id_by_idx[i] = _db.insert_alpha(
                         self.user_id, round_id, round_num, _alpha_entry(r))
+                    if _v2_enabled:
+                        from . import research_v2 as _v2_policy
+                        _aid = alpha_id_by_idx[i]
+                        _m = dict(r.get('metrics') or {})
+                        _wid = str(_m.get('wqb_alpha_id') or '')
+                        _db.v2_mark_experiment(
+                            self.user_id, round_id, i, 'OBSERVED', alpha_id=_aid,
+                            reason=str(r.get('submit_status') or 'simulation complete'))
+                        _db.v2_record_snapshot(
+                            self.user_id, kind='simulation', alpha_id=_aid,
+                            wqb_alpha_id=_wid,
+                            payload={'metrics': _m,
+                                     'is_status': r.get('is_status') or {},
+                                     'submit_status': r.get('submit_status') or ''},
+                            policy_version=_v2_policy.POLICY_VERSION)
+                        _status = str(r.get('submit_status') or '')
+                        _conclusion = ('submitted' if r.get('submitted') else
+                                       'submit rejected' if _status.startswith('rejected:') else
+                                       'simulation observed')
+                        _db.v2_close_evidence_card(
+                            self.user_id, round_id, i, alpha_id=_aid,
+                            conclusion=_conclusion,
+                            confidence=0.8 if _status else 0.6,
+                            evidence={'wqb_alpha_id': _wid,
+                                      'metrics': _m,
+                                      'submit_status': _status})
                 except Exception as _e:
                     self._log_quiet(round_num, f'⚠ 즉시 저장 실패(라운드 끝 재시도): {_e}')
 
@@ -1924,10 +2108,17 @@ class Worker(threading.Thread):
                 # 재제출이 안 되고, GA 후보 생성이 결정론이라 그대로 재생산된다.
                 # 2026-08-06: 이 갈래가 빠져 있어서 이미 낸 식이 시뮬까지 다 돌고
                 # 제출 문에서 `already_submitted` 로 막히고 있었다(8/6 12:46 실측).
-                # spec 은 'LLM 산출물 원본 측정'이 목적이라 예외.
-                if (s.get('origin') or '') != 'spec' and (
-                        _db.code_settings_rejected_before(self.user_id, s['code'], fp)
+                if (_db.code_settings_rejected_before(self.user_id, s['code'], fp)
                         or _db.code_submitted_before(self.user_id, s['code'])):
+                    if _v2_enabled:
+                        _dup_drop += 1
+                        try:
+                            _db.v2_mark_experiment(
+                                self.user_id, round_id, int(s.get('idx') or 0),
+                                'REJECTED', reason='canonical duplicate: submitted/rejected')
+                        except Exception:
+                            pass
+                        continue
                     _nv = _novelty_rewrite(self.user_id, s['code'], fp, seen)
                     if not _nv:
                         _dup_drop += 1
@@ -1951,9 +2142,8 @@ class Worker(threading.Thread):
                     # **우리 쪽 사정**으로 실패한 행이 섞여 있어(2026-07-21 에러의 75%),
                     # 캐시로 굳히면 멀쩡한 알파가 영구히 죽은 것으로 남는다.
                     cached = None
-                # ♻ 신규성 압력 — 기지 조합이면 근처 신규 변형으로 교체해 시뮬한다.
-                #   spec 은 'LLM 산출물 원본 측정'이 목적이라 원본 그대로 둔다(캐시 응답).
-                if cached and NOVELTY_REWRITE and (s.get('origin') or '') != 'spec':
+                # ♻ 신규성 압력 — origin 예외 없이 기지 조합은 신규 변형으로 교체한다.
+                if cached and NOVELTY_REWRITE and not _v2_enabled:
                     _nv = _novelty_rewrite(self.user_id, s['code'], fp, seen)
                     if _nv:
                         seen.add(f'{_db.code_hash(_nv)}:{fp}')
@@ -2281,13 +2471,46 @@ class Worker(threading.Thread):
             for r in all_results:
                 # 저장은 _persist 가 시뮬 종료 즉시 이미 했을 수 있다 — 그 경우 건너뛴다.
                 # 여기 남는 건 에러 행과, 즉시 저장이 실패했던 행이다.
-                if int(r.get('idx') or 0) not in alpha_id_by_idx:
-                    alpha_id_by_idx[int(r['idx'])] = _db.insert_alpha(
-                        self.user_id, round_id, round_num, _alpha_entry(r))
+                _ri = int(r.get('idx') or 0)
+                if _ri not in alpha_id_by_idx:
+                    if _v2_enabled and r.get('cached'):
+                        _source_id = (int(r.get('_cached_alpha_id') or 0)
+                                      if int(r.get('_cached_user_id') or 0) == self.user_id
+                                      else 0)
+                        if _source_id:
+                            alpha_id_by_idx[_ri] = _source_id
+                        try:
+                            _db.v2_mark_experiment(
+                                self.user_id, round_id, _ri, 'REUSED',
+                                reason=f"cache alpha {int(r.get('_cached_alpha_id') or 0)}",
+                                alpha_id=_source_id or None)
+                        except Exception:
+                            pass
+                    else:
+                        alpha_id_by_idx[_ri] = _db.insert_alpha(
+                            self.user_id, round_id, round_num, _alpha_entry(r))
+                        if _v2_enabled:
+                            try:
+                                from . import research_v2 as _v2_policy
+                                _state = 'FAILED' if (r.get('error_text') or '').strip() else 'OBSERVED'
+                                _db.v2_mark_experiment(
+                                    self.user_id, round_id, _ri, _state,
+                                    reason=str(r.get('error_text') or 'late persistence'),
+                                    alpha_id=alpha_id_by_idx[_ri])
+                                _db.v2_record_snapshot(
+                                    self.user_id, kind='simulation',
+                                    alpha_id=alpha_id_by_idx[_ri],
+                                    wqb_alpha_id=str((r.get('metrics') or {}).get('wqb_alpha_id') or ''),
+                                    payload={'metrics': r.get('metrics') or {},
+                                             'is_status': r.get('is_status') or {},
+                                             'error_text': r.get('error_text') or ''},
+                                    policy_version=_v2_policy.POLICY_VERSION)
+                            except Exception:
+                                pass
                 _sid = (meta_by_idx.get(int(r['idx'])) or {}).get('spec_id')
-                if _sid:
+                if _sid and alpha_id_by_idx.get(_ri):
                     try:
-                        _db.attach_spec_alpha(_sid, alpha_id_by_idx[int(r['idx'])])
+                        _db.attach_spec_alpha(_sid, alpha_id_by_idx[_ri])
                     except Exception as _e:
                         self._log_quiet(round_num, f'⚠ spec-alpha 연결 실패: {_e}')
 
@@ -2510,17 +2733,18 @@ class Worker(threading.Thread):
                 # 라운드당 focus 후보 폭주 방지 — 적합도 상위 N개만. closeness 는 이미
                 # 위에서 하한선(far-miss 차단)으로 썼고, 정렬은 연속 적합도로 한다.
                 # (closeness 로 정렬하면 '컷오프에 가깝지만 신호가 없는' 알파가 이긴다.)
-                if len(focus_candidates) > FOCUS_MAX_PER_ROUND:
-                    _dropped = len(focus_candidates) - FOCUS_MAX_PER_ROUND
+                _focus_max = (1 if _v2_enabled else FOCUS_MAX_PER_ROUND)
+                if len(focus_candidates) > _focus_max:
+                    _dropped = len(focus_candidates) - _focus_max
                     try:
                         focus_candidates.sort(
                             key=lambda item: focus_score(item, _constraint), reverse=True)
                     except Exception:
                         pass
-                    focus_candidates = focus_candidates[:FOCUS_MAX_PER_ROUND]
+                    focus_candidates = focus_candidates[:_focus_max]
                     self._log(round_num,
                               f'  focus 후보 {_dropped}개 보류 — 라운드당 상위 '
-                              f'{FOCUS_MAX_PER_ROUND}개만 연마(예산 보호)')
+                              f'{_focus_max}개만 연마(예산 보호)')
 
                 # 제출 거절 부모 — IS 체크는 전부 통과했는데 **제출에서** 죽은 알파.
                 # 신호 자체는 검증된 것이라 버리지 않고, 거절 사유를 그대로 개선 방향으로
@@ -2547,9 +2771,22 @@ class Worker(threading.Thread):
                               f"  🧭 제출 거절 부모 #{_cp.get('idx')} — {_axis} 연마 "
                               f"대상으로 추가 ({_why[:60]})")
 
+                # 거절 부모는 위의 1차 상한 뒤에 추가되므로 예전에는 v2의 부모 1개
+                # 제한을 우회했다. 모든 출처를 합친 뒤 다시 점수순으로 한 번만 자른다.
+                if _v2_enabled and len(focus_candidates) > 1:
+                    _focus_before_cap = len(focus_candidates)
+                    focus_candidates = sorted(
+                        focus_candidates,
+                        key=lambda a: focus_score(a, _constraint),
+                        reverse=True,
+                    )[:1]
+                    self._log(round_num,
+                              f'  v2 focus 최종 상한 — {_focus_before_cap - 1}개 보류, '
+                              '이번 메인 라운드는 부모 1개만 연마')
+
                 if focus_candidates:
                     new_q = _db.get_focus_queue(self.user_id)
-                    PHASES_PER_PARENT = 3
+                    PHASES_PER_PARENT = 1 if _v2_enabled else 3
                     for a in focus_candidates:
                         ist_r = a.get('is_status') or {}
                         f_list = list(ist_r.get('fail') or []) + list(ist_r.get('error') or [])

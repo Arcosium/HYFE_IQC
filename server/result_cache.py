@@ -34,4 +34,6 @@ def materialize(strategy: dict, cached: dict, current_round: int) -> dict:
         'metrics': dict(cached.get('metrics') or {}),
         'cached': True,
         'cached_from_round': int(cached.get('round') or cached.get('round_num') or 0),
+        '_cached_alpha_id': int(cached.get('id') or 0),
+        '_cached_user_id': int(cached.get('user_id') or 0),
     }
