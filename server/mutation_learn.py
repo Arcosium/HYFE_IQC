@@ -26,7 +26,7 @@ from typing import Iterable
 # ⚠ 새 축은 **끝에 붙인다**. choose_directive 가 이 순서대로 rng.betavariate 를 뽑으므로,
 #   중간에 끼워 넣으면 기존 축들의 난수 위치가 밀려 학습된 선택이 통째로 달라진다.
 DIRECTIVES = ('smooth', 'sharpen', 'concentration', 'universe', 'decorrelate',
-              'signal', 'boost', 'robustify', 'churn')
+              'signal', 'boost', 'robustify', 'churn', 'region_balance')
 
 # FAIL 사유 category → 규칙 기반 기본 변이 축 (기존 _directives 규칙의 단일 진실).
 # 학습 데이터가 없을 때 Thompson 사전확률을 이 매핑이 결정한다.
@@ -48,6 +48,9 @@ RULE_DIRECTIVE = {
     # LOW_2Y_SHARPE / IS_LADDER_SHARPE = '최근 2년에도, 구간을 잘라도 통하는가'.
     # 전 구간 Sharpe 만 좋고 최근이 무너진 알파를 겨냥한 별도 축.
     'stability': 'robustify',
+    # GLB 전체는 좋아도 한 지역만 무너지면 제출할 수 없다. 신호식을 갈아엎지 않고
+    # 중립화·그룹·절단 축만 움직여 지역 최저점을 끌어올린다.
+    'regional': 'region_balance',
     'signal': 'signal',
 }
 
@@ -96,6 +99,9 @@ def categorize(fail_items: Iterable[str] | None, metrics: dict | None = None) ->
             out.append('stability')
         elif 'fitness' in s:
             out.append('fitness')
+        elif ('glb' in s and any(k in s for k in ('amer', 'emea', 'apac'))
+              and 'sharpe' in s):
+            out.append('regional')
         elif any(k in s for k in ('sharpe', 'returns', 'margin', 'drawdown')):
             out.append('signal')
     return out
@@ -146,6 +152,7 @@ _TARGET_METRIC = {
     'turnover_low': ('turnover', True),
     # 고회전 관문 — 회전율이 올라갔으면 전진으로 인정한다(20% 를 넘겨야 분류를 얻는다).
     'ht_gap': ('turnover', True),
+    'regional': ('min_region_sharpe', True),
 }
 # 표적 지표가 없을 때의 대리 지표 (2Y·sub-universe 는 브라우저 시대 행에 없다).
 _FALLBACK_METRIC = {'sharpe_2y': 'sharpe', 'sub_universe_sharpe': 'sharpe'}
@@ -182,7 +189,15 @@ def _improved(cat: str, parent: dict, child: dict) -> bool | None:
         return None
     key, higher_is_better = spec
     pm, cm = parent.get('metrics') or {}, child.get('metrics') or {}
-    pv, cv = _metric(pm, key), _metric(cm, key)
+    if key == 'min_region_sharpe':
+        region_keys = ('glb_amer_sharpe', 'glb_emea_sharpe', 'glb_apac_sharpe')
+        p_values = [_metric(pm, k) for k in region_keys]
+        c_values = [_metric(cm, k) for k in region_keys]
+        if any(v is None for v in p_values + c_values):
+            return None
+        pv, cv = min(p_values), min(c_values)
+    else:
+        pv, cv = _metric(pm, key), _metric(cm, key)
     if pv is None or cv is None:
         alt = _FALLBACK_METRIC.get(key)
         if not alt:

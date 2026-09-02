@@ -1550,6 +1550,24 @@ class BaseGenomeModel:
                 # pv 계열엔 industry/subindustry 중립화가 성과를 깎는다(문서 권고).
                 d["neutralization"] = rng.choice(FAMILY_NEUTRALIZATION.get(
                     d.get("family") or "pv", ("MARKET", "SECTOR")))
+        elif directive == "region_balance":  # ── GLB 지역 최저 Sharpe 보강 ──
+            # 필드·변환·결합은 그대로 둔다. 이미 살아 있는 전역 신호를 갈아엎지 않고,
+            # 지역별 산업 구성과 이상치 민감도를 좌우하는 리스크 처리 축만 바꾼다.
+            region_values = {
+                key: _mutation_learn._metric(self.parent_metrics, key)
+                for key in ("glb_amer_sharpe", "glb_emea_sharpe", "glb_apac_sharpe")
+            }
+            weak_region = min(
+                ((value, key) for key, value in region_values.items()
+                 if value is not None), default=(0.0, ""))[1]
+            d["group_op"] = "neutralize"
+            d["group_by"] = rng.choice(
+                ("country", "sector", "industry")
+                if weak_region else ("sector", "industry", "subindustry"))
+            d["neutralization"] = rng.choice(
+                ("SECTOR", "INDUSTRY", "SUBINDUSTRY", "MARKET"))
+            d["truncation"] = rng.choice((0.05, 0.08, 0.1))
+            d["winsor_std"] = rng.choice((3, 4))
         elif directive == "robustify":  # ── 2Y Sharpe / ladder → 시간 안정성 ──
             # 특정 국면·이상치에 얹힌 신호를 일반화한다: 창을 늘리고, 이상치를 자르고,
             # 노출을 중립화한다.

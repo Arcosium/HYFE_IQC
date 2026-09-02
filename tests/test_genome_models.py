@@ -240,3 +240,17 @@ def test_directed_mutation_decorrelates_on_selfcorr_fail():
     )
     # 탈상관 변이: 부모 패밀리(fundamental)와 다른 패밀리로 이동한 자식이 있어야 한다.
     assert any(r['genome']['family'] != 'fundamental' for r in rows)
+
+
+def test_directed_mutation_repairs_region_without_replacing_signal_fields():
+    parent = _parent(group_op='rank', group_by='market', winsor_std=0)
+    rows = genome_models.generate_population(
+        account_type='standard', round_num=31, forced_delay='1', n=12,
+        parent_genome=parent, fail_items=['LOW_GLB_EMEA_SHARPE'],
+        parent_metrics={'glb_amer_sharpe': '1.25', 'glb_emea_sharpe': '0.76',
+                        'glb_apac_sharpe': '1.02'},
+    )
+    repaired = [r for r in rows if r.get('directive') == 'region_balance']
+    assert repaired
+    assert all(tuple(r['genome']['fields']) == parent['fields'] for r in repaired)
+    assert all(r['genome']['group_op'] == 'neutralize' for r in repaired)

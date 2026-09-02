@@ -23,6 +23,7 @@ def test_categorize_maps_wqb_fail_strings():
     # 2Y Sharpe / ladder = 시간 안정성. 이름에 'sharpe' 가 들어 있어 signal 로 새고 있었다.
     assert ml.categorize(['LOW_2Y_SHARPE']) == ['stability']
     assert ml.categorize(['IS_LADDER_SHARPE']) == ['stability']
+    assert ml.categorize(['LOW_GLB_EMEA_SHARPE']) == ['regional']
     assert ml.categorize(['알 수 없는 항목']) == []
     assert ml.categorize(None) == []
 
@@ -144,3 +145,19 @@ def test_outcome_empty_without_directive_or_parent_fails():
                                    {'directive': '', 'fail_items': []}) == []
     assert ml.outcome_observations(_p([], 6),
                                    {'directive': 'smooth', 'fail_items': []}) == []
+
+
+def test_regional_outcome_uses_weakest_region_improvement():
+    parent = {
+        'fail_items': ['LOW_GLB_EMEA_SHARPE'], 'pass_count': 6,
+        'metrics': {'glb_amer_sharpe': '1.25', 'glb_emea_sharpe': '0.76',
+                    'glb_apac_sharpe': '1.02'},
+    }
+    child = {
+        'directive': 'region_balance', 'fail_items': ['LOW_GLB_EMEA_SHARPE'],
+        'pass_count': 6, 'error_text': '',
+        'metrics': {'glb_amer_sharpe': '1.18', 'glb_emea_sharpe': '0.90',
+                    'glb_apac_sharpe': '1.04'},
+    }
+    assert ml.outcome_observations(parent, child) == [
+        ('regional', 'region_balance', True)]

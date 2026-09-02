@@ -25,12 +25,12 @@ def test_submit_403_prod_corr_is_promoted_to_metrics_and_fail_items():
     assert result['is_status']['fail'][0]['name'] == 'PROD_CORRELATION'
 
 
-def test_corr_wall_switches_policy_to_structural_escape():
+def test_one_corr_wall_does_not_switch_the_whole_policy_to_escape():
     recent = [{'submit_status': 'rejected:PROD_CORRELATION(0.8 vs 0.7)'}] * 8
     recent += [{'submit_status': 'rejected:LOW_FITNESS'}] * 2
     mode, reason = research_v2.choose_search_mode(11, recent)
-    assert mode == 'escape'
-    assert 'correlation wall' in reason
+    assert mode == 'exploit'
+    assert 'local refinement' in reason
 
 
 def test_focus_dataset_corr_wall_overrides_global_exploit():
@@ -47,7 +47,45 @@ def test_focus_dataset_corr_wall_overrides_global_exploit():
     mode, reason = research_v2.choose_search_mode(
         891, recent, focus_code=f'ts_zscore({risk},60)')
     assert mode == 'escape'
-    assert 'focus dataset correlation wall' in reason
+    assert 'exact-lineage quarantine' in reason
+
+
+def test_lineage_policy_quarantines_only_exact_rejected_dataset_key():
+    risk = 'rsk70_mfm2_gemtrd_srtindcnt'
+    recent = [
+        {'code': f'rank({risk})', 'metrics': {'sharpe': '2.1', 'fitness': '1.2'},
+         'submit_status': 'rejected:PROD_CORRELATION(0.82 vs 0.7)'},
+        {'code': f'ts_rank({risk},20)', 'metrics': {'sharpe': '2.0', 'fitness': '1.1'},
+         'submit_status': 'rejected:PROD_CORRELATION(0.79 vs 0.7)'},
+        {'code': f'rank({risk}+close)',
+         'metrics': {'sharpe': '1.7', 'fitness': '1.05', 'prod_correlation': '0.62'}},
+        {'code': 'rank(close)',
+         'metrics': {'sharpe': '1.72', 'fitness': '1.49',
+                     'glb_amer_sharpe': '1.25', 'glb_emea_sharpe': '0.76',
+                     'glb_apac_sharpe': '1.02'}},
+    ]
+    policy = research_v2.build_lineage_policy(recent)
+    assert 'risk70' in policy['quarantined']
+    assert 'pv1+risk70' not in policy['quarantined']
+    assert 'pv1' in policy['near_miss_keys']
+
+
+def test_seed_selection_prefers_non_quarantined_near_miss_and_caps_probe():
+    policy = {'quarantined': ['risk'], 'dataset_stats': {},
+              'near_miss_keys': ['pv1'], 'near_miss_count': 1}
+    rows = [
+        {'id': 1, 'code': 'rank(risk_a)', 'genome': {'family': 'risk'},
+         'metrics': {'sharpe': '3.0', 'fitness': '2.0'}},
+        {'id': 2, 'code': 'rank(risk_b)', 'genome': {'family': 'risk'},
+         'metrics': {'sharpe': '2.9', 'fitness': '2.0'}},
+        {'id': 3, 'code': 'rank(close)', 'genome': {'family': 'pv'},
+         'metrics': {'sharpe': '1.7', 'fitness': '0.9'}},
+        {'id': 4, 'code': 'rank(model_a)', 'genome': {'family': 'model'},
+         'metrics': {'sharpe': '1.6', 'fitness': '1.1'}},
+    ]
+    selected = research_v2.select_seed_rows(rows, policy, top_n=4)
+    assert selected[0]['id'] == 3
+    assert sum(research_v2.dataset_key(row) == 'risk' for row in selected) == 1
 
 
 def test_lineage_profile_accepts_db_json_genome_string():
@@ -119,6 +157,20 @@ def test_concentration_restores_minimum_without_unbound_need():
         strategies, min_keep=6, dataset_share=0.10, expression_share=0.10)
     assert len(kept) == 6
     assert len(dropped) == 2
+
+
+def test_quarantined_exact_lineage_uses_at_most_ten_percent_of_round():
+    risk = 'rsk70_mfm2_gemtrd_srtindcnt'
+    strategies = [
+        {'idx': i, 'code': f'ts_rank({risk},{i + 2})'} for i in range(10)
+    ] + [
+        {'idx': 10 + i, 'code': f'rank(field_{i})',
+         'genome': {'family': f'family_{i}'}} for i in range(10)
+    ]
+    kept, _ = research_v2.concentration_filter(
+        strategies, min_keep=8, dataset_share=1.0, expression_share=1.0,
+        policy={'quarantined': ['risk70']})
+    assert sum(s['_v2_lineage']['dataset_key'] == 'risk70' for s in kept) <= 1
 
 
 def test_v2_quality_floor_ignores_warning_downgrade():

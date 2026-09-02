@@ -1173,10 +1173,13 @@ class Worker(threading.Thread):
                     self.user_id, _v2_policy.POLICY_VERSION,
                     {'dataset_share': _v2_policy.MAX_DATASET_SHARE,
                      'expression_share': _v2_policy.MAX_EXPRESSION_SHARE,
-                     'search': 'adaptive exploit/escape',
+                     'quarantine_share': _v2_policy.MAX_QUARANTINED_SHARE,
+                     'search': 'lineage-aware exploit/escape',
+                     'allocation': {'near_miss': 0.45, 'exploration': 0.30,
+                                    'correlation_escape': 0.15, 'hypothesis': 0.10},
                      'post_submit_observation_s': 900.0})
                 self._v2_policy_registered = True
-                self._log(0, f'🧬 GenomicWQB 2.0 정책 활성화 — {_v2_policy.POLICY_VERSION}')
+                self._log(0, f'🧬 GenomicWQB 2.1 정책 활성화 — {_v2_policy.POLICY_VERSION}')
             except Exception as e:
                 self._log_quiet(0, f'⚠ v2 정책 등록 실패(계속 진행): {e}')
         # 시뮬 백엔드는 이제 WQB REST API 단일이다 (2026-07-13 Playwright 경로 제거).
@@ -1284,6 +1287,21 @@ class Worker(threading.Thread):
             pending_specs = []
         is_spec_round = bool(pending_specs)
 
+        # 최근 실측을 exact-dataset 계보별로 집계한다. 전역 상관 실패율 하나가 모든
+        # 데이터셋을 escape 로 몰아넣지 않도록 focus 큐를 읽기 전에 정책을 확정한다.
+        _v2_recent: list[dict] = []
+        _v21_policy: dict = {}
+        if _v2_enabled:
+            try:
+                from . import research_v2 as _v2_policy
+                _v2_recent = _db.list_recent_alphas(self.user_id, limit=800)
+                _v21_policy = _v2_policy.build_lineage_policy(_v2_recent)
+                _db.v2_activate_policy(
+                    self.user_id, _v2_policy.POLICY_VERSION,
+                    _v2_policy.policy_log_config(_v21_policy))
+            except Exception as e:
+                self._log_quiet(0, f'⚠ v2.1 계보 정책 계산 실패(기본 정책 폴백): {e}')
+
         # 리전 전환 감지 (2026-07-27) — 옛 리전 부모로 채워진 focus 큐는 통째로
         # 무효다(그 코드의 필드가 새 리전에 없어 sub-round 가 전부 'unknown
         # variable' 로 죽는다, GLB 전환 실측). **큐를 읽기 전에** 정리해야
@@ -1309,6 +1327,10 @@ class Worker(threading.Thread):
                 from . import research_v2 as _v2_policy
                 focus_queue, _focus_pruned = _v2_policy.prune_focus_queue(
                     focus_queue, int((u or {}).get('last_round_num') or 0))
+                _before_quarantine = len(focus_queue)
+                focus_queue = [entry for entry in focus_queue
+                               if _v2_policy.focus_allowed(entry, _v21_policy)[0]]
+                _focus_pruned += _before_quarantine - len(focus_queue)
                 if _focus_pruned:
                     _db.set_focus_queue(self.user_id, focus_queue)
                     self._log(0, f'🧹 v2 focus 부채 {_focus_pruned}건 정리 — '
@@ -1374,17 +1396,18 @@ class Worker(threading.Thread):
             parent_settings = {}
 
         _search_mode = 'legacy'
-        _v2_recent = []
         if _v2_enabled:
             try:
                 from . import research_v2 as _v2_policy
-                _v2_recent = _db.list_recent_alphas(self.user_id, limit=60)
                 _search_mode, _mode_reason = _v2_policy.choose_search_mode(
                     round_num, _v2_recent,
                     has_specs=is_spec_round,
-                    focus_code=(parent_code if is_focus else ''))
+                    focus_code=(parent_code if is_focus else ''),
+                    policy=_v21_policy)
+                _q = ', '.join(_v21_policy.get('quarantined') or []) or '없음'
                 self._log(round_num,
-                          f'  🧭 v2 탐색 모드 = {_search_mode} — {_mode_reason}')
+                          f'  🧭 v2.1 탐색 모드 = {_search_mode} — {_mode_reason} '
+                          f'(격리 계보: {_q})')
             except Exception as e:
                 self._log_quiet(round_num, f'⚠ v2 탐색 모드 결정 실패(legacy 폴백): {e}')
 
@@ -1438,10 +1461,13 @@ class Worker(threading.Thread):
         # ⚠ 코드에서 유전체를 역추출하지 않는다. 그건 손실 압축이라 자식이 부모를 복제조차
         #    못 해 구조적으로 부모보다 나쁜 자식만 나온다(2026-07-11 진단).
         try:
-            seeds = _db.elite_seeds(self.user_id, top_n=5, constraint=_constraint)
+            seeds = _db.elite_seeds(
+                self.user_id, top_n=(40 if _v2_enabled else 5),
+                constraint=_constraint)
         except Exception as e:
             self._log_quiet(round_num, f'⚠ seeds 조회 실패: {e}')
             seeds = []
+        _v2_seed_pool = list(seeds)
         # 위원회 교차쌍 (2026-07-23) — 탈상관 심사역이 고른 (X,Y) 쌍을 시드 앞자리에
         # **인접 배치**한다. _plan_ga 의 교차는 seeds[j]×seeds[j+1] 이라 인접 = 실제
         # 교차 지시가 된다. 모든 쌍을 시뮬하는 O(n²) 대신 LLM 이 후보를 좁히는 구조.
@@ -1460,6 +1486,17 @@ class Worker(threading.Thread):
                               f'시드 앞자리에 인접 배치')
         except Exception as e:
             self._log_quiet(round_num, f'⚠ 위원회 교차쌍 적용 실패(무시): {e}')
+        if _v2_enabled:
+            try:
+                # 위원회 재배열 결과가 소수 계보뿐이어도 원래 40개 풀에서 빈 슬롯을
+                # 채운다. 위원회 쌍은 후보 힌트이지 데이터셋 다양성 상한을 우회하지 않는다.
+                seeds = _v2_policy.select_seed_rows(
+                    list(seeds) + _v2_seed_pool, _v21_policy, top_n=5)
+                self._log(round_num,
+                          f'  🧬 v2.1 전환가능성·다양성 기준 시드 {len(seeds)}개 선택')
+            except Exception as e:
+                self._log_quiet(round_num, f'⚠ v2.1 시드 재선정 실패(기존 순서 유지): {e}')
+                seeds = seeds[:5]
         seed_genomes: list[dict] = []
         seed_alpha_ids: list[int | None] = []
         _dropped_seeds = 0
@@ -1923,7 +1960,8 @@ class Worker(threading.Thread):
                 try:
                     from . import research_v2 as _v2_policy
                     strategies, _conc_dropped = _v2_policy.concentration_filter(
-                        strategies, min_keep=8, recent=_v2_recent)
+                        strategies, min_keep=8, recent=_v2_recent,
+                        policy=_v21_policy)
                     for _d in _conc_dropped:
                         _idx = int(_d.get('idx') or 0)
                         _can = _v2_policy.canonicalize(
@@ -1944,8 +1982,8 @@ class Worker(threading.Thread):
                         meta_by_idx.pop(_idx, None)
                     if _conc_dropped:
                         self._log(round_num,
-                                  f'  🧬 v2 집중도 차단 {_conc_dropped.__len__()}개 — '
-                                  f'단일 데이터셋 25% · 표현형 30% 상한')
+                                  f'  🧬 v2.1 집중도·격리 차단 {_conc_dropped.__len__()}개 — '
+                                  f'단일 데이터셋 25% · 표현형 30% · 격리계보 10% 상한')
                     _round_datasets = set()
                     for _s in strategies:
                         _round_datasets.update(_v2_policy.dataset_tokens(
@@ -2701,6 +2739,11 @@ class Worker(threading.Thread):
                     _kind, _ = _classify_focus(r, _constraint)
                     if not _kind:
                         continue
+                    if _v2_enabled:
+                        _allowed, _reason = _v2_policy.focus_allowed(r, _v21_policy)
+                        if not _allowed:
+                            _far_skipped += 1
+                            continue
                     # 절대 closeness 하한선 — 통과까지 너무 먼(예: Sharpe 0.07) 부모는
                     # directed-mutation 으로 5배 끌어올리는 게 사실상 불가능하므로 큐에 넣지
                     # 않고 예산을 탐색으로 돌린다. delay=0 은 hopeless 부모가 많아 특히 중요.
@@ -2737,8 +2780,11 @@ class Worker(threading.Thread):
                 if len(focus_candidates) > _focus_max:
                     _dropped = len(focus_candidates) - _focus_max
                     try:
-                        focus_candidates.sort(
-                            key=lambda item: focus_score(item, _constraint), reverse=True)
+                        focus_candidates.sort(key=(
+                            (lambda item: _v2_policy.candidate_priority(
+                                item, _v21_policy) + 0.25 * focus_score(item, _constraint))
+                            if _v2_enabled else
+                            (lambda item: focus_score(item, _constraint))), reverse=True)
                     except Exception:
                         pass
                     focus_candidates = focus_candidates[:_focus_max]
@@ -2760,6 +2806,8 @@ class Worker(threading.Thread):
                     r for r in all_results
                     if not r.get('cached')
                     and str(r.get('submit_status') or '').startswith('rejected:')
+                    and (not _v2_enabled
+                         or _v2_policy.focus_allowed(r, _v21_policy)[0])
                 ][:2]                       # 라운드당 2개 — 예산 보호
                 for _cp in _rej_parents:
                     if any(x is _cp for x in focus_candidates):
@@ -2777,7 +2825,8 @@ class Worker(threading.Thread):
                     _focus_before_cap = len(focus_candidates)
                     focus_candidates = sorted(
                         focus_candidates,
-                        key=lambda a: focus_score(a, _constraint),
+                        key=lambda a: (_v2_policy.candidate_priority(a, _v21_policy)
+                                       + 0.25 * focus_score(a, _constraint)),
                         reverse=True,
                     )[:1]
                     self._log(round_num,

@@ -1,4 +1,4 @@
-"""GenomicWQB 2.0 policy primitives.
+"""GenomicWQB 2.1 policy primitives.
 
 This module is intentionally small and mostly pure.  It provides the common
 canonical identity, lineage profile, two-speed search decision, concentration
@@ -20,9 +20,10 @@ from . import alpha_ast
 from . import settings_fp
 
 
-POLICY_VERSION = "genomicwqb-2.0.0"
+POLICY_VERSION = "genomicwqb-2.1.0"
 MAX_DATASET_SHARE = 0.25
 MAX_EXPRESSION_SHARE = 0.30
+MAX_QUARANTINED_SHARE = 0.10
 
 _SPACE = re.compile(r"\s+")
 _CORR_PATTERNS = {
@@ -95,54 +96,234 @@ def dataset_tokens(code: str, genome: dict | None = None) -> set[str]:
     return {x for x in key.split("+") if x} or {key}
 
 
+def _number(value: Any) -> float | None:
+    try:
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        return float(str(value).rstrip("%")) / (100.0 if str(value).endswith("%") else 1.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def dataset_key(row: dict) -> str:
+    """Return the exact dataset combination used for policy attribution."""
+    return str(lineage_profile(
+        str(row.get("code") or row.get("parent_code") or ""),
+        row.get("genome") or row.get("parent_genome") or {})["dataset_key"])
+
+
+def _prod_corr(row: dict) -> float | None:
+    value = _number((row.get("metrics") or {}).get("prod_correlation"))
+    if value is not None:
+        return value
+    match = _CORR_PATTERNS["PROD_CORRELATION"].search(
+        str(row.get("submit_status") or ""))
+    return float(match.group(1)) if match else None
+
+
+def quality_misses(row: dict) -> list[str]:
+    """Stable D1/GLB quality misses used to identify actionable near passes."""
+    metrics = row.get("metrics") or {}
+    misses: list[str] = []
+    checks = (
+        ("sharpe", 1.58), ("fitness", 1.0),
+        ("glb_amer_sharpe", 1.0), ("glb_emea_sharpe", 1.0),
+        ("glb_apac_sharpe", 1.0),
+    )
+    for key, floor in checks:
+        value = _number(metrics.get(key))
+        if value is not None and value < floor:
+            misses.append(key)
+    return misses
+
+
+def _is_near_miss(row: dict) -> bool:
+    metrics = row.get("metrics") or {}
+    sharpe = _number(metrics.get("sharpe"))
+    fitness = _number(metrics.get("fitness"))
+    return (sharpe is not None and fitness is not None
+            and sharpe >= 1.40 and fitness >= 0.65
+            and len(quality_misses(row)) <= 2)
+
+
+def build_lineage_policy(recent: Iterable[dict] | None = None) -> dict[str, Any]:
+    """Learn exact-dataset conversion and quarantine state from recent evidence.
+
+    PROD correlation is deliberately attributed to an exact dataset combination.
+    A bad ``risk70`` lineage therefore cannot force unrelated ``pv1`` or mixed
+    lineages into structural escape.  Quarantine is reversible: one observation
+    below the PROD threshold immediately prevents the lineage from being marked.
+    """
+    stats: dict[str, dict[str, Any]] = {}
+    for row in list(recent or []):
+        key = dataset_key(row)
+        st = stats.setdefault(key, {
+            "simulated": 0, "strict_is": 0, "near_miss": 0,
+            "prod_observations": 0, "prod_rejects": 0, "prod_passes": 0,
+        })
+        st["simulated"] += 1
+        misses = quality_misses(row)
+        if not misses and _number((row.get("metrics") or {}).get("sharpe")) is not None:
+            st["strict_is"] += 1
+        if _is_near_miss(row):
+            st["near_miss"] += 1
+        status = str(row.get("submit_status") or "")
+        corr = _prod_corr(row)
+        if corr is not None or status == "submitted" or bool(row.get("submitted")):
+            st["prod_observations"] += 1
+            if status.upper().startswith("REJECTED:PROD_CORRELATION") or (
+                    corr is not None and corr >= 0.7):
+                st["prod_rejects"] += 1
+            elif status == "submitted" or bool(row.get("submitted")) or (
+                    corr is not None and corr < 0.7):
+                st["prod_passes"] += 1
+
+    quarantined: set[str] = set()
+    for key, st in stats.items():
+        observed = int(st["prod_observations"])
+        rejected = int(st["prod_rejects"])
+        st["strict_rate"] = st["strict_is"] / max(1, st["simulated"])
+        st["near_rate"] = st["near_miss"] / max(1, st["simulated"])
+        st["prod_pass_rate"] = st["prod_passes"] / max(1, observed)
+        if (rejected >= 2 and st["prod_passes"] == 0
+                and rejected / max(1, observed) >= 0.75):
+            quarantined.add(key)
+
+    near_keys = {key for key, st in stats.items()
+                 if st["near_miss"] and key not in quarantined}
+    return {
+        "version": POLICY_VERSION,
+        "dataset_stats": stats,
+        "quarantined": sorted(quarantined),
+        "near_miss_keys": sorted(near_keys),
+        "near_miss_count": sum(stats[k]["near_miss"] for k in near_keys),
+        "allocation": {"near_miss": 0.45, "exploration": 0.30,
+                       "correlation_escape": 0.15, "hypothesis": 0.10},
+    }
+
+
+def policy_log_config(policy: dict | None) -> dict[str, Any]:
+    """Compact, replayable policy snapshot without storing the entire row window."""
+    policy = policy or {}
+    return {
+        "dataset_share": MAX_DATASET_SHARE,
+        "expression_share": MAX_EXPRESSION_SHARE,
+        "quarantine_share": MAX_QUARANTINED_SHARE,
+        "quarantined": list(policy.get("quarantined") or []),
+        "near_miss_keys": list(policy.get("near_miss_keys") or []),
+        "allocation": dict(policy.get("allocation") or {}),
+        "post_submit_observation_s": 900.0,
+    }
+
+
+def candidate_priority(row: dict, policy: dict | None = None) -> float:
+    """Rank seed/focus candidates by conversion potential, not raw Sharpe alone."""
+    policy = policy or {}
+    key = dataset_key(row)
+    if key in set(policy.get("quarantined") or []):
+        return -100.0
+    metrics = row.get("metrics") or {}
+    sharpe = _number(metrics.get("sharpe")) or 0.0
+    fitness = _number(metrics.get("fitness")) or 0.0
+    regions = [_number(metrics.get(k)) for k in (
+        "glb_amer_sharpe", "glb_emea_sharpe", "glb_apac_sharpe")]
+    regions = [v for v in regions if v is not None]
+    regional = min(regions) if regions else 0.0
+    near_bonus = 3.0 if _is_near_miss(row) else 0.0
+    if key in set(policy.get("near_miss_keys") or []):
+        near_bonus += 1.0
+    lineage = (policy.get("dataset_stats") or {}).get(key) or {}
+    conversion = 2.0 * float(lineage.get("strict_rate") or 0.0)
+    return near_bonus + conversion + sharpe + 0.8 * fitness + 0.35 * regional
+
+
+def select_seed_rows(rows: Iterable[dict], policy: dict | None = None,
+                     top_n: int = 5) -> list[dict]:
+    """Select diverse, high-conversion seeds with at most one quarantine probe."""
+    policy = policy or {}
+    quarantined = set(policy.get("quarantined") or [])
+    unique: dict[str, dict] = {}
+    for row in rows or []:
+        if not isinstance(row.get("genome"), dict):
+            continue
+        key = str(row.get("code_hash") or row.get("code") or row.get("id") or "")
+        previous = unique.get(key)
+        if previous is None or candidate_priority(row, policy) > candidate_priority(previous, policy):
+            unique[key] = row
+    ordered = sorted(unique.values(), key=lambda row: (
+        candidate_priority(row, policy), int(row.get("id") or 0)), reverse=True)
+    selected: list[dict] = []
+    dataset_counts: Counter[str] = Counter()
+    quarantine_count = 0
+    for row in ordered:
+        key = dataset_key(row)
+        if key in quarantined:
+            if quarantine_count >= 1:
+                continue
+            quarantine_count += 1
+        elif dataset_counts[key] >= 1:
+            continue
+        selected.append(row)
+        dataset_counts[key] += 1
+        if len(selected) >= max(0, int(top_n)):
+            break
+    # A committee-provided pool can contain fewer than ``top_n`` distinct
+    # dataset keys.  Keep the first pass maximally diverse, then fill only with
+    # a second member of a non-quarantined key so simulation capacity is not lost.
+    selected_ids = {id(row) for row in selected}
+    if len(selected) < max(0, int(top_n)):
+        for row in ordered:
+            if id(row) in selected_ids:
+                continue
+            key = dataset_key(row)
+            if key in quarantined or dataset_counts[key] >= 2:
+                continue
+            selected.append(row)
+            selected_ids.add(id(row))
+            dataset_counts[key] += 1
+            if len(selected) >= int(top_n):
+                break
+    return selected
+
+
+def focus_allowed(row: dict, policy: dict | None = None) -> tuple[bool, str]:
+    key = dataset_key(row)
+    if key in set((policy or {}).get("quarantined") or []):
+        return False, f"quarantined PROD-correlation lineage {key}"
+    return True, "actionable non-quarantined lineage"
+
+
 def choose_search_mode(round_num: int, recent: Iterable[dict] | None = None,
                        has_specs: bool = False,
-                       focus_code: str = "") -> tuple[str, str]:
+                       focus_code: str = "",
+                       policy: dict | None = None) -> tuple[str, str]:
     """Choose hypothesis, local 1–2 axis exploitation, or structural escape."""
     if has_specs:
         return "hypothesis", "pending evidence-backed strategy specs"
-    rows = list(recent or [])[:60]
+    rows = list(recent or [])[:120]
+    policy = policy or build_lineage_policy(rows)
+    quarantined = set(policy.get("quarantined") or [])
 
     # A near-pass focus parent can look attractive globally while its dataset
     # family repeatedly hits the same PROD wall.  Local 1–2 axis refinement
     # preserves that correlated signal, so make a structural jump instead.
     if focus_code:
-        focus_datasets = set(lineage_profile(focus_code)["dataset_key"].split("+"))
-        family_corr: list[float] = []
-        for row in rows:
-            code = str(row.get("code") or "")
-            if not code:
-                continue
-            row_datasets = set(lineage_profile(code, row.get("genome") or {})[
-                "dataset_key"].split("+"))
-            if not focus_datasets.intersection(row_datasets):
-                continue
-            value = (row.get("metrics") or {}).get("prod_correlation")
-            try:
-                family_corr.append(float(value))
-                continue
-            except (TypeError, ValueError):
-                pass
-            match = _CORR_PATTERNS["PROD_CORRELATION"].search(
-                str(row.get("submit_status") or ""))
-            if match:
-                family_corr.append(float(match.group(1)))
-        failures = sum(v >= 0.7 for v in family_corr)
-        if len(family_corr) >= 2 and failures / len(family_corr) >= 0.5:
-            ds = "+".join(sorted(x for x in focus_datasets if x)) or "unknown"
-            return "escape", (
-                f"focus dataset correlation wall {ds} "
-                f"{failures}/{len(family_corr)}")
+        focus_key = lineage_profile(focus_code)["dataset_key"]
+        if focus_key in quarantined:
+            st = (policy.get("dataset_stats") or {}).get(focus_key) or {}
+            return "escape", (f"focus exact-lineage quarantine {focus_key} "
+                              f"{int(st.get('prod_rejects') or 0)}/"
+                              f"{int(st.get('prod_observations') or 0)}")
 
-    corr_rejects = sum(
-        1 for r in rows
-        if "PROD_CORRELATION" in str(r.get("submit_status") or "").upper()
-    )
-    if rows and corr_rejects / len(rows) >= 0.35:
-        return "escape", f"PROD correlation wall {corr_rejects}/{len(rows)}"
+    # Actionable near passes receive most rounds.  A correlation wall in one
+    # lineage never flips the whole system into escape mode.
+    if int(policy.get("near_miss_count") or 0) > 0:
+        if int(round_num or 0) % 4 == 0:
+            return "escape", "scheduled 25% dataset/structure exploration"
+        return "exploit", "non-quarantined near-miss conversion"
 
     sharpes: list[float] = []
-    for row in rows[:40]:
+    for row in [r for r in rows if dataset_key(r) not in quarantined][:40]:
         try:
             sharpes.append(float((row.get("metrics") or {}).get("sharpe")))
         except (TypeError, ValueError):
@@ -153,9 +334,8 @@ def choose_search_mode(round_num: int, recent: Iterable[dict] | None = None,
         if new and old and max(new) <= max(old) + 0.02:
             return "escape", "12-candidate Sharpe plateau"
 
-    # Stable 70/30 background cadence.  Hypothesis rounds are scheduled separately.
-    if int(round_num or 0) % 10 in (2, 5, 8):
-        return "escape", "scheduled structural exploration"
+    if int(round_num or 0) % 4 == 0:
+        return "escape", "scheduled 25% dataset/structure exploration"
     return "exploit", "1–2 axis local refinement"
 
 
@@ -163,6 +343,7 @@ def concentration_filter(strategies: list[dict], *, min_keep: int = 8,
                          dataset_share: float = MAX_DATASET_SHARE,
                          expression_share: float = MAX_EXPRESSION_SHARE,
                          recent: Iterable[dict] | None = None,
+                         policy: dict | None = None,
                          ) -> tuple[list[dict], list[dict]]:
     """Maximize dataset coverage, then enforce dataset/expression concentration.
 
@@ -176,6 +357,11 @@ def concentration_filter(strategies: list[dict], *, min_keep: int = 8,
         return [], []
     cap_ds = max(1, math.floor(len(strategies) * float(dataset_share)))
     cap_expr = max(1, math.floor(len(strategies) * float(expression_share)))
+    quarantined = set((policy or {}).get("quarantined") or [])
+    # A normal round ultimately simulates roughly 8–12 candidates after all
+    # gates, regardless of the much larger pre-filter pool.  One probe keeps
+    # quarantine reversible while staying at about ten percent of real spend.
+    cap_quarantined = 1
     recent_count: Counter[str] = Counter()
     for row in recent or []:
         for dataset in dataset_tokens(
@@ -218,30 +404,42 @@ def concentration_filter(strategies: list[dict], *, min_keep: int = 8,
     ex_count: Counter[str] = Counter()
     kept: list[dict] = []
     dropped: list[dict] = []
+    quarantined_count = 0
     for _pos, strategy, datasets, ex in ordered:
         ds = (strategy.get("_v2_lineage") or {}).get("dataset_key", "")
         blocked_ds = [x for x in datasets if ds_count[x] >= cap_ds]
-        if blocked_ds or ex_count[ex] >= cap_expr:
+        blocked_quarantine = ds in quarantined and quarantined_count >= cap_quarantined
+        if blocked_ds or ex_count[ex] >= cap_expr or blocked_quarantine:
             strategy["_v2_drop_reason"] = (
-                f"concentration(dataset={'+'.join(blocked_ds) or ds}:"
+                f"{'quarantine' if blocked_quarantine else 'concentration'}("
+                f"dataset={'+'.join(blocked_ds) or ds}:"
                 f"{max((ds_count[x] for x in datasets), default=0)}/{cap_ds},"
                 f" expression={ex}:{ex_count[ex]}/{cap_expr})")
             dropped.append(strategy)
             continue
         kept.append(strategy)
+        if ds in quarantined:
+            quarantined_count += 1
         for dataset in datasets:
             ds_count[dataset] += 1
         ex_count[ex] += 1
     if len(kept) < min(min_keep, len(strategies)):
         need = min(min_keep, len(strategies)) - len(kept)
         dropped.sort(key=lambda s: (
+            (s.get("_v2_lineage") or {}).get("dataset_key", "") in quarantined,
             sum(recent_count[x] for x in
                 ((s.get("_v2_lineage") or {}).get("dataset_key", "").split("+") or [""])),
             sum(ds_count[x] for x in
                 ((s.get("_v2_lineage") or {}).get("dataset_key", "").split("+") or [""]))
             + ex_count[(s.get("_v2_lineage") or {}).get("expression_key", "")],
         ))
-        restored, dropped = dropped[:need], dropped[need:]
+        restorable = [s for s in dropped
+                      if (s.get("_v2_lineage") or {}).get("dataset_key", "") not in quarantined]
+        if len(restorable) < need:
+            restorable.extend(s for s in dropped if s not in restorable)
+        restored = restorable[:need]
+        restored_ids = {id(s) for s in restored}
+        dropped = [s for s in dropped if id(s) not in restored_ids]
         for s in restored:
             s.pop("_v2_drop_reason", None)
             kept.append(s)
