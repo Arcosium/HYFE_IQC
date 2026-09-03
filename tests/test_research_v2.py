@@ -173,21 +173,21 @@ def test_quarantined_exact_lineage_uses_at_most_ten_percent_of_round():
     assert sum(s['_v2_lineage']['dataset_key'] == 'risk70' for s in kept) <= 1
 
 
-def test_v2_quality_floor_ignores_warning_downgrade():
+def test_absolute_quality_observation_ignores_warning_downgrade():
     weak = {
         '_delay': '1', 'region': 'GLB',
         'sharpe': '1.05', 'fitness': '0.71',
         'glb_amer_sharpe': '0.97', 'glb_emea_sharpe': '-0.73',
         'glb_apac_sharpe': '0.47',
     }
-    assert research_v2.submit_quality_reasons(weak) == [
+    assert research_v2.absolute_quality_observations(weak) == [
         'LOW_SHARPE', 'LOW_FITNESS', 'LOW_GLB_AMER_SHARPE',
         'LOW_GLB_EMEA_SHARPE', 'LOW_GLB_APAC_SHARPE',
     ]
     strong = dict(weak, sharpe='1.8', fitness='1.1',
                   glb_amer_sharpe='1.1', glb_emea_sharpe='1.2',
                   glb_apac_sharpe='1.3')
-    assert research_v2.submit_quality_reasons(strong) == []
+    assert research_v2.absolute_quality_observations(strong) == []
 
 
 def test_v2_prunes_old_and_multi_phase_focus_debt():

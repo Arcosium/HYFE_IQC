@@ -104,15 +104,6 @@ ALPHAS_PER_ROUND = int(os.environ.get('IQC_ALPHAS_PER_ROUND', '14'))
 # 남의 식은 남들도 쓴다 — zscore(rsk70_..._anlystsn) 이 실제로 PROD_CORRELATION 으로
 # 거절당했고, 슬롯을 남의 식으로 채우면 그만큼 탐색이 좁아진다. 숨은 필드 발견이라는
 # 진짜 가치는 팔레트 알파벳 캡 수정이 이미 대신한다(GLB 가시 필드 10000 → 29343).
-# Power Pool self-correlation **예방적** 상한 — 기본 0 = 끔 (2026-07-27 사장 결정).
-# 배경: 형제 알파는 PP 적격 컷(self-corr<0.5)에 걸릴 위험이 있다. 하지만 **거절은
-#   일일 예산을 소모하지 않으므로 시도 자체는 공짜**고, 통과하면 제출 수가 늘어난다.
-#   그래서 미리 막지 않고 **일단 보낸다**. WQB 가 실제로 CORRELATION 으로 거절하면
-#   그때 _submit_gate 의 family_corr_wall 이 같은 필드셋 형제를 24h 잠근다
-#   (= 헛발질 반복은 막되, 첫 시도는 항상 해 본다).
-#   0 보다 큰 값을 넣으면 다시 예방적 차단이 켜진다.
-PP_SELFCORR_MAX = float(os.environ.get('IQC_PP_SELFCORR_MAX', '0'))
-
 # 프로덕션 상관 선독 컷(2026-08-13)은 2026-08-20 사장 지시로 제거 — 제출 시도는
 # 공짜인데 신뢰 불가 API 수치(경계값 0.7146 실측)로 문 앞에서 버리는 벽이었다.
 
@@ -453,44 +444,21 @@ class Worker(threading.Thread):
         WQB 컨설턴트의 제출 한도는 **하루 4건**이다("Max 4 alpha submissions in a day",
         Power Pool 문서).
 
-        **낼 수 있으면 낸다** (2026-07-28 사장 지시). 두 겹만 거른다:
-          0) 차단 FAIL: `criteria.is_blocking` FAIL 이 하나라도 있으면 **WQB 가 반드시
-             403 으로 거절**한다 — 보낼 이유가 없다
-          1) 예산: 오늘 성공 제출이 DAILY_SUBMIT_BUDGET 이상이면 대기 큐로
-        예전엔 여기에 품질 문턱(below_value)이 한 겹 더 있었다. 4칸을 아껴 뒀다가 더
-        좋은 알파에 쓰자는 것이었는데, 실측이 정반대였다 — 제출 실적 1·1·2·4·2 건으로
-        대개 4칸을 못 채우면서 같은 기간 330건을 문턱으로 걸렀다. 예산은 이월되지
-        않으니 아끼는 게 곧 버리는 것이었다.
-        0 은 끄지 않는다 — 거절이 확정된 요청은 어떤 설정에서도 낭비다.
+        **시뮬레이션 ID가 생겼으면 WQB에 먼저 제출해 본다** (2026-09-03 재확인).
+        LOW_SHARPE 같은 IS FAIL, v2 품질 하한, 자체상관 예측으로 미리 막지 않는다.
+        거절 요청은 성공 제출 한도를 쓰지 않고, 403 응답이 실제 실패 원인과 PROD
+        correlation을 주므로 그 결과를 다음 변이와 계보 정책의 학습 자료로 쓴다.
 
-        ⚠ 0 이 없어서 2026-07-22 라이브에서 FAIL 5개짜리 알파를 계속 제출해
-        `rejected:LOW_SHARPE; LOW_FITNESS; HIGH_TURNOVER (http_403)` 를 반복했다.
+        로컬에서 남기는 것은 운영상 반드시 필요한 문뿐이다: 사용자가 고른 목록 모드,
+        명시한 탐색 범위, 제출 보류 시간, 이미 성공한 계보의 중복, 실제 성공 제출 4건
+        한도. 이들은 WQB 합격 여부를 예측하는 품질 게이트가 아니다.
         """
         # fail_items 는 harvest 의 dict({'name':…}) 리스트일 수도, 저장된 이름
         # 문자열 리스트일 수도 있다 — 둘 다 받는다.
         names = [str((f.get('name') if isinstance(f, dict) else f) or '').strip()
                  for f in (fail_items or [])]
-        # REGULAR_SUBMISSION 은 알파 결함이 아니라 "오늘 쿼터 다 씀" 신호다 — 아래
-        # 예산 분기가 대기 큐로 보내야 한다. 여기서 막으면 익일 재시도 안전망이 통째로
-        # 우회된다 (2026-08-13 실측: NY 8/12 14:37 이후 이 FAIL 단독 알파 27건이
-        # 큐에 하나도 안 들어가고 그대로 버려졌다 — S 2.29 두 건 포함).
-        blocking = [n for n in names
-                    if n and n != 'REGULAR_SUBMISSION' and _criteria.is_blocking(n)]
-        if blocking:
-            # 전부 적는다 — 앞 3개만 적던 동안 "7 FAIL" 이라 세어 놓고 사유엔 3개만 떠서
-            # 나머지 4개가 없는 것처럼 보였다 (2026-07-30 사장 지적).
-            return False, f'blocking_fail({",".join(blocking)})'
-        if run_config.is_architecture_v2_enabled():
-            try:
-                from . import research_v2 as _v2_policy
-                quality_misses = _v2_policy.submit_quality_reasons(metrics)
-                if quality_misses:
-                    return False, f'v2_quality_floor({",".join(quality_misses)})'
-            except Exception as e:
-                # A quality-gate implementation error must not silently relax
-                # the v2 policy and spend a scarce submission slot.
-                LOG.warning('v2 quality floor failed closed: %s', e)
-                return False, 'v2_quality_floor(error)'
+        # fail_items는 제출 전 차단값이 아니라 WQB 응답과 비교할 관측값이다.
+        # REGULAR_SUBMISSION만 아래 실제 일일 한도 처리에 사용한다.
         active_constraint = getattr(self, '_active_constraint', None)
         # 🔭 필수 체크는 **제출을 막지 않는다** (2026-08-17 사장 승인).
         #    원래는 미달 피라미드 칸일 때만 면제했는데(2026-08-13), 그 예외를 상시로
@@ -515,8 +483,7 @@ class Worker(threading.Thread):
         #   "같은 식이 이미 …  — 재제출 무의미"가 화면에 다시 뜨고, 그건 이미 시뮬을
         #   태운 뒤라 아무것도 아끼지 못한 채 제출 기회만 버리는 자리다.
         # 📋 제출 모드 = 'list' — 자동 제출하지 않고 대기 목록에만 쌓는다(사용자 선택).
-        #    차단 FAIL 검사 **뒤**에 둔다: WQB 가 어차피 거절할 알파로 목록을 채우면
-        #    사람이 골라야 할 것이 묻힌다. kind='manual' 은 큐 드레인이 건드리지 않는다.
+        # kind='manual' 은 큐 드레인이 건드리지 않는다.
         try:
             if _db.get_submit_mode(self.user_id) == 'list':
                 wid = str((metrics or {}).get('wqb_alpha_id') or '')
@@ -569,16 +536,8 @@ class Worker(threading.Thread):
             import datetime as _dtm
             _hh = _dtm.datetime.fromtimestamp(_hold).strftime('%H:%M')
             return False, f'submit_hold(~{_hh})→queued'
-        # Power Pool 상관 컷 — 테마에 매칭된 알파만 대상(일반 제출은 0.7 컷이 따로 있다).
-        # 형제 알파 줄세우기를 막아 상관 풀 오염과 예산 낭비를 동시에 방지한다.
-        if PP_SELFCORR_MAX > 0 and str((metrics or {}).get('themes') or '').strip():
-            _sc = self_corr if self_corr is not None else (metrics or {}).get('self_correlation')
-            try:
-                _scv = float(str(_sc)) if _sc not in (None, '') else None
-            except (TypeError, ValueError):
-                _scv = None
-            if _scv is not None and _scv > PP_SELFCORR_MAX:
-                return False, f'pp_selfcorr({_scv:.2f}>{PP_SELFCORR_MAX:.2f})'
+        # Power Pool 자체상관도 로컬 예측으로 막지 않는다. 경계값이 흔들리는 선독값보다
+        # 실제 submit 응답을 진실로 삼고, 거절이면 그때 계보 학습에 넣는다.
         if DAILY_SUBMIT_BUDGET <= 0:
             return True, ''
         try:
@@ -1177,6 +1136,7 @@ class Worker(threading.Thread):
                      'search': 'lineage-aware exploit/escape',
                      'allocation': {'near_miss': 0.45, 'exploration': 0.30,
                                     'correlation_escape': 0.15, 'hypothesis': 0.10},
+                     'submit_policy': 'probe_first_wqb_ground_truth',
                      'post_submit_observation_s': 900.0})
                 self._v2_policy_registered = True
                 self._log(0, f'🧬 GenomicWQB 2.1 정책 활성화 — {_v2_policy.POLICY_VERSION}')

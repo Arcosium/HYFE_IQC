@@ -42,16 +42,16 @@ def test_list_mode_queues_instead_of_submitting(fresh_db, monkeypatch):
     assert [r['wqb_alpha_id'] for r in rows] == ['ABC12345']
 
 
-def test_list_mode_does_not_queue_alphas_wqb_would_reject(fresh_db):
-    """차단 FAIL 이 있으면 목록에도 안 넣는다 — 사람이 고를 것이 묻힌다."""
+def test_list_mode_keeps_fail_items_for_manual_ground_truth(fresh_db):
+    """목록 모드에서는 IS FAIL도 숨기지 않고 사용자가 제출 여부를 결정한다."""
     db.set_submit_mode(fresh_db, 'list')
     wk = w.Worker.__new__(w.Worker)
     wk.user_id = fresh_db
     wk._corr_fs_hold = set()
     ok, reason = wk._submit_gate({'wqb_alpha_id': 'BAD00001'}, None,
                                  fail_items=[{'name': 'LOW_SHARPE'}])
-    assert ok is False and reason.startswith('blocking_fail')
-    assert db.submit_queue_list(fresh_db) == []
+    assert ok is False and reason == 'submit_mode=list→queued'
+    assert [r['wqb_alpha_id'] for r in db.submit_queue_list(fresh_db)] == ['BAD00001']
 
 
 def test_manual_queue_is_not_auto_drained(fresh_db, monkeypatch):

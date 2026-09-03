@@ -48,12 +48,12 @@ def test_wqb_counter_wins_over_our_stale_count(gate, monkeypatch):
     assert [r['wqb_alpha_id'] for r in db.submit_queue_list(uid)] == ['QUOTA2']
 
 
-def test_real_blocking_fail_still_discards(gate, monkeypatch):
-    """진짜 결함은 그대로 앞문에서 막는다 — 큐에 쌓이면 사람이 볼 것이 묻힌다."""
+def test_real_fail_is_submitted_until_wqb_reports_quota(gate, monkeypatch):
+    """PROD 실패 예측도 막지 않되 WQB의 실제 쿼터 신호는 따른다."""
     uid, wk = gate
     monkeypatch.setattr(db, 'submitted_today', lambda *a, **k: 0)
     ok, reason = wk._submit_gate({'wqb_alpha_id': 'BAD1'}, None,
                                  fail_items=['PROD_CORRELATION', 'REGULAR_SUBMISSION'])
     assert ok is False
-    assert reason == 'blocking_fail(PROD_CORRELATION)'
-    assert db.submit_queue_list(uid) == []
+    assert reason.startswith('daily_budget')
+    assert [r['wqb_alpha_id'] for r in db.submit_queue_list(uid)] == ['BAD1']

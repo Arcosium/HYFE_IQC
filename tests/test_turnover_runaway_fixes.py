@@ -88,19 +88,18 @@ class _Gate:
         return self._gate(metrics, self_corr, fail_items=fail_items)
 
 
-def test_submit_gate_blocks_on_blocking_fail():
-    """라이브에서 이 검사가 없어 `rejected:… (http_403)` 를 반복했다."""
+def test_submit_gate_sends_blocking_fail_for_ground_truth():
+    """거절은 쿼터를 쓰지 않으므로 WQB 응답을 직접 학습한다."""
     gate = _Gate()
     ok, reason = gate({'sharpe': '1.11'},
                       fail_items=[{'name': 'LOW_SHARPE'}, {'name': 'HIGH_TURNOVER'}])
-    assert ok is False
-    assert 'blocking_fail' in reason and 'LOW_SHARPE' in reason
+    assert ok is True and reason == ''
 
 
 def test_submit_gate_accepts_plain_string_fail_items():
     gate = _Gate()
     ok, reason = gate({}, fail_items=['HIGH_TURNOVER'])
-    assert ok is False and 'HIGH_TURNOVER' in reason
+    assert ok is True and reason == ''
 
 
 def test_submit_gate_ignores_non_blocking_checks():

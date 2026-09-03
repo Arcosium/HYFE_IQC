@@ -23,6 +23,7 @@ def wk(tmp_path, monkeypatch):
     obj._stop_event = threading.Event()
     obj._lock = threading.Lock()
     obj._corr_fs_hold = set()
+    monkeypatch.setattr(w.run_config, 'is_architecture_v2_enabled', lambda: True)
     yield obj
     db._INITIALIZED = False
 
@@ -38,12 +39,19 @@ def test_weak_but_submittable_alpha_is_submitted(wk):
     assert 'below_value' not in reason
 
 
-def test_blocking_fail_is_still_refused(wk):
-    """0번 겹은 남는다 — WQB 가 반드시 403 낼 요청은 보낼 이유가 없다."""
+def test_blocking_fail_is_sent_to_wqb_for_ground_truth(wk):
+    """IS FAIL도 로컬에서 예측 차단하지 않고 실제 submit 응답을 받는다."""
     ok, reason = wk._submit_gate(
         {'sharpe': '0.1', 'turnover': '0.9', 'wqb_alpha_id': 'BAD1'}, None,
         fail_items=['HIGH_TURNOVER'])
-    assert ok is False and 'blocking_fail' in reason
+    assert ok is True and reason == ''
+
+
+def test_v2_quality_floor_is_observation_only_not_submit_gate(wk):
+    ok, reason = wk._submit_gate(
+        {'sharpe': '1.2', 'fitness': '0.5', 'wqb_alpha_id': 'WEAK2'}, None,
+        fail_items=[])
+    assert ok is True and reason == ''
 
 
 def test_budget_exhausted_goes_to_the_waiting_queue(wk):

@@ -20,7 +20,7 @@ from . import alpha_ast
 from . import settings_fp
 
 
-POLICY_VERSION = "genomicwqb-2.1.0"
+POLICY_VERSION = "genomicwqb-2.1.1"
 MAX_DATASET_SHARE = 0.25
 MAX_EXPRESSION_SHARE = 0.30
 MAX_QUARANTINED_SHARE = 0.10
@@ -212,6 +212,7 @@ def policy_log_config(policy: dict | None) -> dict[str, Any]:
         "quarantined": list(policy.get("quarantined") or []),
         "near_miss_keys": list(policy.get("near_miss_keys") or []),
         "allocation": dict(policy.get("allocation") or {}),
+        "submit_policy": "probe_first_wqb_ground_truth",
         "post_submit_observation_s": 900.0,
     }
 
@@ -446,15 +447,14 @@ def concentration_filter(strategies: list[dict], *, min_keep: int = 8,
     return kept, dropped
 
 
-def submit_quality_reasons(metrics: dict | None) -> list[str]:
-    """Return v2 absolute-quality misses even when WQB labels them WARNING.
+def absolute_quality_observations(metrics: dict | None) -> list[str]:
+    """Return absolute-quality misses for ranking and diagnosis only.
 
     Consultant/HT classifications can temporarily downgrade the standard
-    Sharpe and Fitness checks to warnings.  Architecture v2 optimizes the
-    quality of a scarce daily submission, so a warning is not enough to waive
-    the documented D0/D1 floor.  GLB candidates also have to clear each
-    reported regional Sharpe floor; missing metrics are left to WQB rather
-    than guessed.
+    Sharpe and Fitness checks to warnings.  This signal helps choose seeds and
+    mutation axes, but must never prevent a real submit probe: rejection is
+    free and the WQB response is the ground truth.  Missing metrics are left
+    unknown rather than guessed.
     """
     from . import criteria
 

@@ -40,8 +40,8 @@ def test_submit_gate_has_no_same_code_guard_at_all(gate, monkeypatch):
     assert 'already_' not in (why or '')
 
 
-def test_blocking_fail_still_blocks(gate):
-    """WQB 가 반드시 403 을 줄 알파는 그대로 막는다 — 이건 아낀 게 아니라 낭비 방지."""
+def test_fail_item_is_submitted_for_actual_rejection_reason(gate):
+    """로컬 FAIL 예측보다 실제 WQB submit 응답을 우선한다."""
     ok, why = gate._submit_gate({'wqb_alpha_id': 'X1'},
                                 fail_items=[{'name': 'PROD_CORRELATION'}], code=CODE)
-    assert not ok and 'blocking_fail' in why
+    assert ok and why == ''

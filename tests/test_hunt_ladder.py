@@ -96,8 +96,8 @@ def test_ladder_skips_correlation_rejected_fieldset(tmp_path, monkeypatch):
     db._INITIALIZED = False
 
 
-def test_pp_selfcorr_gate_off_by_default_but_configurable(tmp_path, monkeypatch):
-    """기본은 **예방적 차단 없음**(일단 시도) — 켜면 상한대로 막는다 (사장 결정)."""
+def test_pp_selfcorr_never_prevents_actual_submit_probe(tmp_path, monkeypatch):
+    """설정값이 남아 있어도 선독 상관 대신 실제 submit 응답을 쓴다."""
     from server import db, worker as w
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'pp.db'))
     db._INITIALIZED = False
@@ -108,14 +108,12 @@ def test_pp_selfcorr_gate_off_by_default_but_configurable(tmp_path, monkeypatch)
     wk.user_id = uid
     wk._corr_fs_hold = set()
     m = {'sharpe': '1.2', 'fitness': '0.3', 'themes': 'GLB High Turnover Theme'}
-    # 기본값(0=끔): 상관이 높아도 예방적으로 막지 않는다 — 거절은 예산 미소모
-    assert w.PP_SELFCORR_MAX == 0
+    # 상관이 높아도 예방적으로 막지 않는다 — 거절은 예산 미소모
     _, reason0 = wk._submit_gate(m, 0.62, fail_items=[])
     assert not reason0.startswith('pp_selfcorr')
-    # 켜면 상한대로 차단
-    monkeypatch.setattr(w, 'PP_SELFCORR_MAX', 0.5)
+    # 별도 예방 설정 없이 언제나 실제 submit 응답을 우선한다.
     ok, reason = wk._submit_gate(m, 0.62, fail_items=[])
-    assert ok is False and reason.startswith('pp_selfcorr')
+    assert ok is True and not reason.startswith('pp_selfcorr')
     # 상관이 낮으면 이 게이트는 막지 않는다 (다른 게이트 판단은 이 테스트 밖)
     _, reason2 = wk._submit_gate(m, 0.31, fail_items=[])
     assert not reason2.startswith('pp_selfcorr')
